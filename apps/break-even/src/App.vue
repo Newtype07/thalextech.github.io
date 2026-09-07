@@ -11,10 +11,19 @@ import {
 import BreakEvenChart from "./components/BreakEvenChart.vue";
 import {
   calcGreeks,
-  fetchIndexHistory,
-  fetchInstruments,
+  fetchIndexHistory as fetchIndexHistoryRaw,
+  fetchInstruments as fetchInstrumentsRaw,
   fetchMarkHistory,
 } from "../../../lib/thalex.js";
+
+import { createHistoryRequester } from "./lib/historyRequests.js";
+
+const requestHistory = createHistoryRequester();
+const fetchIndexHistory = (params) => {
+  const requestId = loadRequestId;
+  return requestHistory(() => fetchIndexHistoryRaw({ ...params, requestOptions: { maxRetries: 0, timeoutMs: 45000 } }), { isCanceled: () => requestId !== loadRequestId, cacheKey: JSON.stringify(["index", params]) });
+};
+const fetchInstruments = () => requestHistory(() => fetchInstrumentsRaw());
 
 const RESOLUTION_CONFIG = {
   900: { label: "15m", resolution: "15m", interval_seconds: 15 * 60 },
@@ -24,18 +33,7 @@ const DEFAULT_LOOKBACK_POINT_LIMIT = 360;
 const MIN_LOOKBACK_POINT_LIMIT = 120;
 const MAX_LOOKBACK_POINT_LIMIT = 1440;
 const SECONDS_PER_DAY = 24 * 60 * 60;
-const MARK_FETCH_CONCURRENCY = 4;
-const MARK_REQUEST_BURST_LIMIT = 5;
-const MARK_REQUEST_SUSTAINED_PER_SECOND = 4;
-const MARK_REQUEST_SCHEDULER_POLL_MS = 50;
-const MARK_REQUEST_MAX_RETRIES = 4;
-const MARK_REQUEST_RETRY_BASE_MS = 800;
-const MARK_REQUEST_RETRY_MAX_MS = 8_000;
-const MARK_REQUEST_TIMEOUT_MS = 45_000;
 const MARK_HISTORY_REQUEST_POINT_LIMIT = 360;
-const MARK_RATE_LIMIT_COOLDOWN_BASE_MS = 1_500;
-const MARK_RATE_LIMIT_COOLDOWN_MAX_MS = 15_000;
-const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const MAX_ABS_DELTA = 0.55;
 const STRIKE_MIN_INDEX_MULTIPLIER = 0.8;
 const STRIKE_MAX_INDEX_MULTIPLIER = 1.2;
@@ -601,133 +599,6 @@ const breakEvenSubtitle = computed(() => {
 
 const canSavePng = computed(() => breakEvenTracks.value.length > 0);
 
-const sleep = (ms) =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-
-const isRetryableRequestError = (error) => {
-  if (!error) return false;
-  if (RETRYABLE_STATUS.has(Number(error?.status))) return true;
-  if (error?.name === "AbortError") return true;
-  return error instanceof TypeError;
-};
-
-// Thalex returns 429 without CORS headers, so the browser surfaces it as a
-// TypeError (net::ERR_FAILED). Treat both as rate-limit signals.
-const looksLikeRateLimit = (error) => {
-  if (!error) return false;
-  if (Number(error?.status) === 429) return true;
-  return error instanceof TypeError;
-};
-
-const computeBackoffMs = (attempt, baseMs, maxMs) => {
-  const exp = Math.min(maxMs, baseMs * 2 ** attempt);
-  return exp + Math.random() * 250;
-};
-
-async function fetchWithRetries(
-  fetcher,
-  { maxRetries = MARK_REQUEST_MAX_RETRIES, isCanceled = null } = {},
-) {
-  let lastError = null;
-  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-    if (isCanceled?.()) {
-      const canceledError = new Error("Request canceled");
-      canceledError.canceled = true;
-      throw canceledError;
-    }
-    try {
-      return await fetcher();
-    } catch (error) {
-      lastError = error;
-      const canRetry =
-        attempt < maxRetries &&
-        isRetryableRequestError(error) &&
-        !isCanceled?.();
-      if (!canRetry) throw error;
-      await sleep(
-        computeBackoffMs(attempt, MARK_REQUEST_RETRY_BASE_MS, MARK_REQUEST_RETRY_MAX_MS),
-      );
-    }
-  }
-  throw lastError || new Error("Request failed");
-}
-
-function createMarkRequestScheduler({
-  burstLimit = MARK_REQUEST_BURST_LIMIT,
-  sustainedPerSecond = MARK_REQUEST_SUSTAINED_PER_SECOND,
-  isCanceled = null,
-} = {}) {
-  let startedAtMs = null;
-  let launchedCount = 0;
-  let pendingReservation = Promise.resolve();
-  // Shared cooldown: once any request hits a rate limit, every worker pauses
-  // until this timestamp before issuing the next request.
-  let cooldownUntilMs = 0;
-  let consecutiveRateLimits = 0;
-
-  const reserveSlot = async () => {
-    if (!Number.isFinite(startedAtMs)) {
-      startedAtMs = Date.now();
-    }
-
-    while (true) {
-      if (isCanceled?.()) {
-        const canceledError = new Error("Request canceled");
-        canceledError.canceled = true;
-        throw canceledError;
-      }
-
-      const now = Date.now();
-      if (now < cooldownUntilMs) {
-        const remaining = cooldownUntilMs - now;
-        await sleep(Math.min(remaining, MARK_REQUEST_SCHEDULER_POLL_MS));
-        continue;
-      }
-
-      if (launchedCount < burstLimit) {
-        launchedCount += 1;
-        return;
-      }
-
-      const sustainedRequestNumber = launchedCount - burstLimit + 1;
-      const earliestLaunchMs =
-        startedAtMs +
-        Math.ceil((sustainedRequestNumber * 1000) / sustainedPerSecond);
-      const delayMs = earliestLaunchMs - Date.now();
-
-      if (delayMs <= 0) {
-        launchedCount += 1;
-        return;
-      }
-
-      await sleep(Math.min(delayMs, MARK_REQUEST_SCHEDULER_POLL_MS));
-    }
-  };
-
-  return {
-    async acquire() {
-      const reservation = pendingReservation.then(() => reserveSlot());
-      pendingReservation = reservation.catch(() => {});
-      return reservation;
-    },
-    noteRateLimit() {
-      consecutiveRateLimits += 1;
-      const backoff = computeBackoffMs(
-        consecutiveRateLimits - 1,
-        MARK_RATE_LIMIT_COOLDOWN_BASE_MS,
-        MARK_RATE_LIMIT_COOLDOWN_MAX_MS,
-      );
-      const until = Date.now() + backoff;
-      if (until > cooldownUntilMs) cooldownUntilMs = until;
-    },
-    noteSuccess() {
-      consecutiveRateLimits = 0;
-    },
-  };
-}
-
 async function fetchMarkHistoriesByInstrument({
   instruments,
   resolution,
@@ -742,15 +613,11 @@ async function fetchMarkHistoriesByInstrument({
   );
 
   if (!queue.length) {
-    return { rowsByInstrument: {}, rateLimitedCount: 0 };
+    return { rowsByInstrument: {} };
   }
 
   const rowsByInstrument = {};
-  let rateLimitedCount = 0;
   let cursor = 0;
-  const requestScheduler = createMarkRequestScheduler({
-    isCanceled: () => requestId !== loadRequestId,
-  });
   const chunkSpanSeconds =
     Math.max(1, MARK_HISTORY_REQUEST_POINT_LIMIT - 1) *
     Math.max(1, Math.floor(Number(intervalSeconds) || 1));
@@ -772,29 +639,19 @@ async function fetchMarkHistoriesByInstrument({
     const mergedRows = [];
 
     for (const [chunkFrom, chunkTo] of ranges) {
-      const fetchedRows = await fetchWithRetries(
-        async () => {
-          await requestScheduler.acquire();
-          try {
-            const result = await fetchMarkHistory({
-              instrument_name: instrumentName,
-              resolution,
-              from: chunkFrom,
-              to: chunkTo,
-              count: MARK_HISTORY_REQUEST_POINT_LIMIT,
-              requestOptions: {
-                timeoutMs: MARK_REQUEST_TIMEOUT_MS,
-                maxRetries: 0,
-              },
-            });
-            requestScheduler.noteSuccess();
-            return result;
-          } catch (error) {
-            if (looksLikeRateLimit(error)) requestScheduler.noteRateLimit();
-            throw error;
-          }
+      const fetchedRows = await requestHistory(
+        () => fetchMarkHistory({
+          instrument_name: instrumentName,
+          resolution,
+          from: chunkFrom,
+          to: chunkTo,
+          count: MARK_HISTORY_REQUEST_POINT_LIMIT,
+          requestOptions: { timeoutMs: 45000, maxRetries: 0 },
+        }),
+        {
+          isCanceled: () => requestId !== loadRequestId,
+          cacheKey: JSON.stringify(["mark", instrumentName, resolution, chunkFrom, chunkTo]),
         },
-        { isCanceled: () => requestId !== loadRequestId },
       );
 
       if (requestId !== loadRequestId) return [];
@@ -828,10 +685,7 @@ async function fetchMarkHistoriesByInstrument({
         if (requestId !== loadRequestId) return;
       } catch (error) {
         if (requestId !== loadRequestId) return;
-        if (looksLikeRateLimit(error)) {
-          rateLimitedCount += 1;
-        }
-        rows = [];
+        throw new Error(`Incomplete data: failed to load ${instrumentName}: ${error.message}`, { cause: error });
       }
 
       rowsByInstrument[instrumentName] = rows;
@@ -843,9 +697,8 @@ async function fetchMarkHistoriesByInstrument({
     }
   };
 
-  const workerCount = Math.min(MARK_FETCH_CONCURRENCY, queue.length);
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return { rowsByInstrument, rateLimitedCount };
+  await worker();
+  return { rowsByInstrument };
 }
 
 async function load() {
@@ -890,7 +743,7 @@ async function load() {
     data.index[ui.resolutionKey] = normalizedIndexRows;
     data.markByInstrument = {};
 
-    const { rowsByInstrument, rateLimitedCount } =
+    const { rowsByInstrument } =
       await fetchMarkHistoriesByInstrument({
         instruments: boundedMaturityInstruments,
         resolution,
@@ -901,23 +754,19 @@ async function load() {
         from,
         to,
         requestId,
-      onInstrumentRows: (rows, { instrumentName }) => {
-        if (requestId !== loadRequestId) return;
-        data.markByInstrument[instrumentName] = rows;
-      },
-    });
+        onInstrumentRows: (rows, { instrumentName }) => {
+          if (requestId !== loadRequestId) return;
+          data.markByInstrument[instrumentName] = rows;
+        },
+      });
 
     if (requestId !== loadRequestId) return;
 
     data.markByInstrument = rowsByInstrument || {};
-    if (rateLimitedCount > 0) {
-      ui.error = `Rate limited by Thalex (429) on ${rateLimitedCount} instrument request(s). Data streamed partially; try again in a moment for full coverage.`;
-    }
+
   } catch (error) {
     if (requestId !== loadRequestId) return;
     ui.error = error instanceof Error ? error.message : String(error);
-    data.index = {};
-    data.markByInstrument = {};
   } finally {
     if (requestId === loadRequestId) {
       ui.loading = false;
@@ -968,6 +817,7 @@ const pickDefaultMaturity = () => {
 const switchUnderlying = async (next) => {
   if (next === underlying.value) return;
   if (!UNDERLYING_OPTIONS.some((opt) => opt.value === next)) return;
+  loadRequestId += 1;
   underlying.value = next;
   data.index = {};
   data.markByInstrument = {};
@@ -992,6 +842,8 @@ const switchUnderlying = async (next) => {
       rows: Array.isArray(prefetchedIndex) ? prefetchedIndex : [],
     };
     ui.optionMaturity = pickDefaultMaturity();
+  } catch (error) {
+    ui.error = `Unable to load complete data: ${error.message}`;
   } finally {
     isInitializing.value = false;
     if (ui.optionMaturity) {
@@ -1032,6 +884,8 @@ onMounted(async () => {
     };
 
     ui.optionMaturity = pickDefaultMaturity();
+  } catch (error) {
+    ui.error = `Unable to load complete data: ${error.message}`;
   } finally {
     isInitializing.value = false;
     if (ui.optionMaturity) {
@@ -1041,6 +895,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  loadRequestId += 1;
   document.removeEventListener("pointerdown", handleDocumentPointerDown);
   if (nowTimer) {
     window.clearInterval(nowTimer);
@@ -1133,12 +988,13 @@ watch(
           class="saveButton"
           type="button"
           @click="handleSavePng"
-          :disabled="ui.loading || !canSavePng"
+          :disabled="ui.loading || !!ui.error || !canSavePng"
         >
           Save PNG
         </button>
       </div>
 
+      <div v-if="ui.loading" role="status">Loading complete history; temporary failures will be retried automatically.</div>
       <div v-if="ui.error" class="error">{{ ui.error }}</div>
     </header>
 
