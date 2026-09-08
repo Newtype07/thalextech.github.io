@@ -8,6 +8,7 @@ import {
   ref,
   watch,
 } from "vue";
+import StyledSelectMenu from "./components/StyledSelectMenu.vue";
 import OptionPnlChart from "./components/OptionPnlChart.vue";
 import StraddleBreakEvenChart from "./components/StraddleBreakEvenChart.vue";
 import {
@@ -853,47 +854,32 @@ watch(
         </div>
         <div class="field">
           <label for="option-maturity">Maturity</label>
-          <select id="option-maturity" v-model="ui.optionMaturity">
-            <option
-              v-for="maturity in optionMaturities"
-              :key="maturity.value"
-              :value="maturity.value"
-            >
-              {{ maturity.label }}
-            </option>
-            <option v-if="!optionMaturities.length" :value="ui.optionMaturity">
-              {{ ui.optionMaturity }}
-            </option>
-          </select>
+          <StyledSelectMenu
+            id="option-maturity"
+            v-model="ui.optionMaturity"
+            label="Maturity"
+            :options="optionMaturities"
+          />
         </div>
 
         <div class="field">
           <label for="option-strike">Strike</label>
-          <select id="option-strike" v-model="ui.optionStrike">
-            <option
-              v-for="strike in optionStrikes"
-              :key="strike.value"
-              :value="strike.value"
-            >
-              {{ strike.label }}
-            </option>
-            <option v-if="!optionStrikes.length" :value="ui.optionStrike">
-              {{ ui.optionStrike }}
-            </option>
-          </select>
+          <StyledSelectMenu
+            id="option-strike"
+            v-model="ui.optionStrike"
+            label="Strike"
+            :options="optionStrikes"
+          />
         </div>
 
         <div class="field">
           <label for="resolution">Resolution</label>
-          <select id="resolution" v-model="ui.resolutionKey">
-            <option
-              v-for="key in Object.keys(RESOLUTION_CONFIG)"
-              :key="key"
-              :value="key"
-            >
-              {{ RESOLUTION_CONFIG[key].label }}
-            </option>
-          </select>
+          <StyledSelectMenu
+            id="resolution"
+            v-model="ui.resolutionKey"
+            label="Resolution"
+            :options="Object.entries(RESOLUTION_CONFIG).map(([value, config]) => ({ value, label: config.label }))"
+          />
         </div>
 
         <div class="modeToggle" role="group" aria-label="Chart mode">
@@ -1090,24 +1076,6 @@ watch(
 .field label {
   color: var(--color-text-muted);
   font-size: 12px;
-}
-
-.field select {
-  min-width: 0;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--color-text);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  color-scheme: dark;
-}
-
-.field select option {
-  background: var(--color-bg);
-  color: var(--color-text);
 }
 
 .chartPanel {
