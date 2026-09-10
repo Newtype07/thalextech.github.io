@@ -174,7 +174,11 @@ export const buildFairValueCycleState = (cycle) => {
     return total + leg.quantity * delta;
   }, 0);
 
-  const actualDynamicPnl = Number(cycle.cyclePnlUsd) || 0;
+  // This benchmark is conditional on each call entry. Uncovered holding gaps
+  // belong to portfolio accounting, not this option-period simulation.
+  const actualDynamicPnl = Number.isFinite(cycle.holdingStartTs)
+    ? Number(cycle.shortOptionPnlUsd) + cycle.underlyingQuantity * (exitSpot - entrySpot)
+    : Number(cycle.cyclePnlUsd) || 0;
   const actualUnhedgedPnl = Number.isFinite(Number(cycle.shortOptionPnlUsd))
     ? Number(cycle.shortOptionPnlUsd)
     : actualDynamicPnl - (Number(cycle.hedgePnlUsd) || 0);

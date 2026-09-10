@@ -54,6 +54,7 @@ const displayedGroups = computed(() => {
   ];
 });
 const hedgeModeLabel = computed(() => {
+  if (props.rows.some(row => row.structure === "covered_call")) return "Covered call during call periods only; excludes uncovered holding gaps";
   const mode = modeResult.value?.hedgeMode
     || modeResult.value?.defaultHedgeMode
     || (props.hedgeEnabled ? "dynamic" : "unhedged");

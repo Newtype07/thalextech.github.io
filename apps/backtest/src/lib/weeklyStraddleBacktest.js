@@ -5,6 +5,7 @@ import {
   PRECOMPUTED_DELTA_SCALE,
 } from "./optionRisk.js";
 import { advanceHedgePosition, buildDecisionTimes } from "./hedgeLifecycle.js";
+import { assignCoveredCallHolding, extendCoveredCallDetail } from "./coveredCallHolding.js";
 import { mean, sampleStdDev } from "./statistics.js";
 
 /** Enter at the configured hour on every weekday (daily roll). */
@@ -33,6 +34,7 @@ export const DEFAULT_BACKTEST_CONFIG = {
   btcQuantity: 1,
   structure: "straddle",
   targetDelta: 0.25,
+  wingDelta: 0.1,
   includeGreekAttribution: false,
 };
 
@@ -101,9 +103,18 @@ export const normalizeBacktestConfig = (input = {}) => {
     0,
     Number(config.btcQuantity) || DEFAULT_BACKTEST_CONFIG.btcQuantity,
   );
+  if (config.structure === "covered_call") {
+    config.sizingMode = "btc";
+    config.btcQuantity = 1;
+  }
   config.targetDelta = Math.abs(
     Number(config.targetDelta) || DEFAULT_BACKTEST_CONFIG.targetDelta,
   );
+  config.wingDelta = Math.abs(Number(config.wingDelta));
+  if (["call_spread", "put_spread"].includes(config.structure)
+    && !(config.wingDelta > 0 && config.wingDelta < config.targetDelta && config.targetDelta <= 0.5)) {
+    throw new RangeError("Spread deltas must satisfy 0 < wing delta < near delta <= 0.5");
+  }
   config.includeGreekAttribution = config.includeGreekAttribution === true;
   return config;
 };
@@ -273,7 +284,37 @@ const quantityForSpot = (config, spot) =>
     ? Math.max(0, Number(config.btcQuantity) || 1)
     : config.notionalUsd / spot;
 
+// Select the pair together so a sparse chain cannot collapse both targets onto
+// one strike. Tie-break by strikes to keep selection independent of quote order.
+const selectVerticalLegs = ({ group, entryIndexPrice, config }) => {
+  const isCall = config.structure === "call_spread";
+  const rows = (isCall ? group.calls : [...group.putsByStrike.values()])
+    .filter(row => Number.isFinite(row.delta)
+      && (isCall ? row.strike >= entryIndexPrice : row.strike <= entryIndexPrice))
+    .sort((a, b) => a.strike - b.strike);
+  let selected = null;
+  for (const near of rows) {
+    for (const wing of rows) {
+      if (!(isCall ? wing.strike > near.strike : wing.strike < near.strike)) continue;
+      const metric = Math.abs(Math.abs(near.delta) - config.targetDelta)
+        + Math.abs(Math.abs(wing.delta) - config.wingDelta);
+      if (!selected || metric < selected.selectionMetric) {
+        const quantity = quantityForSpot(config, entryIndexPrice);
+        selected = {
+          legs: [{ quote: near, quantity: -quantity }, { quote: wing, quantity }],
+          sizingStrike: near.strike,
+          selectionMetric: metric,
+        };
+      }
+    }
+  }
+  return selected;
+};
+
 const selectLegs = ({ group, entryIndexPrice, config }) => {
+  if (["call_spread", "put_spread"].includes(config.structure)) {
+    return selectVerticalLegs({ group, entryIndexPrice, config });
+  }
   if (config.structure === "straddle") {
     let selected = null;
     for (const call of group.calls) {
@@ -548,6 +589,7 @@ const buildEntryPlan = ({
         underlyingQuantity: config.structure === "covered_call" ? -legs[0].quantity : 0,
         longOption: config.longOption,
         targetDelta: config.targetDelta,
+        wingDelta: config.wingDelta,
         entryTime,
         entryTs: entry.entryTs,
         expiration,
@@ -581,7 +623,14 @@ const buildEntryPlan = ({
   }));
 };
 
-export const buildCycleDetail = ({ plan, preparedData, config: inc = {} }) => {
+export const buildCycleDetail = (args) => {
+  const rows = buildOptionCycleDetail(args);
+  return args.plan?.structure === "covered_call"
+    ? extendCoveredCallDetail(rows, args.plan, args.preparedData?.indexRows || [])
+    : rows;
+};
+
+const buildOptionCycleDetail = ({ plan, preparedData, config: inc = {} }) => {
   if (!plan || !preparedData) return [];
   const config = normalizeBacktestConfig(inc);
   const indexRows = (preparedData.indexRows || [])
@@ -1072,7 +1121,9 @@ const buildPathMetricsByCycle = ({
     });
     // The fixed underlying is carried for the entire cycle, without rebalancing.
     const underlyingPnl = plan.underlyingQuantity > 0
-      ? plan.underlyingQuantity * (indexMap.get(plan.exitTs)?.indexPrice - plan.entryIndexPrice)
+      ? plan.underlyingQuantity * (
+          (plan.holdingEndPrice ?? indexMap.get(plan.exitTs)?.indexPrice)
+          - (plan.holdingStartPrice ?? plan.entryIndexPrice))
       : 0;
     hedgePnlByCycle.set(plan.cycle, hedgeState.pnlUsd + underlyingPnl);
   }
@@ -1253,13 +1304,16 @@ export const runWeeklyStraddleBacktest = ({
     dataEnd,
     config: c,
   });
-  const entryPlan = buildEntryPlan({
+  let entryPlan = buildEntryPlan({
     quotes,
     entryExpirations,
     config: c,
     quoteGroups: indexes.quoteGroups,
     instrumentNamesById,
   });
+  if (c.structure === "covered_call") {
+    entryPlan = assignCoveredCallHolding(entryPlan, pi, c.start, dataEnd);
+  }
   const { hedgePnlByCycle, realizedMetricsByCycle } = buildPathMetricsByCycle({
     entryPlan,
     quotes,
@@ -1312,8 +1366,10 @@ export const runWeeklyStraddleBacktest = ({
     .filter(Number.isFinite);
   const cycleMeanReturn = mean(cycleReturns);
   const cycleReturnVol = sampleStdDev(cycleReturns);
-  const firstEntryMs = closedCycles[0]?.entryTime?.getTime();
-  const lastExitMs = closedCycles.at(-1)?.exitTime?.getTime();
+  const firstEntryMs = closedCycles[0]?.holdingStartTs != null
+    ? closedCycles[0].holdingStartTs * 1000 : closedCycles[0]?.entryTime?.getTime();
+  const lastExitMs = closedCycles.at(-1)?.holdingEndTs != null
+    ? closedCycles.at(-1).holdingEndTs * 1000 : closedCycles.at(-1)?.exitTime?.getTime();
   const observedYears =
     Number.isFinite(firstEntryMs) && Number.isFinite(lastExitMs) && lastExitMs > firstEntryMs
       ? (lastExitMs - firstEntryMs) / (365 * 86_400_000)
@@ -1323,6 +1379,9 @@ export const runWeeklyStraddleBacktest = ({
       ? cycleReturns.length / observedYears
       : Number.NaN;
   const finalEquityUsd = closedCycles.at(-1)?.endingEquityUsd ?? Number.NaN;
+  const initialInvestmentUsd = config.sizingMode === "btc"
+    ? closedCycles[0]?.investmentUsd ?? Number.NaN
+    : config.notionalUsd;
 
   return {
     dataEnd,
@@ -1330,7 +1389,8 @@ export const runWeeklyStraddleBacktest = ({
     cycleSummary,
     summary: {
       finalEquityUsd,
-      cumulativeReturnOnNotional: finalEquityUsd / config.notionalUsd,
+      initialInvestmentUsd,
+      cumulativeReturnOnNotional: finalEquityUsd / initialInvestmentUsd,
       sharpeRatio:
         cycleReturns.length > 1 &&
         cycleReturnVol > 0 &&

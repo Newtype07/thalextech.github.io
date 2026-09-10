@@ -874,22 +874,150 @@ for (const priceStep of [-2_000, 2_000]) {
       assert.ok(cycle.closed);
       assert.equal(cycle.legs.length, 1);
       assert.equal(cycle.legs[0].optionType, 'C');
-      assert.equal(cycle.legs[0].quantity, -2);
-      assert.equal(cycle.underlyingQuantity, 2);
+      assert.equal(cycle.legs[0].quantity, -1);
+      assert.equal(cycle.underlyingQuantity, 1);
       assert.equal(cycle.hedgeEnabled, false);
-      const underlyingPnl = 2 * (cycle.exitIndexPrice - cycle.entryIndexPrice);
+      const underlyingPnl = cycle.holdingEndPrice - cycle.holdingStartPrice;
       assert.equal(cycle.hedgePnlUsd, underlyingPnl);
       assert.equal(cycle.cyclePnlUsd, cycle.shortOptionPnlUsd + underlyingPnl);
       if (exitMode === 'expiry') {
-        const payoff = 2 * (cycle.legs[0].entryPrice
+        const payoff = (cycle.legs[0].entryPrice
           + Math.min(cycle.exitIndexPrice, cycle.legs[0].strike) - cycle.entryIndexPrice);
         assert.ok(Math.abs(cycle.cyclePnlUsd - payoff) < 1e-8);
       }
       const preparedData = prepareCycleDetailData({ ...fixture, config, plan: cycle });
       const detail = buildCycleDetail({ plan: cycle, preparedData, config });
-      assert.ok(detail.slice(0, -1).every(row => row.hedgeQuantity === 2));
-      assert.equal(detail.at(-1).hedgeQuantity, 0);
+      assert.ok(detail.every(row => row.hedgeQuantity === 1));
+      assert.equal(detail.at(-1).hedgeQuantity, 1);
       assert.ok(Math.abs(detail.at(-1).totalPnlUsd - cycle.cyclePnlUsd) < 1e-8);
     });
   }
 }
+
+const buildVerticalFixture = (optionType, exitSpot = 100_000) => {
+  const entryTs = Date.UTC(2025, 5, 6, 8) / 1000;
+  const expirationTs = entryTs + 7 * DAY_SECONDS;
+  const sign = optionType === 'C' ? 1 : -1;
+  const instruments = [0, 1, 2].map(instrumentId => ({
+    instrumentId, name: `spread-${optionType}-${instrumentId}`, optionType,
+    strike: 100_000 + sign * (instrumentId + 1) * 5_000, expirationTs,
+  }));
+  return {
+    instruments,
+    indexRows: [{ ts: entryTs, indexPrice: 100_000 },
+      { ts: entryTs + 2 * DAY_SECONDS, indexPrice: 101_000 },
+      { ts: expirationTs, indexPrice: exitSpot }],
+    quoteSnapshots: [
+      [entryTs, instruments.map((row, i) => [i, [2000, 900, 400][i], 0.55,
+        sign * [0.25, 0.15, 0.1][i] * PRECOMPUTED_DELTA_SCALE])],
+      [entryTs + 2 * DAY_SECONDS, instruments.map((row, i) => [i, [1800, 800, 300][i], 0.55,
+        sign * [0.25, 0.15, 0.1][i] * PRECOMPUTED_DELTA_SCALE])],
+    ],
+    config: { start: new Date(entryTs * 1000), end: new Date(expirationTs * 1000),
+      structure: optionType === 'C' ? 'call_spread' : 'put_spread',
+      entryWeekday: 5, entryHourUtc: 8, exitMode: 'expiry', hedgeEnabled: false,
+      sizingMode: 'btc', btcQuantity: 2, targetDelta: 0.25, wingDelta: 0.1 },
+  };
+};
+
+for (const type of ['C', 'P']) {
+  test(`${type} spread selects ordered same-expiry strikes and bounded expiry payoff`, () => {
+    for (const spot of [70_000, 90_000, 100_000, 110_000, 130_000]) {
+      for (const longOption of [false, true]) {
+        const fixture = buildVerticalFixture(type, spot);
+        const run = runWeeklyStraddleBacktest({ ...fixture, config: { ...fixture.config, longOption } });
+        const cycle = run.cycleSummary[0];
+        assert.ok(cycle.closed);
+        const [near, wing] = cycle.legs;
+        assert.equal(near.instrumentId, 0);
+        assert.equal(wing.instrumentId, 2);
+        assert.equal(near.expirationTs, wing.expirationTs);
+        assert.equal(near.quantity, longOption ? 2 : -2);
+        assert.equal(wing.quantity, -near.quantity);
+        const intrinsic = strike => Math.max(type === 'C' ? spot - strike : strike - spot, 0);
+        const expected = near.quantity * (intrinsic(near.strike) - near.entryPrice)
+          + wing.quantity * (intrinsic(wing.strike) - wing.entryPrice);
+        assert.equal(cycle.cyclePnlUsd, expected);
+        assert.ok(Math.abs(expected) <= 2 * Math.abs(wing.strike - near.strike));
+      }
+    }
+  });
+  test(`${type} spread closes early using both marks and sizes by notional`, () => {
+    const fixture = buildVerticalFixture(type);
+    const config = { ...fixture.config, exitMode: 'after_days', exitHoldDays: 2,
+      sizingMode: 'notional', notionalUsd: 50_000 };
+    const cycle = runWeeklyStraddleBacktest({ ...fixture, config }).cycleSummary[0];
+    assert.equal(cycle.legs[0].quantity, -0.5);
+    assert.equal(cycle.legs[1].quantity, 0.5);
+    assert.equal(cycle.cyclePnlUsd, 50);
+    const preparedData = prepareCycleDetailData({ ...fixture, config, plan: cycle });
+    assert.equal(buildCycleDetail({ plan: cycle, preparedData, config }).at(-1).totalPnlUsd, 50);
+  });
+  test(`${type} spread skips chains with only one eligible strike`, () => {
+    const fixture = buildVerticalFixture(type);
+    fixture.quoteSnapshots = fixture.quoteSnapshots.map(([ts, rows]) => [ts, rows.slice(0, 1)]);
+    assert.equal(runWeeklyStraddleBacktest(fixture).cycleSummary.length, 0);
+  });
+}
+
+test('vertical spread delta targets must be positive and ordered', () => {
+  for (const wingDelta of [0, 0.25, 0.3, NaN]) {
+    assert.throws(() => normalizeBacktestConfig({ structure: 'call_spread', targetDelta: 0.25, wingDelta }), RangeError);
+  }
+});
+
+test('spread selection remains distinct and deterministic when both targets prefer one strike', () => {
+  const fixture = buildVerticalFixture('C');
+  fixture.config.targetDelta = 0.2;
+  fixture.config.wingDelta = 0.19;
+  const select = input => runWeeklyStraddleBacktest(input).cycleSummary[0].legs.map(leg => leg.strike);
+  const strikes = select(fixture);
+  assert.ok(strikes[1] > strikes[0]);
+  fixture.quoteSnapshots = fixture.quoteSnapshots.map(([ts, rows]) => [ts, [...rows].reverse()]);
+  assert.deepEqual(select(fixture), strikes);
+});
+
+test('covered call carries one unit across entry gaps and the final uncovered period', () => {
+  const fixture = buildMultiExpiryEntryHourFixture();
+  const first = fixture.indexRows[0];
+  // Add an observed price before the first call, then leave five-day gaps at rolls.
+  fixture.indexRows.unshift({ ts: first.ts - 3_600, indexPrice: 80_000 });
+  const config = { ...fixture.config, structure: 'covered_call', sizingMode: 'notional',
+    notionalUsd: 500_000, btcQuantity: 3, exitHoldDays: 2, includeGreekAttribution: true };
+  const result = runWeeklyStraddleBacktest({ ...fixture, config });
+  const cycles = result.cycleSummary;
+  assert.ok(cycles.length > 1);
+  assert.ok(cycles.every(cycle => cycle.underlyingQuantity === 1 && cycle.legs[0].quantity === -1));
+  const initialSpot = fixture.indexRows[0].indexPrice;
+  const finalSpot = fixture.indexRows.at(-1).indexPrice;
+  assert.equal(result.summary.initialInvestmentUsd, initialSpot);
+  assert.equal(result.summary.cumulativeHedgePnlUsd, finalSpot - initialSpot);
+  assert.equal(result.summary.finalEquityUsd,
+    result.summary.cumulativeOptionPnlUsd + finalSpot - initialSpot);
+  assert.equal(result.summary.cumulativeReturnOnNotional, result.summary.finalEquityUsd / initialSpot);
+  assert.ok(cycles.every(cycle => cycle.investmentUsd === initialSpot));
+  assert.equal(cycles.at(-1).holdingEndTs, fixture.indexRows.at(-1).ts);
+  const timeline = buildPortfolioAttributionTimeline(cycles);
+  assert.ok(Math.abs(timeline.at(-1).cumulativeTotalPnlUsd - result.summary.finalEquityUsd) < 1e-7);
+  const gapPoint = timeline.find(point => point.ts > cycles[0].exitTs && point.ts < cycles[1].entryTs);
+  assert.ok(gapPoint);
+  for (const cycle of cycles) {
+    const preparedData = prepareCycleDetailData({ ...fixture, config, plan: cycle });
+    const detail = buildCycleDetail({ plan: cycle, preparedData, config });
+    assert.ok(detail.every(row => row.hedgeQuantity === 1 && row.hedgeTrade?.side !== 'sell'));
+    assert.ok(detail.every(row => row.dateTime.getTime() === row.ts * 1000));
+    assert.equal(detail.filter(row => row.hedgeTrade).length, cycle.cycle === 1 ? 1 : 0);
+    assert.ok(Math.abs(detail.at(-1).totalPnlUsd - cycle.cyclePnlUsd) < 1e-7);
+  }
+  const preparedData = prepareBacktestData({ ...fixture, config });
+  const batch = runWeeklyStraddleBacktestBatch({ preparedData, runs: [{ config }] });
+  assert.equal(batch[0].summary.finalEquityUsd, result.summary.finalEquityUsd);
+});
+
+test('fixed-unit aggregate return uses the initial cycle investment', () => {
+  const fixture = buildMultiExpiryEntryHourFixture();
+  const result = runWeeklyStraddleBacktest({ ...fixture,
+    config: { ...fixture.config, sizingMode: 'btc', btcQuantity: 1 } });
+  assert.equal(result.summary.cumulativeReturnOnNotional,
+    result.summary.finalEquityUsd / result.cycleSummary[0].investmentUsd);
+});

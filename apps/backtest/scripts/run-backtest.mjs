@@ -50,6 +50,7 @@ function loadShard(hour, bucketKey) {
  * Compute the set of hourly offsets needed for a given config (entry + hedge steps).
  */
 export function hoursForConfig(config) {
+  if (config.structure === "covered_call") return Array.from({ length: 24 }, (_, hour) => hour);
   const entry = Number(config.entryHourUtc ?? config.hourlyOffset ?? 8);
   const enabled = config.hedgeEnabled !== false;
   const interval = Math.max(1, Math.min(24, Math.round(Number(config.hedgeIntervalHours) || 24)));
@@ -221,9 +222,10 @@ Options (examples):
   --end 2026-01-01
   --entry-hour 8
   --weekday 5                 (0=Sun ... 6=Sat)
-  --structure straddle        (straddle|strangle|risk_reversal|call|put|calendar_spread)
+  --structure straddle        (straddle|strangle|risk_reversal|call|put|covered_call|call_spread|put_spread|calendar_spread)
   --maturity 7                or use targetDteDays
   --target-delta 0.25
+  --wing-delta 0.10           (call/put spread outer strike)
   --hedge 24                  (hours, or 0/false to disable)
   --hold-to-expiry true
   --exit-hold-days 7
@@ -260,6 +262,7 @@ async function main() {
     structure: args.structure,
     targetDteDays: args.targetDteDays ?? args.maturity,
     targetDelta: args.targetDelta,
+    wingDelta: args.wingDelta,
     hedgeEnabled: args.hedge != null ? Number(args.hedge) > 0 : undefined,
     hedgeIntervalHours: args.hedge != null && Number(args.hedge) > 0 ? Number(args.hedge) : undefined,
     holdToExpiry: args.holdToExpiry,

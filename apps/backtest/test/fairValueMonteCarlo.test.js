@@ -350,3 +350,15 @@ test('covered call simulation includes the underlying and compares full observed
     - simulateWeeklyCycleModes(naked, () => 0).unhedged;
   assert.ok(Math.abs(difference - underlyingPnl) < 1e-8);
 });
+
+test('covered call conditional benchmark excludes uncovered gains from observed comparison', () => {
+  const cycle = buildCycle({ hedgeEnabled: false });
+  cycle.legs = [cycle.legs[0]];
+  cycle.underlyingQuantity = 1;
+  cycle.holdingStartTs = entryTs - 86_400;
+  cycle.holdingStartPrice = 80_000;
+  cycle.shortOptionPnlUsd = -375;
+  cycle.cyclePnlUsd = 20_625;
+  const state = buildFairValueCycleState(cycle);
+  assert.equal(state.actualPnlByMode.unhedged, 625);
+});
