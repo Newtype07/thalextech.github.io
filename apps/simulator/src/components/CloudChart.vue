@@ -8,6 +8,7 @@ import {
 } from "../lib/pathModel";
 import type { PositionLeg } from "../lib/position";
 import {
+  buildBinnedCumulativeEV,
   buildPayoffDifferenceSummary,
   buildSharedTerminalCumulativeSeries,
   computePayoffBinValue,
@@ -90,6 +91,7 @@ type HistogramTooltipState = {
   priceRange: string;
   probability: string;
   cumulativeProbability: string;
+  cumulativeEV?: string;
   paths: string;
   medianPayoff: string;
   averagePayoff: string;
@@ -1920,6 +1922,9 @@ const updateDynamicScene = (
   const dataBottomY = y(safeFinalMin); // min price -> bottom of histogram data
 
   const comparisonPathCount = comparisonSim?.rows ?? totalPathCount;
+  const cumulativeEV = histogramMode === "prob" && !comparisonSim
+    ? buildBinnedCumulativeEV(bins, totalPathCount)
+    : [];
 
   const primaryPriceBars = histogramGroup
     .selectAll(".hist-bar--price-primary")
@@ -1981,6 +1986,40 @@ const updateDynamicScene = (
     .attr("x2", PAYOFF_HIST_OFFSET + payoffXZero)
     .attr("y1", Math.min(dataTopY, dataBottomY))
     .attr("y2", Math.max(dataTopY, dataBottomY));
+
+  if (cumulativeEV.length) {
+    // Scale cumulative totals separately so they do not shrink the bars.
+    const cumulativeSpan =
+      (d3.max(cumulativeEV, (point) => Math.abs(point.contribution)) || 1) * 1.1;
+    const xCumulative = d3.scaleLinear()
+      .domain([-cumulativeSpan, cumulativeSpan])
+      .range([PAYOFF_HIST_OFFSET, HISTOGRAM_WIDTH]);
+    const cumulativeLayer = histogramGroup.append("g")
+      .attr("class", "hist-cumulative-ev")
+      .style("pointer-events", "none");
+    cumulativeLayer.append("path")
+      .datum(cumulativeEV)
+      .attr("d", d3.line<(typeof cumulativeEV)[number]>()
+        .x((point) => xCumulative(point.contribution))
+        .y((point) => y(point.terminalPrice)))
+      .attr("fill", "none")
+      .attr("stroke", "#fff")
+      .attr("stroke-width", 1.25)
+      .attr("stroke-linejoin", "round");
+    const endpoint = cumulativeEV[cumulativeEV.length - 1];
+    cumulativeLayer.append("circle")
+      .attr("cx", xCumulative(endpoint.contribution))
+      .attr("cy", y(endpoint.terminalPrice))
+      .attr("r", 2)
+      .attr("fill", "#fff");
+    cumulativeLayer.append("text")
+      .attr("x", xCumulative(endpoint.contribution))
+      .attr("y", y(endpoint.terminalPrice) - 7)
+      .attr("text-anchor", "middle")
+      .attr("fill", "#fff")
+      .attr("font-size", 10)
+      .text(formatTooltipPayoff(endpoint.contribution));
+  }
 
   // Axis: keep axis height aligned to histogram data range in every mode.
   const axisGroup = histogramGroup
@@ -2179,6 +2218,9 @@ const updateDynamicScene = (
       priceRange: `${formatTooltipPrice(bin.x0)} – ${formatTooltipPrice(bin.x1)}`,
       probability: formatTooltipProbability(probability),
       cumulativeProbability: formatTooltipProbability(cumulativeProbability),
+      cumulativeEV: cumulativeEV[binIndex + 1]
+        ? formatTooltipPayoff(cumulativeEV[binIndex + 1].contribution)
+        : undefined,
       paths: `${bin.count.toLocaleString("en-US")} / ${totalPathCount.toLocaleString("en-US")}`,
       medianPayoff:
         bin.count > 0 ? formatTooltipPayoff(bin.medianPayoff) : "—",
@@ -2831,6 +2873,10 @@ onUnmounted(() => {
           <div>
             <dt>Cumulative</dt>
             <dd>{{ histogramTooltip.cumulativeProbability }}</dd>
+          </div>
+          <div v-if="histogramTooltip.cumulativeEV">
+            <dt>EV up to this price</dt>
+            <dd>{{ histogramTooltip.cumulativeEV }}</dd>
           </div>
           <div v-if="histogramTooltip.primaryContribution">
             <dt>{{ primarySeriesLabel ? `${primarySeriesLabel} PnL` : "Primary PnL" }}</dt>

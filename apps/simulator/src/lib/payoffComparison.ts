@@ -10,6 +10,25 @@ export type SharedTerminalCumulativePoint = {
   comparisonContribution: number;
 };
 
+/** Accumulate signed EV across price-ordered bins, starting at zero. */
+export const buildBinnedCumulativeEV = (
+  bins: ReadonlyArray<{ x0: number; x1: number; sumPayoff: number }>,
+  totalPathCount: number,
+): Array<{ terminalPrice: number; contribution: number }> => {
+  if (!bins.length || totalPathCount <= 0) return [];
+  let sumPayoff = 0;
+  return [
+    { terminalPrice: bins[0].x0, contribution: 0 },
+    ...bins.map((bin) => {
+      sumPayoff += bin.sumPayoff;
+      return {
+        terminalPrice: bin.x1,
+        contribution: sumPayoff / totalPathCount,
+      };
+    }),
+  ];
+};
+
 export const buildSharedTerminalCumulativeSeries = (
   terminalPrices: ArrayLike<number>,
   primaryPayoffs: ArrayLike<number>,

@@ -1,11 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildBinnedCumulativeEV,
   buildPayoffDifferenceSummary,
   buildSharedTerminalCumulativeSeries,
   computePayoffBinValue,
   smoothSharedTerminalCumulativeSeries,
 } from "../src/lib/payoffComparison.ts";
+
+test("binned cumulative EV keeps losses signed, includes empty bins, and ends at total EV", () => {
+  const points = buildBinnedCumulativeEV([
+    { x0: 10, x1: 20, sumPayoff: -40 },
+    { x0: 20, x1: 30, sumPayoff: 0 },
+    { x0: 30, x1: 40, sumPayoff: 100 },
+    { x0: 40, x1: 50, sumPayoff: -20 },
+  ], 10);
+  assert.deepEqual(points, [
+    { terminalPrice: 10, contribution: 0 },
+    { terminalPrice: 20, contribution: -4 },
+    { terminalPrice: 30, contribution: -4 },
+    { terminalPrice: 40, contribution: 6 },
+    { terminalPrice: 50, contribution: 4 },
+  ]);
+  assert.deepEqual(buildBinnedCumulativeEV([], 10), []);
+  assert.deepEqual(buildBinnedCumulativeEV([{ x0: 0, x1: 1, sumPayoff: 0 }], 0), []);
+});
 
 test("option-perp distribution keeps outcomes paired by simulation path", () => {
   const summary = buildPayoffDifferenceSummary(

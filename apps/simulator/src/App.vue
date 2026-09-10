@@ -2333,7 +2333,7 @@ watch(
               title="P&amp;L weighted by the frequency of each terminal-price bin"
               @click="histogramMode = 'prob'"
             >
-              EV contribution
+              EV
             </button>
           </div>
       <div
@@ -2408,6 +2408,11 @@ watch(
                   : 'median PnL'
               }}
               per price bin
+            </span>
+            <span v-if="histogramMode === 'prob'" class="histogram-legend-item"
+              title="Signed EV accumulated from low to high terminal prices; the number above the endpoint is total EV.">
+              <span class="histogram-legend-mark histogram-legend-mark--cumulative"></span>
+              Cumulative EV
             </span>
             <span class="histogram-legend-item">
               <span class="histogram-legend-mark histogram-legend-mark--break-even"></span>
@@ -2560,12 +2565,8 @@ watch(
   padding: 3px;
 }
 
-.app-main.is-exporting-strategy .histogram-toggle button:first-child {
+.app-main.is-exporting-strategy .histogram-toggle button {
   min-width: 52px;
-}
-
-.app-main.is-exporting-strategy .histogram-toggle button:last-child {
-  min-width: 132px;
 }
 
 .app-main.is-exporting-strategy .histogram-legend {
@@ -3475,6 +3476,11 @@ watch(
   background: rgba(148, 163, 184, 0.7);
 }
 
+.histogram-legend-mark--cumulative {
+  height: 1.25px;
+  background: #fff;
+}
+
 .histogram-legend-mark--average {
   height: 1px;
   background: repeating-linear-gradient(
@@ -3597,8 +3603,10 @@ watch(
 .histogram-toggle {
   position: absolute;
   top: 8px;
-  right: 1.5%;
+  /* Center on both histogram columns: (112px right margin + 210px / 2) / 1200px. */
+  right: 18.083333%;
   left: auto;
+  transform: translateX(50%);
   z-index: 9;
   display: inline-flex;
   gap: 2px;
