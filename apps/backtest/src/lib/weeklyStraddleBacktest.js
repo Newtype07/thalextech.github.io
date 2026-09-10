@@ -92,6 +92,10 @@ export const normalizeBacktestConfig = (input = {}) => {
     ? exitHour
     : DEFAULT_BACKTEST_CONFIG.exitHourUtc;
   config.longOption = Boolean(config.longOption);
+  if (config.structure === "covered_call") {
+    config.longOption = false;
+    config.hedgeEnabled = false;
+  }
   config.sizingMode = config.sizingMode === "btc" ? "btc" : "notional";
   config.btcQuantity = Math.max(
     0,
@@ -318,7 +322,7 @@ const selectLegs = ({ group, entryIndexPrice, config }) => {
     indexPrice: entryIndexPrice,
   });
 
-  if (config.structure === "call") {
+  if (config.structure === "call" || config.structure === "covered_call") {
     if (!call) return null;
     return {
       legs: [
@@ -541,6 +545,7 @@ const buildEntryPlan = ({
         exitWeekday: config.exitWeekday,
         exitHourUtc: config.exitHourUtc,
         structure: config.structure,
+        underlyingQuantity: config.structure === "covered_call" ? -legs[0].quantity : 0,
         longOption: config.longOption,
         targetDelta: config.targetDelta,
         entryTime,
@@ -630,7 +635,9 @@ export const buildCycleDetail = ({ plan, preparedData, config: inc = {} }) => {
           )
         : Number.NaN;
     let targetHedgeQuantity = hedgeQuantity;
-    if (config.hedgeEnabled && decisionTimes.has(indexRow.ts)) {
+    if (plan.underlyingQuantity > 0) {
+      targetHedgeQuantity = isExit ? 0 : plan.underlyingQuantity;
+    } else if (config.hedgeEnabled && decisionTimes.has(indexRow.ts)) {
       const hasDeltas = isExit || Number.isFinite(optionDeltaBtc);
       targetHedgeQuantity = hasDeltas
         ? (isExit ? 0 : -optionDeltaBtc)
@@ -1063,7 +1070,11 @@ const buildPathMetricsByCycle = ({
       sampledReturnCount,
       sampledPathIntervalHours: pathIntervalHours,
     });
-    hedgePnlByCycle.set(plan.cycle, hedgeState.pnlUsd);
+    // The fixed underlying is carried for the entire cycle, without rebalancing.
+    const underlyingPnl = plan.underlyingQuantity > 0
+      ? plan.underlyingQuantity * (indexMap.get(plan.exitTs)?.indexPrice - plan.entryIndexPrice)
+      : 0;
+    hedgePnlByCycle.set(plan.cycle, hedgeState.pnlUsd + underlyingPnl);
   }
   return { hedgePnlByCycle, realizedMetricsByCycle };
 };

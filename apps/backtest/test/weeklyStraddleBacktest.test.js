@@ -849,3 +849,47 @@ test("batch runs match independent runs across entry hours", () => {
   assert.ok(Math.abs(timelineTotal - attributedCycle.cyclePnlUsd) < 1e-9);
   assert.ok(Math.abs(timelineResidual - attributedCycle.greekPnl.residual) < 1e-9);
 });
+
+for (const priceStep of [-2_000, 2_000]) {
+  for (const exitMode of ['expiry', 'after_days']) {
+    test(`covered call includes fixed underlying at ${exitMode}, spot step ${priceStep}`, () => {
+      const fixture = buildParityFixture();
+      const entryTs = fixture.indexRows[0].ts;
+      fixture.indexRows = fixture.indexRows.map(row => ({
+        ...row,
+        indexPrice: 100_000 + priceStep * (row.ts - entryTs) / DAY_SECONDS,
+      }));
+      const config = {
+        ...fixture.config,
+        structure: 'covered_call',
+        longOption: true,
+        hedgeEnabled: true,
+        sizingMode: 'btc',
+        btcQuantity: 2,
+        exitMode,
+        exitHoldDays: 2,
+      };
+      const result = runWeeklyStraddleBacktest({ ...fixture, config });
+      const cycle = result.cycleSummary[0];
+      assert.ok(cycle.closed);
+      assert.equal(cycle.legs.length, 1);
+      assert.equal(cycle.legs[0].optionType, 'C');
+      assert.equal(cycle.legs[0].quantity, -2);
+      assert.equal(cycle.underlyingQuantity, 2);
+      assert.equal(cycle.hedgeEnabled, false);
+      const underlyingPnl = 2 * (cycle.exitIndexPrice - cycle.entryIndexPrice);
+      assert.equal(cycle.hedgePnlUsd, underlyingPnl);
+      assert.equal(cycle.cyclePnlUsd, cycle.shortOptionPnlUsd + underlyingPnl);
+      if (exitMode === 'expiry') {
+        const payoff = 2 * (cycle.legs[0].entryPrice
+          + Math.min(cycle.exitIndexPrice, cycle.legs[0].strike) - cycle.entryIndexPrice);
+        assert.ok(Math.abs(cycle.cyclePnlUsd - payoff) < 1e-8);
+      }
+      const preparedData = prepareCycleDetailData({ ...fixture, config, plan: cycle });
+      const detail = buildCycleDetail({ plan: cycle, preparedData, config });
+      assert.ok(detail.slice(0, -1).every(row => row.hedgeQuantity === 2));
+      assert.equal(detail.at(-1).hedgeQuantity, 0);
+      assert.ok(Math.abs(detail.at(-1).totalPnlUsd - cycle.cyclePnlUsd) < 1e-8);
+    });
+  }
+}

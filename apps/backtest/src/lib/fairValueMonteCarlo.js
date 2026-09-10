@@ -193,13 +193,14 @@ export const buildFairValueCycleState = (cycle) => {
       EPSILON,
       Number(cycle.investmentUsd) || Number(cycle.notionalUsd) || 100_000,
     ),
+    underlyingQuantity: Number(cycle.underlyingQuantity) || 0,
     hedgeEnabled: cycle.hedgeEnabled !== false,
     hedgeIntervalHours: Math.max(1, Number(cycle.hedgeIntervalHours) || 24),
     hedgeDeltaTolerance: Math.max(0, Number(cycle.hedgeDeltaTolerance) || 0),
     hedgeCostBps: Math.max(0, Number(cycle.hedgeCostBps) || 0),
     entryPortfolioDelta,
     actualPnlByMode: {
-      unhedged: actualUnhedgedPnl,
+      unhedged: cycle.underlyingQuantity > 0 ? actualDynamicPnl : actualUnhedgedPnl,
       dynamic: actualDynamicPnl,
     },
   };
@@ -284,7 +285,8 @@ export const simulateWeeklyCycleModes = (
       })
     : generateGbmPath({ cycle, normalRandom, annualDrift });
   const terminalSpot = path.at(-1).spot;
-  const unhedged = optionPnlAt(cycle, terminalSpot, cycle.exitTs);
+  const unhedged = optionPnlAt(cycle, terminalSpot, cycle.exitTs)
+    + (cycle.underlyingQuantity || 0) * (terminalSpot - cycle.entrySpot);
   return {
     unhedged,
     dynamic: unhedged + dynamicHedgePnl({ cycle, path }),

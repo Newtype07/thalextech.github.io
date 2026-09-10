@@ -151,6 +151,7 @@ const STRUCTURE_OPTIONS = [
   { value: "strangle", label: "Strangle" },
   { value: "risk_reversal", label: "Risk reversal" },
   { value: "call", label: "Call" },
+  { value: "covered_call", label: "Covered call" },
   { value: "put", label: "Put" },
   { value: "calendar_spread", label: "Calendar spread" },
 ];
@@ -731,7 +732,8 @@ const SWEEP_DIMENSIONS = [
 
 const availableSweepDimensions = computed(() =>
   SWEEP_DIMENSIONS.filter(
-    (dimension) => dimension.value !== "delta_band" || showDelta.value,
+    (dimension) => (dimension.value !== "delta_band" || showDelta.value)
+      && (dimension.value !== "hedge_frequency" || ui.structure !== "covered_call"),
   ),
 );
 const sweepDimensionLabel = computed(
@@ -930,7 +932,7 @@ const strategyLabels = computed(() => {
     DELTA_OPTIONS.find((option) => option.value === Number(ui.targetDelta)) ||
     DEFAULT_DELTA_OPTION;
   const weekday = entryWeekdayOption.value;
-  const side = ui.longOption ? "Long" : "Short";
+  const side = ui.structure === "covered_call" ? "" : ui.longOption ? "Long" : "Short";
   const hour = String(ui.entryHourUtc).padStart(2, "0");
   const exitWeekday =
     WEEKDAY_OPTIONS.find((option) => option.value === Number(ui.exitWeekday)) ||
@@ -943,7 +945,9 @@ const strategyLabels = computed(() => {
       : `${weekday.label.slice(0, 3)} ${hour}:00`;
 
   let chartStrategy = `${side} straddle ${maturity.label}`;
-  if (ui.structure === "strangle") {
+  if (ui.structure === "covered_call") {
+    chartStrategy = `Covered call ${maturity.label} (${delta.label}), long underlying`;
+  } else if (ui.structure === "strangle") {
     chartStrategy = `${side} strangle ${maturity.label} (${delta.label})`;
   } else if (ui.structure === "risk_reversal") {
     chartStrategy = `Risk reversal ${maturity.label} (${delta.label} call ${ui.longOption ? "long" : "short"} / put ${ui.longOption ? "short" : "long"})`;
@@ -957,7 +961,7 @@ const strategyLabels = computed(() => {
     instrument: `${underlying.value} · ${side} ${structure.label} · ${maturity.label} ${option} · ${ui.investmentMode === "btc" ? `1 ${underlying.value}` : "$100k"}`,
     entry: entryLabel,
     weekday: weekday.label,
-    hedge: !ui.hedgeEnabled
+    hedge: ui.structure === "covered_call" ? "Fixed underlying" : !ui.hedgeEnabled
       ? "Off"
       : ui.hedgeIntervalHours === 24
         ? `Daily ${hour}:00`
@@ -968,7 +972,9 @@ const strategyLabels = computed(() => {
         : ui.exitMode === "weekly_schedule"
           ? `Pick close · ${exitWeekday.label.slice(0, 3)} ${exitHour}:00`
           : `Roll every ${ui.exitHoldDays}D`,
-    chart: `${chartStrategy}, ${ui.hedgeEnabled ? `hedged every ${ui.hedgeIntervalHours}h` : "unhedged"}`,
+    chart: ui.structure === "covered_call"
+      ? chartStrategy
+      : `${chartStrategy}, ${ui.hedgeEnabled ? `hedged every ${ui.hedgeIntervalHours}h` : "unhedged"}`,
   };
 });
 
@@ -1651,6 +1657,11 @@ watch(
     ui.investmentMode,
   ],
   () => {
+    if (ui.structure === "covered_call") {
+      ui.longOption = false;
+      ui.hedgeEnabled = false;
+      if (sweepDimension.value === "hedge_frequency") sweepDimension.value = "entry_hour";
+    }
     const isCalendarMaturity = CALENDAR_MATURITY_OPTIONS.some(
       (option) => String(option.value) === String(ui.maturityDays),
     );
@@ -1913,7 +1924,7 @@ onMounted(loadBacktest);
             class="dropdown instrument-dropdown"
             @click.stop
           >
-            <div class="inst-field">
+            <div v-if="ui.structure !== 'covered_call'" class="inst-field">
               <label class="inst-label">Side</label>
               <div class="inst-choices side-choices">
                 <div
@@ -2069,10 +2080,11 @@ onMounted(loadBacktest);
           <span class="pillLabel">Hedge</span>
           <span class="pillValue">{{ strategyLabels.hedge }}</span>
           <div v-if="openMenu === 'hedge'" class="dropdown" @click.stop>
+            <p v-if="ui.structure === 'covered_call'">Holds one unit of the underlying per short call until the cycle closes.</p>
             <div class="freq-toggle-row">
               <span class="freq-row__label">Hedge</span>
               <label class="toggle-switch">
-                <input type="checkbox" v-model="ui.hedgeEnabled" />
+                <input type="checkbox" v-model="ui.hedgeEnabled" :disabled="ui.structure === 'covered_call'" />
                 <span class="toggle-slider"></span>
               </label>
             </div>

@@ -335,3 +335,18 @@ test("observed BTC price-change view splits ranked weeks into three cohorts", as
   });
   assert.deepEqual(result.hitRateViews.priceMove.map((group) => group.weekCount), [3, 3, 3]);
 });
+
+test('covered call simulation includes the underlying and compares full observed PnL', () => {
+  const cycle = buildCycle({ hedgeEnabled: false });
+  cycle.legs = [cycle.legs[0]];
+  cycle.underlyingQuantity = 0.5;
+  cycle.shortOptionPnlUsd = -375;
+  const covered = buildFairValueCycleState(cycle);
+  const naked = buildFairValueCycleState({ ...cycle, underlyingQuantity: 0 });
+  assert.equal(covered.actualPnlByMode.unhedged, cycle.cyclePnlUsd);
+  const path = generateGbmPath({ cycle: covered, normalRandom: () => 0 });
+  const underlyingPnl = 0.5 * (path.at(-1).spot - covered.entrySpot);
+  const difference = simulateWeeklyCycleModes(covered, () => 0).unhedged
+    - simulateWeeklyCycleModes(naked, () => 0).unhedged;
+  assert.ok(Math.abs(difference - underlyingPnl) < 1e-8);
+});
