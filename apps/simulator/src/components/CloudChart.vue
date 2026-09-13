@@ -1846,8 +1846,20 @@ const updateDynamicScene = (
       binMax > binMin ? clamp((midpoint - binMin) / (binMax - binMin), 0, 1) : 0.5;
     return d3.interpolateRdBu(priceT);
   };
-  const histogramPayoffFill = (bin: SimBin, pathCount = totalPathCount): string =>
-    payoffColorRamp(getPayoffColumnValue(bin, pathCount));
+  // Each bin's weighted payoff is its change in cumulative EV. Give these
+  // contributions their own color domain; individual P&L is much larger and
+  // would wash the EV bars out toward the neutral midpoint.
+  const evContributionColorT = d3
+    .scaleLinear()
+    .domain([-maxAbsWeightedPayoff, 0, maxAbsWeightedPayoff])
+    .range([resolvedMin, colorMid, resolvedMax])
+    .clamp(true);
+  const histogramPayoffFill = (bin: SimBin, pathCount = totalPathCount): string => {
+    const value = getPayoffColumnValue(bin, pathCount);
+    return histogramMode === "prob"
+      ? d3.interpolateRdBu(evContributionColorT(value))
+      : payoffColorRamp(value);
+  };
   const histogramOpacity = clamp(props.histogramOpacity ?? 0.9, 0, 1);
   const binCount = bins.length;
   const invBinSize =
