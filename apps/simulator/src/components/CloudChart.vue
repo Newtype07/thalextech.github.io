@@ -1491,8 +1491,6 @@ const updateDynamicScene = (
           : colorMid;
     return d3.interpolateRdBu(t);
   };
-  const cloudFillForPath = (pathIndex: number): string =>
-    payoffColorRamp(sampledPayoffs[pathIndex] ?? 0);
   const priceFormat = d3.format(".2s");
   const payoffFormat = d3.format(".2s");
 
@@ -1870,6 +1868,17 @@ const updateDynamicScene = (
     if (value >= binMax) return binCount - 1;
     const idx = Math.floor((value - binMin) * invBinSize);
     return Math.max(0, Math.min(binCount - 1, idx));
+  };
+  const cloudFillForPath = (pathIndex: number): string => {
+    if (histogramMode !== "prob") {
+      return payoffColorRamp(sampledPayoffs[pathIndex] ?? 0);
+    }
+    // Match the EV bar at this path's terminal price, including its sign and
+    // contribution magnitude, rather than coloring by individual path P&L.
+    const bin = bins[findBinIndex(sampledFinalPrices[pathIndex])];
+    return bin
+      ? histogramPayoffFill(bin)
+      : d3.interpolateRdBu(colorMid);
   };
   let cumulativePathCount = 0;
   const cumulativePathCounts = bins.map((bin) => {
