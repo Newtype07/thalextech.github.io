@@ -97,11 +97,14 @@ type HistogramTooltipState = {
   paths: string;
   medianPayoff: string;
   averagePayoff: string;
+  maxIntermediatePnl?: string;
   primaryContribution?: string;
   comparisonContribution?: string;
   accent: string;
 };
 const histogramTooltip = ref<HistogramTooltipState | null>(null);
+let clearHistogramHover: (() => void) | null = null;
+const resetHistogramHover = (): void => { clearHistogramHover?.(); };
 type PayoffBinTooltipState = {
   x: number;
   y: number;
@@ -141,7 +144,7 @@ const MAIN_WIDTH =
   HISTOGRAM_GAP;
 const MAIN_HEIGHT = CHART_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
 const HISTOGRAM_TOOLTIP_WIDTH = 172;
-const HISTOGRAM_TOOLTIP_HEIGHT = 148;
+const HISTOGRAM_TOOLTIP_HEIGHT = 172;
 const HISTOGRAM_TOOLTIP_GAP = 24;
 const PAYOFF_BIN_TOOLTIP_WIDTH = 216;
 const PAYOFF_BIN_TOOLTIP_HEIGHT = 126;
@@ -269,6 +272,7 @@ type SimBin = {
   winCount: number;
   maxLossCount: number;
   opportunityCostSum: number;
+  maxIntermediatePnl: number | null;
 };
 
 const statsFromBin = (
@@ -667,6 +671,8 @@ const ensureScene = (): SceneHandles | null => {
 };
 
 const clearDynamicScene = (sceneHandles: SceneHandles): void => {
+  resetHistogramHover();
+  clearHistogramHover = null;
   histogramTooltip.value = null;
   payoffBinTooltip.value = null;
   emit("histogram-bin-hover", null);
@@ -1942,15 +1948,16 @@ const updateDynamicScene = (
     );
     return Math.abs(xPayoffHist(clamped) - payoffXZero);
   };
-  // Snap histogram bars to the pixel grid to avoid anti-aliased seams.
+  // Round shared boundaries identically. Floor/ceil expands adjacent bars
+  // into each other, creating bright seams where translucent fills overlap.
   const histBarTopY = (bin: SimBin): number =>
-    Math.floor(y(bin.x1 ?? bin.x0 ?? baseline));
+    Math.round(y(bin.x1 ?? bin.x0 ?? baseline));
   const histBarBottomY = (bin: SimBin): number =>
-    Math.ceil(y(bin.x0 ?? bin.x1 ?? baseline));
+    Math.round(y(bin.x0 ?? bin.x1 ?? baseline));
   const histBarY = (bin: SimBin): number =>
     Math.min(histBarTopY(bin), histBarBottomY(bin));
   const histBarHeight = (bin: SimBin): number =>
-    Math.max(1, Math.abs(histBarBottomY(bin) - histBarTopY(bin)));
+    Math.abs(histBarBottomY(bin) - histBarTopY(bin));
 
   const safeFinalMin = Number.isFinite(finalPriceMin)
     ? finalPriceMin
@@ -2002,7 +2009,7 @@ const updateDynamicScene = (
     .attr("height", (d) => histBarHeight(d))
     .attr("width", 0)
     .attr("fill", (d) => histogramPayoffFill(d))
-    .attr("fill-opacity", (d) => histogramOpacity * (interpolatedPayoffs.has(d) ? 0.4 : 1))
+    .attr("fill-opacity", histogramOpacity)
     .attr("shape-rendering", "crispEdges");
 
   const comparisonPayoffBars = histogramGroup
@@ -2015,7 +2022,7 @@ const updateDynamicScene = (
     .attr("height", (d) => histBarHeight(d))
     .attr("width", 0)
     .attr("fill", (d) => histogramPayoffFill(d, comparisonPathCount))
-    .attr("fill-opacity", (d) => histogramOpacity * 0.55 * (interpolatedPayoffs.has(d) ? 0.4 : 1))
+    .attr("fill-opacity", histogramOpacity * 0.55)
     .attr("shape-rendering", "crispEdges");
 
   // Payoff-zero baseline in the payoff column.
@@ -2229,7 +2236,26 @@ const updateDynamicScene = (
     .style("pointer-events", "none");
 
   let activeHistogramBin: number | null = null;
+  const hoveredPathsLayer = plotGroup.append("g")
+    .attr("class", "histogram-hover-paths")
+    .attr("fill", "none")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 1)
+    .attr("stroke-opacity", 0.55)
+    .style("pointer-events", "none");
+  const pathsByBin = new Map<number, number[]>();
+  for (const index of activeCloudIndices) {
+    const binIndex = findBinIndex(sampledFinalPrices[index]);
+    const indices = pathsByBin.get(binIndex) ?? [];
+    indices.push(index);
+    pathsByBin.set(binIndex, indices);
+  }
+  const hoveredPathLine = d3.line<number>()
+    .x((_, index) => x(index))
+    .y((price) => y(price));
   const hideHistogramTooltip = (): void => {
+    hoveredPathsLayer.selectAll("path").remove();
+    canvas.style.opacity = "1";
     histogramHoverHighlight.style("display", "none");
     histogramTooltip.value = null;
     emit("histogram-bin-hover", null);
@@ -2255,6 +2281,12 @@ const updateDynamicScene = (
     }
     if (activeHistogramBin !== binIndex) {
       activeHistogramBin = binIndex;
+      const matchingPaths = pathsByBin.get(binIndex) ?? [];
+      canvas.style.opacity = matchingPaths.length ? "0.2" : "1";
+      hoveredPathsLayer.selectAll("path")
+        .data(matchingPaths)
+        .join("path")
+        .attr("d", (index) => hoveredPathLine([baseline, ...paths[index]]));
       emit("histogram-bin-hover", {
         primary: statsFromBin(bin, totalPathCount),
         comparison: statsFromBin(comparisonBin, comparisonPathCount),
@@ -2302,6 +2334,9 @@ const updateDynamicScene = (
       medianPayoff:
         bin.count > 0 ? formatTooltipPayoff(bin.medianPayoff) : "—",
       averagePayoff: formatTooltipPayoff(averagePayoff),
+      maxIntermediatePnl: !comparisonSim && bin.maxIntermediatePnl != null
+        ? formatTooltipPayoff(bin.maxIntermediatePnl)
+        : undefined,
       primaryContribution: comparisonSim
         ? formatTooltipContribution(
             histogramMode === "prob"
@@ -2320,6 +2355,10 @@ const updateDynamicScene = (
       accent: histogramPriceFill(bin),
     };
   };
+
+  clearHistogramHover = hideHistogramTooltip;
+  svg.on("pointerleave.histogram-hover", resetHistogramHover)
+    .on("pointercancel.histogram-hover", resetHistogramHover);
 
   histogramGroup
     .append("rect")
@@ -2340,7 +2379,8 @@ const updateDynamicScene = (
     .on("click", (event) =>
       updateHistogramTooltip(event as PointerEvent),
     )
-    .on("pointerleave", hideHistogramTooltip);
+    .on("pointerleave", hideHistogramTooltip)
+    .on("pointercancel", hideHistogramTooltip);
 
   const minMu = props.muMin ?? -0.1;
   const maxMu = props.muMax ?? 0.3;
@@ -2815,6 +2855,7 @@ const runDrawQueue = async (): Promise<void> => {
 
 onMounted(() => {
   componentMounted = true;
+  window.addEventListener("blur", resetHistogramHover);
   scheduleDraw();
 });
 watch(
@@ -2881,6 +2922,9 @@ watch(
   scheduleDraw,
 );
 onUnmounted(() => {
+  window.removeEventListener("blur", resetHistogramHover);
+  resetHistogramHover();
+  clearHistogramHover = null;
   componentMounted = false;
   drawQueued = false;
   if (cloudRevealRaf != null) {
@@ -2980,6 +3024,11 @@ onUnmounted(() => {
           <div>
             <dt>Paths</dt>
             <dd>{{ histogramTooltip.paths }}</dd>
+          </div>
+          <div v-if="histogramTooltip.maxIntermediatePnl"
+            title="Highest modeled position P&L across all paths in this bin, measured at simulation steps including entry and horizon.">
+            <dt>Max interim P&L</dt>
+            <dd>{{ histogramTooltip.maxIntermediatePnl }}</dd>
           </div>
         </dl>
       </div>

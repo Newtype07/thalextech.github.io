@@ -54,6 +54,7 @@ type SimBin = {
   winCount: number;
   maxLossCount: number;
   opportunityCostSum: number;
+  maxIntermediatePnl: number | null;
 };
 
 type SimWorkerSuccess = {
@@ -503,6 +504,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
   const pathWin = new Uint8Array(rows);
   const pathMaxLoss = new Uint8Array(rows);
   const pathOpportunityCost = new Float64Array(rows);
+  const pathPeakPnl = new Float64Array(rows);
 
   const rng = mulberry32(request.seed);
   const randn = makeRandn(rng);
@@ -550,6 +552,19 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
       futureLegs.length > 0
         ? new Int32Array(futureLegs.length).fill(-1)
         : null;
+    const pnlAtStep = (elapsedSteps: number): number => hasPositionLegs
+      ? positionPnlAt({
+          spot: s,
+          elapsedYears: Math.min(request.params.T, elapsedSteps * request.params.dt),
+          elapsedSteps,
+          optionLegs,
+          futureLegs,
+          stopHit,
+          stopHitStep,
+          dt: request.params.dt,
+        })
+      : s - baseline;
+    let peakPnl = pnlAtStep(0);
 
     for (let c = 0; c < steps; c += 1) {
       const substeps = adaptiveStopSubsteps(
@@ -598,6 +613,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
               : s >= request.samplingStopLoss.price;
         }
       }
+      if (c + 1 < steps) peakPnl = Math.max(peakPnl, pnlAtStep(c + 1));
     }
 
     if (worstDrawdown > maxDrawdown) maxDrawdown = worstDrawdown;
@@ -636,6 +652,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
     }
 
     payoffs[r] = total;
+    pathPeakPnl[r] = Math.max(peakPnl, total);
     payoffSum += total;
     if (total > 0) {
       wins += 1;
@@ -721,6 +738,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
   const maxLossCounts = new Uint32Array(histBins);
   const opportunityCostSums = new Float64Array(histBins);
   const payoffLists: number[][] = Array.from({ length: histBins }, () => []);
+  const binPeakPnl = new Float64Array(histBins).fill(Number.NEGATIVE_INFINITY);
 
   const findBinIndex = (value: number): number => {
     if (!Number.isFinite(value) || value <= binMin) return 0;
@@ -740,6 +758,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
     maxLossCounts[idx] += pathMaxLoss[i];
     opportunityCostSums[idx] += pathOpportunityCost[i];
     payoffLists[idx].push(payoffs[i]);
+    binPeakPnl[idx] = Math.max(binPeakPnl[idx], pathPeakPnl[i]);
   }
 
   const bins: SimBin[] = new Array(histBins);
@@ -755,6 +774,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
       count: counts[i],
       sumPayoff: sums[i],
       medianPayoff: p50BinPayoff,
+      maxIntermediatePnl: counts[i] > 0 ? binPeakPnl[i] : null,
       p10Payoff: quantileSorted(sortedBinPayoffs, 0.1),
       p25Payoff: quantileSorted(sortedBinPayoffs, 0.25),
       p50Payoff: p50BinPayoff,
