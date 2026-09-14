@@ -5,8 +5,23 @@ import {
   buildPayoffDifferenceSummary,
   buildSharedTerminalCumulativeSeries,
   computePayoffBinValue,
+  findPayoffCrossingPrice,
   smoothSharedTerminalCumulativeSeries,
 } from "../src/lib/payoffComparison.ts";
+
+test("average payoff marker follows the nearest payoff crossing, not mean price", () => {
+  const bins = [
+    { x0: 60, x1: 70, count: 10, medianPayoff: 100 },
+    { x0: 70, x1: 80, count: 20, medianPayoff: -100 },
+    { x0: 80, x1: 90, count: 10, medianPayoff: 100 },
+  ];
+  assert.equal(findPayoffCrossingPrice(bins, 50, 78), 82.5);
+  assert.equal(findPayoffCrossingPrice(bins, 50, 72), 67.5);
+  assert.equal(findPayoffCrossingPrice(bins, -100, 78), 75);
+  assert.equal(findPayoffCrossingPrice(bins, 200, 78), null);
+  assert.equal(findPayoffCrossingPrice([], 50, 78), null);
+  assert.equal(findPayoffCrossingPrice(bins.map((bin) => ({ ...bin, medianPayoff: 50 })), 50, 78), 78);
+});
 
 test("binned cumulative EV keeps losses signed, includes empty bins, and ends at total EV", () => {
   const points = buildBinnedCumulativeEV([

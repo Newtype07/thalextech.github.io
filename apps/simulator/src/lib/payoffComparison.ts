@@ -1,3 +1,30 @@
+/** Find the displayed payoff crossing nearest the reference terminal price. */
+export const findPayoffCrossingPrice = (
+  bins: ReadonlyArray<{ x0: number; x1: number; count: number; medianPayoff: number }>,
+  targetPayoff: number,
+  referencePrice: number,
+): number | null => {
+  if (!Number.isFinite(targetPayoff) || !Number.isFinite(referencePrice)) return null;
+  const points = bins.filter((bin) => bin.count > 0)
+    .map((bin) => ({ price: (bin.x0 + bin.x1) / 2, payoff: bin.medianPayoff }))
+    .filter((point) => Number.isFinite(point.price) && Number.isFinite(point.payoff))
+    .sort((a, b) => a.price - b.price);
+  const crossings: number[] = [];
+  points.forEach((point, index) => {
+    if (point.payoff === targetPayoff) crossings.push(point.price);
+    const next = points[index + 1];
+    if (!next) return;
+    if (point.payoff === targetPayoff && next.payoff === targetPayoff) {
+      crossings.push(Math.max(point.price, Math.min(next.price, referencePrice)));
+    } else if ((point.payoff < targetPayoff && next.payoff > targetPayoff)
+      || (point.payoff > targetPayoff && next.payoff < targetPayoff)) {
+      crossings.push(point.price + (next.price - point.price)
+        * (targetPayoff - point.payoff) / (next.payoff - point.payoff));
+    }
+  });
+  return crossings.sort((a, b) => Math.abs(a - referencePrice) - Math.abs(b - referencePrice))[0] ?? null;
+};
+
 export type PayoffDifferenceSummary = {
   sortedDifferences: number[];
   optionWinRate: number;
