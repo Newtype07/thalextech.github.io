@@ -6,7 +6,7 @@ import StopLossSimulator from "./components/StopLossSimulator.vue";
 import type { AtmOptionExpiryQuote } from "./lib/atmOptionChain";
 import type { GBMParams } from "./lib/gbm";
 import {
-  DEFAULT_PATH_MODEL,
+  defaultPathModelForUnderlying,
   horizonVolMovePointsFromVolOfVol,
   type PathModelParams,
   volOfVolFromHorizonMovePoints,
@@ -118,8 +118,8 @@ const formatProbability = (value: number | null | undefined): string => {
   return `${(value * 100).toFixed(1)}%`;
 };
 const settingsOpen = ref(false);
-const pathModel = reactive<PathModelParams>({ ...DEFAULT_PATH_MODEL });
-const pathModelDraft = reactive<PathModelParams>({ ...DEFAULT_PATH_MODEL });
+const pathModel = reactive<PathModelParams>(defaultPathModelForUnderlying("BTCUSD", appliedParams.T));
+const pathModelDraft = reactive<PathModelParams>({ ...pathModel });
 const exportInProgress = ref(false);
 const cloudPathLimit = ref(5_000);
 const colorMinPercent = ref(15);
@@ -807,7 +807,7 @@ const setHorizonVolMovePoints = (movePoints: number): void => {
 
 const resetPathModel = (): void => {
   settingsFieldDraft.value = null;
-  Object.assign(pathModelDraft, DEFAULT_PATH_MODEL);
+  Object.assign(pathModelDraft, defaultPathModelForUnderlying(underlying.value, appliedParams.T));
 };
 
 const setDraftTimeSteps = (value: number): void => {
@@ -1269,12 +1269,23 @@ type UnderlyingValue = (typeof UNDERLYING_OPTIONS)[number]["value"];
 
 const underlying = ref<UnderlyingValue>("BTCUSD");
 
+// Keep the default displayed move at 5/10 points when quotes set the horizon.
+// A user-selected vol-of-vol continues to use its own model parameter.
+watch(() => appliedParams.T, (nextT, previousT) => {
+  const previousDefault = defaultPathModelForUnderlying(underlying.value, previousT).volOfVol;
+  const nextDefault = defaultPathModelForUnderlying(underlying.value, nextT).volOfVol;
+  if (Math.abs(pathModel.volOfVol - previousDefault) < 1e-9) pathModel.volOfVol = nextDefault;
+  if (Math.abs(pathModelDraft.volOfVol - previousDefault) < 1e-9) pathModelDraft.volOfVol = nextDefault;
+});
+
 const resolvedIndexNames = computed<string[]>(() => [underlying.value]);
 
 const switchUnderlying = (next: UnderlyingValue): void => {
   if (next === underlying.value) return;
   if (!UNDERLYING_OPTIONS.some((opt) => opt.value === next)) return;
   underlying.value = next;
+  Object.assign(pathModel, defaultPathModelForUnderlying(next, appliedParams.T));
+  Object.assign(pathModelDraft, pathModel);
   positionLegs.value = [];
   defaultTradeInitialized.value = false;
 };

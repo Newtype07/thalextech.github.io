@@ -7,6 +7,7 @@ import {
   type PathModelParams,
 } from "../lib/pathModel";
 import type { PositionLeg } from "../lib/position";
+import type { OptionStopComparison } from "../lib/optionStopComparison";
 import {
   buildBinnedCumulativeEV,
   buildPayoffDifferenceSummary,
@@ -91,16 +92,10 @@ type HistogramTooltipState = {
   x: number;
   y: number;
   priceRange: string;
-  probability: string;
-  cumulativeProbability: string;
-  cumulativeEV?: string;
   paths: string;
+  medianMaxDrawdown: string;
+  medianRealizedVol: string;
   medianPayoff: string;
-  averagePayoff: string;
-  maxIntermediatePnl?: string;
-  primaryContribution?: string;
-  comparisonContribution?: string;
-  accent: string;
 };
 const histogramTooltip = ref<HistogramTooltipState | null>(null);
 let clearHistogramHover: (() => void) | null = null;
@@ -143,8 +138,8 @@ const MAIN_WIDTH =
   HISTOGRAM_WIDTH -
   HISTOGRAM_GAP;
 const MAIN_HEIGHT = CHART_HEIGHT - CHART_MARGIN.top - CHART_MARGIN.bottom;
-const HISTOGRAM_TOOLTIP_WIDTH = 172;
-const HISTOGRAM_TOOLTIP_HEIGHT = 172;
+const HISTOGRAM_TOOLTIP_WIDTH = 310;
+const HISTOGRAM_TOOLTIP_HEIGHT = 126;
 const HISTOGRAM_TOOLTIP_GAP = 24;
 const PAYOFF_BIN_TOOLTIP_WIDTH = 216;
 const PAYOFF_BIN_TOOLTIP_HEIGHT = 126;
@@ -272,7 +267,10 @@ type SimBin = {
   winCount: number;
   maxLossCount: number;
   opportunityCostSum: number;
+  medianMaxDrawdown: number;
+  medianRealizedVol: number;
   maxIntermediatePnl: number | null;
+  optionStop: { stops: OptionStopComparison[]; count: number; advantageSum: number } | null;
 };
 
 const statsFromBin = (
@@ -1905,11 +1903,6 @@ const updateDynamicScene = (
       ? histogramPayoffFill(bin)
       : d3.interpolateRdBu(colorMid);
   };
-  let cumulativePathCount = 0;
-  const cumulativePathCounts = bins.map((bin) => {
-    cumulativePathCount += bin.count;
-    return cumulativePathCount;
-  });
   const opacityForPath = (pathIndex: number): number => {
     const finalPrice = sampledFinalPrices[pathIndex];
     if (!Number.isFinite(finalPrice)) return cloudFillOpacity;
@@ -2254,7 +2247,7 @@ const updateDynamicScene = (
     .x((_, index) => x(index))
     .y((price) => y(price));
   const hideHistogramTooltip = (): void => {
-    hoveredPathsLayer.selectAll("path").remove();
+    hoveredPathsLayer.selectAll("*").remove();
     canvas.style.opacity = "1";
     histogramHoverHighlight.style("display", "none");
     histogramTooltip.value = null;
@@ -2313,46 +2306,16 @@ const updateDynamicScene = (
       48,
       Math.max(48, layerRect.height - HISTOGRAM_TOOLTIP_HEIGHT - 8),
     );
-    const probability =
-      totalPathCount > 0 ? bin.count / totalPathCount : 0;
-    const cumulativeProbability =
-      totalPathCount > 0
-        ? (cumulativePathCounts[binIndex] ?? 0) / totalPathCount
-        : 0;
-    const averagePayoff =
-      bin.count > 0 ? bin.sumPayoff / bin.count : Number.NaN;
+    const compactPrice = (price: number): string => `$${(price / 1000).toFixed(1)}k`;
     histogramTooltip.value = {
       x: clamp(preferredX, 8, Math.max(8, viewportMaxX)),
       y: yPosition,
-      priceRange: `${formatTooltipPrice(bin.x0)} – ${formatTooltipPrice(bin.x1)}`,
-      probability: formatTooltipProbability(probability),
-      cumulativeProbability: formatTooltipProbability(cumulativeProbability),
-      cumulativeEV: cumulativeEV[binIndex + 1]
-        ? formatTooltipPayoff(cumulativeEV[binIndex + 1].contribution)
-        : undefined,
-      paths: `${bin.count.toLocaleString("en-US")} / ${totalPathCount.toLocaleString("en-US")}`,
-      medianPayoff:
-        bin.count > 0 ? formatTooltipPayoff(bin.medianPayoff) : "—",
-      averagePayoff: formatTooltipPayoff(averagePayoff),
-      maxIntermediatePnl: !comparisonSim && bin.maxIntermediatePnl != null
-        ? formatTooltipPayoff(bin.maxIntermediatePnl)
-        : undefined,
-      primaryContribution: comparisonSim
-        ? formatTooltipContribution(
-            histogramMode === "prob"
-              ? getWeightedPayoff(bin)
-              : bin.medianPayoff,
-          )
-        : undefined,
-      comparisonContribution:
-        comparisonSim && comparisonBin
-          ? formatTooltipContribution(
-              histogramMode === "prob"
-                ? getWeightedPayoff(comparisonBin, comparisonPathCount)
-                : comparisonBin.medianPayoff,
-            )
-          : undefined,
-      accent: histogramPriceFill(bin),
+      priceRange: `${compactPrice(bin.x0)}–${compactPrice(bin.x1)} at expiry`,
+      paths: `${bin.count.toLocaleString("en-US")} / ${totalPathCount.toLocaleString("en-US")} paths`,
+      medianMaxDrawdown: bin.count > 0
+        ? `${bin.medianMaxDrawdown > 0 ? "−" : ""}${(bin.medianMaxDrawdown * 100).toFixed(1)}%` : "—",
+      medianRealizedVol: bin.count > 0 ? `${(bin.medianRealizedVol * 100).toFixed(0)}%` : "—",
+      medianPayoff: bin.count > 0 ? formatTooltipPayoff(bin.medianPayoff) : "—",
     };
   };
 
@@ -2968,67 +2931,27 @@ onUnmounted(() => {
     <Transition name="histogram-tooltip">
       <div
         v-if="histogramTooltip"
-        class="histogram-tooltip"
+        class="histogram-tooltip path-summary-tooltip"
         role="tooltip"
         :style="{
           left: `${histogramTooltip.x}px`,
           top: `${histogramTooltip.y}px`,
         }"
       >
-        <div class="histogram-tooltip-kicker">
-          <span
-            class="histogram-tooltip-swatch"
-            :style="{ backgroundColor: histogramTooltip.accent }"
-          ></span>
-          Terminal distribution
-        </div>
-        <div class="histogram-tooltip-range">
-          {{ histogramTooltip.priceRange }}
-        </div>
-        <div class="histogram-tooltip-divider"></div>
+        <div class="histogram-tooltip-range">{{ histogramTooltip.priceRange }}</div>
+        <div class="histogram-tooltip-path-count">{{ histogramTooltip.paths }}</div>
         <dl class="histogram-tooltip-stats">
           <div>
-            <dt>% of paths</dt>
-            <dd>{{ histogramTooltip.probability }}</dd>
-          </div>
-          <div>
-            <dt>Cumulative</dt>
-            <dd>{{ histogramTooltip.cumulativeProbability }}</dd>
-          </div>
-          <div v-if="histogramTooltip.cumulativeEV">
-            <dt>EV up to this price</dt>
-            <dd>{{ histogramTooltip.cumulativeEV }}</dd>
-          </div>
-          <div v-if="histogramTooltip.primaryContribution">
-            <dt>{{ primarySeriesLabel ? `${primarySeriesLabel} PnL` : "Primary PnL" }}</dt>
-            <dd>{{ histogramTooltip.primaryContribution }}</dd>
-          </div>
-          <div v-if="histogramTooltip.comparisonContribution">
-            <dt>
-              {{
-                comparisonSeriesLabel
-                  ? `${comparisonSeriesLabel} PnL`
-                  : "Comparison PnL"
-              }}
-            </dt>
-            <dd>{{ histogramTooltip.comparisonContribution }}</dd>
-          </div>
-          <div v-if="!histogramTooltip.primaryContribution">
-            <dt>PnL (median)</dt>
+            <dt>Median payoff:</dt>
             <dd>{{ histogramTooltip.medianPayoff }}</dd>
           </div>
-          <div v-if="!histogramTooltip.primaryContribution">
-            <dt>PnL (average)</dt>
-            <dd>{{ histogramTooltip.averagePayoff }}</dd>
+          <div title="Median of each path’s largest peak-to-trough underlying-price decline, including the initial price.">
+            <dt>Median max drawdown before expiry:</dt>
+            <dd>{{ histogramTooltip.medianMaxDrawdown }}</dd>
           </div>
-          <div>
-            <dt>Paths</dt>
-            <dd>{{ histogramTooltip.paths }}</dd>
-          </div>
-          <div v-if="histogramTooltip.maxIntermediatePnl"
-            title="Highest modeled position P&L across all paths in this bin, measured at simulation steps including entry and horizon.">
-            <dt>Max interim P&L</dt>
-            <dd>{{ histogramTooltip.maxIntermediatePnl }}</dd>
+          <div title="Median annualized realized volatility from squared log returns at simulation time steps.">
+            <dt>Median realized vol:</dt>
+            <dd>{{ histogramTooltip.medianRealizedVol }}</dd>
           </div>
         </dl>
       </div>
@@ -3114,6 +3037,19 @@ onUnmounted(() => {
   color: #dfe3e7;
   font-variant-numeric: tabular-nums;
   pointer-events: none;
+}
+
+.path-summary-tooltip {
+  width: 310px;
+}
+
+.path-summary-tooltip .histogram-tooltip-range { margin-top: 0; }
+.path-summary-tooltip .histogram-tooltip-stats dt,
+.path-summary-tooltip .histogram-tooltip-stats dd { font-size: 11px; }
+.histogram-tooltip-path-count {
+  margin: 6px 0 10px;
+  color: #858d95;
+  font-size: 11px;
 }
 
 .payoff-bin-tooltip {

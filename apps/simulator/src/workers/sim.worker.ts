@@ -1,4 +1,5 @@
 import { blackScholesGreeks } from "../lib/blackScholes.ts";
+import { inferOptionStop, hitsOptionStop, type OptionStopComparison } from "../lib/optionStopComparison.ts";
 import { adaptiveStopSubsteps } from "../lib/adaptiveStopSampling.ts";
 import type { GBMParams } from "../lib/gbm.ts";
 import {
@@ -54,7 +55,10 @@ type SimBin = {
   winCount: number;
   maxLossCount: number;
   opportunityCostSum: number;
+  medianMaxDrawdown: number;
+  medianRealizedVol: number;
   maxIntermediatePnl: number | null;
+  optionStop: { stops: OptionStopComparison[]; count: number; advantageSum: number } | null;
 };
 
 type SimWorkerSuccess = {
@@ -505,12 +509,28 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
   const pathMaxLoss = new Uint8Array(rows);
   const pathOpportunityCost = new Float64Array(rows);
   const pathPeakPnl = new Float64Array(rows);
+  const pathDrawdowns = new Float64Array(rows);
+  const pathRealizedVols = new Float64Array(rows);
 
   const rng = mulberry32(request.seed);
   const randn = makeRandn(rng);
   const batesProcess = prepareBatesProcess(request);
 
   const { hasPositionLegs, optionLegs, futureLegs } = prepareLegs(request);
+  // Long call/put combinations compare each exposure independently. Keep
+  // spreads with short legs together so their hedge is not discarded.
+  const stopLegGroups = futureLegs.length ? [] : optionLegs.every((leg) => leg.sign > 0)
+    ? optionLegs.map((leg) => [leg]) : [optionLegs];
+  const optionStopGroups = stopLegGroups.flatMap((legs) => {
+    const stop = inferOptionStop(baseline,
+      legs.reduce((sum, leg) => sum + leg.sign * leg.qty * blackScholesGreeks(
+        baseline, leg.strike, leg.entryRemainingYears, leg.iv, RISK_FREE_RATE, leg.optionType,
+      ).delta, 0),
+      legs.reduce((sum, leg) => sum + leg.sign * leg.qty * leg.entryPrice, 0));
+    return stop ? [{ stop, legs }] : [];
+  });
+  const optionStopHits = new Uint8Array(rows);
+  const optionStopSavings = new Float64Array(rows);
 
   const sampledIndices = pickSampleIndices(rows, samplePathLimit, request.seed);
   const lowTailPool: TailCandidate[] = [];
@@ -539,12 +559,14 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
   );
 
   for (let r = 0; r < rows; r += 1) {
+    const inferredStopHits = new Uint8Array(optionStopGroups.length);
     let s = baseline;
     const batesState = batesProcess
       ? createBatesState(baseline, batesProcess)
       : null;
     let peak = baseline;
     let worstDrawdown = 0;
+    let squaredLogReturns = 0;
     let samplingStopHit = false;
     const stopHit =
       futureLegs.length > 0 ? new Uint8Array(futureLegs.length) : null;
@@ -567,6 +589,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
     let peakPnl = pnlAtStep(0);
 
     for (let c = 0; c < steps; c += 1) {
+      const stepStartPrice = s;
       const substeps = adaptiveStopSubsteps(
         s,
         request.params.vol,
@@ -606,6 +629,9 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
         }
 
         updateFutureStops(s, c, futureLegs, stopHit, stopHitStep);
+        optionStopGroups.forEach(({ stop }, index) => {
+          if (hitsOptionStop(s, stop)) inferredStopHits[index] = 1;
+        });
         if (!samplingStopHit && request.samplingStopLoss) {
           samplingStopHit =
             request.samplingStopLoss.side === "buy"
@@ -613,9 +639,12 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
               : s >= request.samplingStopLoss.price;
         }
       }
+      squaredLogReturns += Math.log(s / stepStartPrice) ** 2;
       if (c + 1 < steps) peakPnl = Math.max(peakPnl, pnlAtStep(c + 1));
     }
 
+    pathDrawdowns[r] = worstDrawdown;
+    pathRealizedVols[r] = Math.sqrt(squaredLogReturns / (steps * request.params.dt));
     if (worstDrawdown > maxDrawdown) maxDrawdown = worstDrawdown;
 
     finalPrices[r] = s;
@@ -651,6 +680,15 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
       }
     }
 
+    optionStopGroups.forEach(({ stop, legs }, index) => {
+      if (!inferredStopHits[index]) return;
+      optionStopHits[r] = 1;
+      optionStopSavings[r] += positionPnlAt({
+        spot: s, elapsedYears: request.params.T, elapsedSteps: steps,
+        optionLegs: legs, futureLegs: [], stopHit: null, stopHitStep: null,
+        dt: request.params.dt,
+      }) + stop.premium;
+    });
     payoffs[r] = total;
     pathPeakPnl[r] = Math.max(peakPnl, total);
     payoffSum += total;
@@ -738,7 +776,11 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
   const maxLossCounts = new Uint32Array(histBins);
   const opportunityCostSums = new Float64Array(histBins);
   const payoffLists: number[][] = Array.from({ length: histBins }, () => []);
+  const drawdownLists: number[][] = Array.from({ length: histBins }, () => []);
+  const realizedVolLists: number[][] = Array.from({ length: histBins }, () => []);
   const binPeakPnl = new Float64Array(histBins).fill(Number.NEGATIVE_INFINITY);
+  const optionStopCounts = new Uint32Array(histBins);
+  const optionStopAdvantages = new Float64Array(histBins);
 
   const findBinIndex = (value: number): number => {
     if (!Number.isFinite(value) || value <= binMin) return 0;
@@ -758,7 +800,14 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
     maxLossCounts[idx] += pathMaxLoss[i];
     opportunityCostSums[idx] += pathOpportunityCost[i];
     payoffLists[idx].push(payoffs[i]);
+    drawdownLists[idx].push(pathDrawdowns[i]);
+    realizedVolLists[idx].push(pathRealizedVols[i]);
     binPeakPnl[idx] = Math.max(binPeakPnl[idx], pathPeakPnl[i]);
+    if (optionStopHits[i]) {
+      optionStopCounts[idx] += 1;
+      // The stopped linear position loses exactly the premium budget.
+      optionStopAdvantages[idx] += optionStopSavings[i];
+    }
   }
 
   const bins: SimBin[] = new Array(histBins);
@@ -774,7 +823,12 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
       count: counts[i],
       sumPayoff: sums[i],
       medianPayoff: p50BinPayoff,
+      medianMaxDrawdown: medianOfTypedArray(Float64Array.from(drawdownLists[i])),
+      medianRealizedVol: medianOfTypedArray(Float64Array.from(realizedVolLists[i])),
       maxIntermediatePnl: counts[i] > 0 ? binPeakPnl[i] : null,
+      optionStop: optionStopGroups.length ? {
+        stops: optionStopGroups.map(({ stop }) => stop), count: optionStopCounts[i], advantageSum: optionStopAdvantages[i],
+      } : null,
       p10Payoff: quantileSorted(sortedBinPayoffs, 0.1),
       p25Payoff: quantileSorted(sortedBinPayoffs, 0.25),
       p50Payoff: p50BinPayoff,

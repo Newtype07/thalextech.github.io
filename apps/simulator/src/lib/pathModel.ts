@@ -11,8 +11,8 @@ export type PathModelParams = {
 
 export const DEFAULT_PATH_MODEL: PathModelParams = {
   kind: "bates",
-  volOfVol: 0.1,
-  correlation: 0.1,
+  volOfVol: 5 / (50 * Math.sqrt(14 / 365.25)),
+  correlation: 0.25,
   jumpsEnabled: false,
   jumpIntensity: 220.6,
   maxJumpVarianceShare: 0.35,
@@ -50,6 +50,14 @@ export const volOfVolFromHorizonMovePoints = (
 
 const clamp = (value: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, value));
+
+export const defaultPathModelForUnderlying = (
+  underlying: "BTCUSD" | "ETHUSD",
+  horizonYears: number,
+): PathModelParams => ({
+  ...DEFAULT_PATH_MODEL,
+  volOfVol: volOfVolFromHorizonMovePoints(underlying === "ETHUSD" ? 10 : 5, horizonYears),
+});
 
 const finiteOr = (value: number, fallback: number): number =>
   Number.isFinite(Number(value)) ? Number(value) : fallback;
