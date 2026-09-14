@@ -6,8 +6,23 @@ import {
   buildSharedTerminalCumulativeSeries,
   computePayoffBinValue,
   findPayoffCrossingPrice,
+  interpolatePayoffGaps,
   smoothSharedTerminalCumulativeSeries,
 } from "../src/lib/payoffComparison.ts";
+
+test("display gap interpolation preserves samples, signs, and empty tails", () => {
+  const points = [
+    { price: 0, value: null },
+    { price: 1, value: -20 },
+    { price: 2, value: null },
+    { price: 4, value: null },
+    { price: 5, value: 20 },
+    { price: 6, value: null },
+  ];
+  assert.deepEqual(interpolatePayoffGaps(points), [null, -20, -10, 10, 20, null]);
+  assert.equal(points[2].value, null);
+  assert.deepEqual(interpolatePayoffGaps([{ price: 1, value: null }]), [null]);
+});
 
 test("average payoff marker follows the nearest payoff crossing, not mean price", () => {
   const bins = [

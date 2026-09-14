@@ -2409,6 +2409,10 @@ watch(
               }}
               per price bin
             </span>
+            <span class="histogram-legend-item"
+              title="Faint payoff/EV bars interpolate between sampled price bins for display only; statistics and cumulative EV use actual samples.">
+              Faint bars: interpolated gaps
+            </span>
             <span v-if="histogramMode === 'prob'" class="histogram-legend-item"
               title="Signed EV accumulated from low to high terminal prices; the number above the endpoint is total EV.">
               <span class="histogram-legend-mark histogram-legend-mark--cumulative"></span>

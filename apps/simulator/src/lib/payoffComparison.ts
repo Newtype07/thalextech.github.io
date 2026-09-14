@@ -1,3 +1,26 @@
+/** Fill interior gaps for display only; leave unsampled tails empty. */
+export const interpolatePayoffGaps = (
+  points: ReadonlyArray<{ price: number; value: number | null }>,
+): Array<number | null> => {
+  const values = points.map((point) => point.value);
+  let previous = -1;
+  points.forEach((point, index) => {
+    if (point.value == null || !Number.isFinite(point.value)) return;
+    if (previous >= 0 && index > previous + 1) {
+      const left = points[previous];
+      const span = point.price - left.price;
+      if (span > 0) {
+        for (let gap = previous + 1; gap < index; gap += 1) {
+          values[gap] = left.value! + (point.value - left.value!)
+            * (points[gap].price - left.price) / span;
+        }
+      }
+    }
+    previous = index;
+  });
+  return values;
+};
+
 /** Find the displayed payoff crossing nearest the reference terminal price. */
 export const findPayoffCrossingPrice = (
   bins: ReadonlyArray<{ x0: number; x1: number; count: number; medianPayoff: number }>,

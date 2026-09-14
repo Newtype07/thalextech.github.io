@@ -13,6 +13,7 @@ import {
   buildSharedTerminalCumulativeSeries,
   computePayoffBinValue,
   findPayoffCrossingPrice,
+  interpolatePayoffGaps,
   smoothSharedTerminalCumulativeSeries,
 } from "../lib/payoffComparison";
 import type {
@@ -1772,8 +1773,8 @@ const updateDynamicScene = (
     }
   };
 
-  // Bars and hover labels must share the same underlying bins. Interpolating
-  // empty bins creates visible bars whose truthful tooltip value is zero.
+  // Keep sampled bins intact for statistics and hover details. Gap filling
+  // applies only to the payoff column's rendered values below.
   const displayBins = bins;
   const comparisonDisplayBins = comparisonSim?.bins ?? [];
   const countMax = d3.max(displayBins, (bin) => bin.count) || 1;
@@ -1832,13 +1833,30 @@ const updateDynamicScene = (
   const getMedianPayoff = (bin: SimBin): number => bin.medianPayoff;
   const getWeightedPayoff = (bin: SimBin, pathCount = totalPathCount): number =>
     pathCount > 0 ? bin.sumPayoff / pathCount : 0;
-  const getPayoffColumnValue = (
+  const getSampledPayoffColumnValue = (
     bin: SimBin,
     pathCount = totalPathCount,
   ): number =>
     histogramMode === "prob"
       ? getWeightedPayoff(bin, pathCount)
       : getMedianPayoff(bin);
+  const interpolatedPayoffs = new Map<SimBin, number>();
+  for (const [seriesBins, pathCount] of [
+    [displayBins, totalPathCount],
+    [comparisonDisplayBins, comparisonSim?.rows ?? totalPathCount],
+  ] as const) {
+    const values = interpolatePayoffGaps(seriesBins.map((bin) => ({
+      price: (bin.x0 + bin.x1) / 2,
+      value: bin.count > 0 ? getSampledPayoffColumnValue(bin, pathCount) : null,
+    })));
+    seriesBins.forEach((bin, index) => {
+      if (bin.count === 0 && values[index] != null) {
+        interpolatedPayoffs.set(bin, values[index]!);
+      }
+    });
+  }
+  const getPayoffColumnValue = (bin: SimBin, pathCount = totalPathCount): number =>
+    interpolatedPayoffs.get(bin) ?? getSampledPayoffColumnValue(bin, pathCount);
   const histogramPriceFill = (bin: SimBin): string => {
     const midpoint = (bin.x0 + bin.x1) * 0.5;
     const priceT =
@@ -1984,7 +2002,7 @@ const updateDynamicScene = (
     .attr("height", (d) => histBarHeight(d))
     .attr("width", 0)
     .attr("fill", (d) => histogramPayoffFill(d))
-    .attr("fill-opacity", histogramOpacity)
+    .attr("fill-opacity", (d) => histogramOpacity * (interpolatedPayoffs.has(d) ? 0.4 : 1))
     .attr("shape-rendering", "crispEdges");
 
   const comparisonPayoffBars = histogramGroup
@@ -1997,7 +2015,7 @@ const updateDynamicScene = (
     .attr("height", (d) => histBarHeight(d))
     .attr("width", 0)
     .attr("fill", (d) => histogramPayoffFill(d, comparisonPathCount))
-    .attr("fill-opacity", histogramOpacity * 0.55)
+    .attr("fill-opacity", (d) => histogramOpacity * 0.55 * (interpolatedPayoffs.has(d) ? 0.4 : 1))
     .attr("shape-rendering", "crispEdges");
 
   // Payoff-zero baseline in the payoff column.
