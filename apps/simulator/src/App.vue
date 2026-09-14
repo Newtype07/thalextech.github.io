@@ -38,7 +38,7 @@ const ROWS_MAX = 50_000;
 const ROWS_STEP = 1_000;
 const ROWS_DEBOUNCE_MS = 160;
 const DRAWN_PATHS_MIN = 100;
-const DRAWN_PATHS_MAX = 5_000;
+const DRAWN_PATHS_MAX = 10_000;
 const DRAWN_PATHS_STEP = 100;
 const TIME_STEPS_MIN = 24;
 const TIME_STEPS_MAX = 4000;
@@ -121,7 +121,7 @@ const settingsOpen = ref(false);
 const pathModel = reactive<PathModelParams>({ ...DEFAULT_PATH_MODEL });
 const pathModelDraft = reactive<PathModelParams>({ ...DEFAULT_PATH_MODEL });
 const exportInProgress = ref(false);
-const cloudPathLimit = ref(2000);
+const cloudPathLimit = ref(5_000);
 const colorMinPercent = ref(15);
 const colorMaxPercent = ref(85);
 const histBinsMultiplier = ref(1);
@@ -2413,6 +2413,11 @@ watch(
               title="Signed EV accumulated from low to high terminal prices; the number above the endpoint is total EV.">
               <span class="histogram-legend-mark histogram-legend-mark--cumulative"></span>
               Cumulative EV
+            </span>
+            <span v-else class="histogram-legend-item"
+              title="Average P&L across all simulated paths, marked where the payoff histogram equals that value. If there are multiple crossings, the one nearest the mean terminal price is used.">
+              <span class="histogram-legend-mark histogram-legend-mark--cumulative"></span>
+              Average payoff
             </span>
             <span class="histogram-legend-item">
               <span class="histogram-legend-mark histogram-legend-mark--break-even"></span>

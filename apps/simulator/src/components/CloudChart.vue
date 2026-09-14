@@ -12,6 +12,7 @@ import {
   buildPayoffDifferenceSummary,
   buildSharedTerminalCumulativeSeries,
   computePayoffBinValue,
+  findPayoffCrossingPrice,
   smoothSharedTerminalCumulativeSeries,
 } from "../lib/payoffComparison";
 import type {
@@ -2008,6 +2009,41 @@ const updateDynamicScene = (
     .attr("y1", Math.min(dataTopY, dataBottomY))
     .attr("y2", Math.max(dataTopY, dataBottomY));
 
+  // Match the histogram's median payoff contour to the overall mean payoff.
+  const meanTerminalPrice = histogramMode === "payoff" && !comparisonSim
+    ? d3.mean(sim.terminalPrices)
+    : undefined;
+  const averagePayoffPrice = meanTerminalPrice != null
+    ? findPayoffCrossingPrice(displayBins, meanPayoff, meanTerminalPrice)
+    : null;
+  const averagePayoffY = averagePayoffPrice != null
+    ? y(averagePayoffPrice)
+    : null;
+  if (averagePayoffY != null) {
+    const markerX = PAYOFF_HIST_OFFSET + Math.max(
+      payoffXZero,
+      xPayoffHist(meanPayoff),
+    ) + 4;
+    const averageLayer = histogramGroup.append("g")
+      .attr("class", "hist-average-payoff")
+      .style("pointer-events", "none");
+    averageLayer.append("line")
+      .attr("x1", markerX)
+      .attr("x2", markerX + 18)
+      .attr("y1", averagePayoffY)
+      .attr("y2", averagePayoffY)
+      .attr("stroke", "#fff")
+      .attr("stroke-width", 1.25);
+    averageLayer.append("text")
+      .attr("x", markerX + 24)
+      .attr("y", averagePayoffY)
+      .attr("text-anchor", "start")
+      .attr("dominant-baseline", "middle")
+      .attr("fill", "#fff")
+      .attr("font-size", 10)
+      .text(formatTooltipPayoff(meanPayoff));
+  }
+
   if (cumulativeEV.length) {
     // Scale cumulative totals separately so they do not shrink the bars.
     const cumulativeSpan =
@@ -2155,6 +2191,8 @@ const updateDynamicScene = (
   for (const tick of priceTicks) {
     const tickY = y(tick);
     if (tickY < dataTopY - 4 || tickY > dataBottomY + 4) continue;
+    // Leave room for the mean annotation while keeping its exact price anchor.
+    if (averagePayoffY != null && Math.abs(tickY - averagePayoffY) < 18) continue;
     axisGroup
       .append("text")
       .attr("x", 8)
