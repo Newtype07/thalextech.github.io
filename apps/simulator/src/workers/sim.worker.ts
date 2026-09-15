@@ -1,5 +1,6 @@
 import { blackScholesGreeks } from "../lib/blackScholes.ts";
 import { inferOptionStop, hitsOptionStop, type OptionStopComparison } from "../lib/optionStopComparison.ts";
+import { buildTerminalPriceBins, findPriceBinIndex } from "../lib/terminalHistogram.ts";
 import { adaptiveStopSubsteps } from "../lib/adaptiveStopSampling.ts";
 import type { GBMParams } from "../lib/gbm.ts";
 import {
@@ -31,6 +32,7 @@ type SimWorkerRequest = {
   optionPricingByLegId: Record<string, OptionPricingInput>;
   valuationTs: number;
   horizonSeconds: number;
+  histogramScale?: "linear" | "log";
   histBins: number;
   histBinsMultiplier: number;
   samplePathLimit: number;
@@ -227,38 +229,6 @@ const prepareBatesProcess = (
     budget,
     annualDrift: request.params.mu,
   });
-};
-
-const computeAdaptiveBinCount = (
-  values: Float64Array,
-  rangeMin: number,
-  rangeMax: number,
-  maxBins: number,
-): number => {
-  const n = values.length;
-  const range = rangeMax - rangeMin;
-  if (n < 2 || !Number.isFinite(range) || range <= 0) {
-    return clamp(maxBins, 10, 400);
-  }
-
-  const sorted = Float64Array.from(values);
-  sorted.sort();
-  const q1 = quantileSorted(sorted, 0.25);
-  const q3 = quantileSorted(sorted, 0.75);
-  const iqr = q3 - q1;
-
-  // Freedman-Diaconis bin width.
-  let binWidth = 2 * iqr * Math.pow(n, -1 / 3);
-  if (!Number.isFinite(binWidth) || binWidth <= 0) {
-    // Fallback when IQR collapses (heavy concentration / ties).
-    binWidth = range / Math.max(10, Math.round(Math.sqrt(n)));
-  }
-  if (!Number.isFinite(binWidth) || binWidth <= 0) {
-    return clamp(maxBins, 10, 400);
-  }
-
-  const autoBins = Math.ceil(range / binWidth);
-  return clamp(autoBins, 10, maxBins);
 };
 
 const pickSampleIndices = (rows: number, limit: number, seed: number): number[] => {
@@ -747,28 +717,13 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
   const p90Payoff = quantileSorted(sortedPayoffs, 0.9);
   const p95Payoff = quantileSorted(sortedPayoffs, 0.95);
 
-  const maxDelta = Math.max(
-    Math.abs(pathMin - baseline),
-    Math.abs(pathMax - baseline),
-  );
-  const paddedDelta = maxDelta * 1.02;
-  const safeDelta =
-    Number.isFinite(paddedDelta) && paddedDelta > 0 ? paddedDelta : 1;
-  const binMin = baseline - safeDelta;
-  const binMax = baseline + safeDelta;
-  const baseBins = computeAdaptiveBinCount(
+  const priceBins = buildTerminalPriceBins(
     finalPrices,
-    binMin,
-    binMax,
+    request.histogramScale ?? "linear",
     histBinsCap,
+    histBinsMultiplier,
   );
-  const histBins = clamp(
-    Math.round(baseBins * histBinsMultiplier),
-    10,
-    histBinsCap,
-  );
-  const binSize = (binMax - binMin) / histBins;
-  const invBinSize = binSize > 0 ? 1 / binSize : 0;
+  const histBins = priceBins.length;
 
   const counts = new Uint32Array(histBins);
   const sums = new Float64Array(histBins);
@@ -782,15 +737,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
   const optionStopCounts = new Uint32Array(histBins);
   const optionStopAdvantages = new Float64Array(histBins);
 
-  const findBinIndex = (value: number): number => {
-    if (!Number.isFinite(value) || value <= binMin) return 0;
-    if (value >= binMax) return histBins - 1;
-    if (invBinSize <= 0) return 0;
-    const idx = Math.floor((value - binMin) * invBinSize);
-    if (idx < 0) return 0;
-    if (idx >= histBins) return histBins - 1;
-    return idx;
-  };
+  const findBinIndex = (value: number): number => findPriceBinIndex(priceBins, value);
 
   for (let i = 0; i < rows; i += 1) {
     const idx = findBinIndex(finalPrices[i]);
@@ -812,8 +759,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
 
   const bins: SimBin[] = new Array(histBins);
   for (let i = 0; i < histBins; i += 1) {
-    const x0 = binMin + i * binSize;
-    const x1 = i === histBins - 1 ? binMax : x0 + binSize;
+    const { x0, x1 } = priceBins[i];
     const sortedBinPayoffs = Float64Array.from(payoffLists[i]);
     sortedBinPayoffs.sort();
     const p50BinPayoff = quantileSorted(sortedBinPayoffs, 0.5);

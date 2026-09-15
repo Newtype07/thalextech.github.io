@@ -125,6 +125,7 @@ const cloudPathLimit = ref(5_000);
 const colorMinPercent = ref(15);
 const colorMaxPercent = ref(85);
 const histBinsMultiplier = ref(1);
+const priceScaleMode = ref<"log" | "linear">("log");
 const defaultTradeInitialized = ref(false);
 const positionLegs = ref<PositionLeg[]>([
   {
@@ -179,7 +180,7 @@ const applyParams = (): void => {
 
 const SVG_EXPORT_STYLE = `
   svg { font-family: "Helvetica Neue", Helvetica, -apple-system, sans-serif; }
-  .mu-guide line { stroke: #fff; }
+  .mu-drift-line { stroke: #fff; }
   .mu-cone-fill { opacity: 1; }
   .mu-cone-edge { fill: none; stroke: rgba(255, 255, 255, 0.55); stroke-width: 1.5; }
   .axis text { fill: rgba(255, 255, 255, 0.44); font-size: 11px; }
@@ -642,6 +643,7 @@ const graphSettingsDraft = reactive({
   timeSteps: simTimeSteps.value,
   pathLimit: cloudPathLimit.value,
   binsMultiplier: histBinsMultiplier.value,
+  priceScale: priceScaleMode.value,
 });
 
 const setSimTimeSteps = (value: number): void => {
@@ -734,6 +736,7 @@ const syncSettingsDraft = (): void => {
   graphSettingsDraft.timeSteps = simTimeSteps.value;
   graphSettingsDraft.pathLimit = cloudPathLimit.value;
   graphSettingsDraft.binsMultiplier = histBinsMultiplier.value;
+  graphSettingsDraft.priceScale = priceScaleMode.value;
 };
 
 const toggleSimSettings = (): void => {
@@ -836,6 +839,7 @@ const setDraftBinsMultiplier = (value: number): void => {
 
 const confirmSimSettings = (): void => {
   Object.assign(pathModel, pathModelDraft);
+  priceScaleMode.value = graphSettingsDraft.priceScale;
   if (graphSettingsDraft.timeSteps !== simTimeSteps.value) {
     setSimTimeSteps(graphSettingsDraft.timeSteps);
   }
@@ -2041,6 +2045,20 @@ watch(
                 <span>Graph</span>
               </div>
               <div class="settings-fields">
+                <div class="sim-settings-row">
+                  <span>Price scale</span>
+                  <div class="price-scale-toggle" role="group" aria-label="Price scale">
+                    <button
+                      v-for="mode in (['linear', 'log'] as const)"
+                      :key="mode"
+                      type="button"
+                      :class="{ 'is-active': graphSettingsDraft.priceScale === mode }"
+                      :aria-pressed="graphSettingsDraft.priceScale === mode"
+                      :title="mode === 'log' ? 'Equal percentage moves take equal vertical space' : 'Equal dollar moves take equal vertical space'"
+                      @click="graphSettingsDraft.priceScale = mode"
+                    >{{ mode === 'log' ? 'Log' : 'Linear' }}</button>
+                  </div>
+                </div>
                 <label
                   class="sim-settings-row has-settings-tooltip"
                   :data-tooltip="SETTINGS_TOOLTIPS.timeSteps"
@@ -2380,6 +2398,7 @@ watch(
       </div>
           <CloudChart
         v-if="strategySimulationReady"
+        :priceScale="priceScaleMode"
         :seed="seed"
         :params="appliedParams"
         :pathModel="pathModel"
@@ -3152,7 +3171,8 @@ watch(
   font-weight: 500;
 }
 
-.path-model-toggle {
+.path-model-toggle,
+.price-scale-toggle {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 3px;
@@ -3161,7 +3181,8 @@ watch(
   background: rgba(255, 255, 255, 0.055);
 }
 
-.path-model-toggle button {
+.path-model-toggle button,
+.price-scale-toggle button {
   height: 26px;
   border: none;
   border-radius: 5px;
@@ -3171,11 +3192,13 @@ watch(
   font-weight: 600;
 }
 
-.path-model-toggle button:hover {
+.path-model-toggle button:hover,
+.price-scale-toggle button:hover {
   color: #d8dde5;
 }
 
-.path-model-toggle button.is-active {
+.path-model-toggle button.is-active,
+.price-scale-toggle button.is-active {
   background: rgba(255, 255, 255, 0.105);
   color: #e8eaed;
 }

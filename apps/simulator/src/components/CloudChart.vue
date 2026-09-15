@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import * as d3 from "d3";
+import { findPriceBinIndex } from "../lib/terminalHistogram";
 import type { GBMParams } from "../lib/gbm";
 import {
   sanitizePathModel,
@@ -43,6 +44,7 @@ const props = defineProps<{
   seed: number;
   params: GBMParams;
   pathModel: PathModelParams;
+  priceScale?: "log" | "linear";
   valuationTs?: number;
   muMin?: number;
   muMax?: number;
@@ -243,6 +245,7 @@ type SimWorkerRequest = {
   optionPricingByLegId: Record<string, OptionPricingInput>;
   valuationTs: number;
   horizonSeconds: number;
+  histogramScale?: "linear" | "log";
   histBins: number;
   histBinsMultiplier: number;
   samplePathLimit: number;
@@ -679,6 +682,7 @@ const clearDynamicScene = (sceneHandles: SceneHandles): void => {
   sceneHandles.histogramGroup.selectAll("*").remove();
   // Forward/cone value labels are attached at root SVG level.
   sceneHandles.svg.selectAll(".forward-value-label").remove();
+  sceneHandles.svg.selectAll(".price-scale-label").remove();
   sceneHandles.svg.selectAll(".break-even-region").remove();
   sceneHandles.svg.selectAll(".ev-contribution-chart").remove();
 };
@@ -1451,22 +1455,36 @@ const updateDynamicScene = (
         ? []
         : optionBreakEvenPrices;
 
-  const maxDelta = Math.max(
-    Math.abs(pathMin - baseline),
-    Math.abs(pathMax - baseline),
-  );
-  const paddedDelta = maxDelta * 1.02;
-  const safeDelta =
-    Number.isFinite(paddedDelta) && paddedDelta > 0 ? paddedDelta : 1;
-  const targetDomain: [number, number] = [
-    baseline - safeDelta,
-    baseline + safeDelta,
-  ];
-  const y = d3.scaleLinear().domain(targetDomain).range([mainHeight, 0]);
-
+  // Fit observed prices instead of reserving an equal dollar range below spot.
+  const useLogScale = props.priceScale !== "linear";
+  const priceMin = Math.max(Number.MIN_VALUE, Math.min(baseline, pathMin));
+  const priceMax = Math.max(priceMin, baseline, pathMax);
+  const y = useLogScale ? d3.scaleLog() : d3.scaleLinear();
+  if (useLogScale) {
+    const padding = Math.max(Math.log(priceMax) - Math.log(priceMin), 0.02) * 0.04;
+    y.domain([
+      Math.exp(Math.max(Math.log(Number.MIN_VALUE), Math.log(priceMin) - padding)),
+      Math.exp(Math.min(Math.log(Number.MAX_VALUE), Math.log(priceMax) + padding)),
+    ]);
+  } else {
+    const padding = Math.max(priceMax - priceMin, baseline * 0.02) * 0.04;
+    y.domain([Math.max(0, priceMin - padding), priceMax + padding]);
+  }
+  y.range([mainHeight, 0]);
   const x = d3.scaleLinear().domain([0, steps]).range([0, mainWidth]);
-  const binMin = targetDomain[0];
-  const binMax = targetDomain[1];
+  // Worker boundaries are dollar prices, even when their spacing is logarithmic.
+  const binMin = bins[0]?.x0 ?? priceMin;
+  const binMax = bins[bins.length - 1]?.x1 ?? priceMax;
+  const binPriceY = (price: number): number =>
+    y(clamp(price, y.domain()[0], y.domain()[1]));
+  svg.append("text")
+    .attr("class", "price-scale-label")
+    .attr("x", margin.left + mainWidth)
+    .attr("y", margin.top + mainHeight + 24)
+    .attr("text-anchor", "end")
+    .attr("fill", "#70767d")
+    .attr("font-size", 10)
+    .text(useLogScale ? "Price · log scale" : "Price · linear scale");
 
   const negSpan = Math.abs(Math.min(payoffMin, 0));
   const posSpan = Math.max(payoffMax, 0);
@@ -1513,7 +1531,10 @@ const updateDynamicScene = (
     for (let i = 0; i < path.length; i += 1) {
       canvasCtx.lineTo(x(i + 1), y(path[i]));
     }
-    canvasCtx.lineTo(x(steps), y(baseline));
+    // Fill toward the cloud's center, avoiding a solid wedge back to spot.
+    for (let i = path.length - 1; i >= 0; i -= 1) {
+      canvasCtx.lineTo(x(i + 1), y(cloudCenter[i]));
+    }
     canvasCtx.closePath();
     canvasCtx.fillStyle = fill;
     canvasCtx.globalAlpha = opacity;
@@ -1593,6 +1614,9 @@ const updateDynamicScene = (
   );
   const activeCloudIndices =
     props.pathFilter === "stopped" ? stoppedPathIndices : d3.range(paths.length);
+  const cloudCenter = Array.from({ length: steps }, (_, step) =>
+    d3.median(activeCloudIndices, (index: number) => paths[index][step]) ?? baseline,
+  );
   if (
     props.pathFilter === "stopped" &&
     highestFinishingStoppedPath != null
@@ -1683,11 +1707,9 @@ const updateDynamicScene = (
   const muConeUpper = muGuide.append("path").attr("class", "mu-cone-edge");
   const muConeLower = muGuide.append("path").attr("class", "mu-cone-edge");
   const muLine = muGuide
-    .append("line")
-    .attr("x1", 0)
-    .attr("y1", baselineY)
-    .attr("x2", mainWidth)
-    .attr("y2", baselineY);
+    .append("path")
+    .attr("class", "mu-drift-line")
+    .attr("fill", "none");
   interactionLayer.raise();
 
   // Meta labels (μ, σ, n) and horizon label are now rendered in HTML header
@@ -1882,16 +1904,7 @@ const updateDynamicScene = (
       : payoffColorRamp(value);
   };
   const histogramOpacity = clamp(props.histogramOpacity ?? 0.9, 0, 1);
-  const binCount = bins.length;
-  const invBinSize =
-    binCount > 0 && binMax > binMin ? binCount / (binMax - binMin) : 0;
-  const findBinIndex = (value: number): number => {
-    if (!Number.isFinite(value) || binCount === 0 || invBinSize <= 0) return -1;
-    if (value <= binMin) return 0;
-    if (value >= binMax) return binCount - 1;
-    const idx = Math.floor((value - binMin) * invBinSize);
-    return Math.max(0, Math.min(binCount - 1, idx));
-  };
+  const findBinIndex = (value: number): number => findPriceBinIndex(bins, value);
   const cloudFillForPath = (pathIndex: number): string => {
     if (histogramMode !== "prob") {
       return payoffColorRamp(sampledPayoffs[pathIndex] ?? 0);
@@ -1944,9 +1957,9 @@ const updateDynamicScene = (
   // Round shared boundaries identically. Floor/ceil expands adjacent bars
   // into each other, creating bright seams where translucent fills overlap.
   const histBarTopY = (bin: SimBin): number =>
-    Math.round(y(bin.x1 ?? bin.x0 ?? baseline));
+    Math.round(binPriceY(bin.x1 ?? bin.x0 ?? baseline));
   const histBarBottomY = (bin: SimBin): number =>
-    Math.round(y(bin.x0 ?? bin.x1 ?? baseline));
+    Math.round(binPriceY(bin.x0 ?? bin.x1 ?? baseline));
   const histBarY = (bin: SimBin): number =>
     Math.min(histBarTopY(bin), histBarBottomY(bin));
   const histBarHeight = (bin: SimBin): number =>
@@ -2076,7 +2089,7 @@ const updateDynamicScene = (
       .datum(cumulativeEV)
       .attr("d", d3.line<(typeof cumulativeEV)[number]>()
         .x((point) => xCumulative(point.contribution))
-        .y((point) => y(point.terminalPrice)))
+        .y((point) => binPriceY(point.terminalPrice)))
       .attr("fill", "none")
       .attr("stroke", "#fff")
       .attr("stroke-width", 1.25)
@@ -2084,12 +2097,12 @@ const updateDynamicScene = (
     const endpoint = cumulativeEV[cumulativeEV.length - 1];
     cumulativeLayer.append("circle")
       .attr("cx", xCumulative(endpoint.contribution))
-      .attr("cy", y(endpoint.terminalPrice))
+      .attr("cy", binPriceY(endpoint.terminalPrice))
       .attr("r", 2)
       .attr("fill", "#fff");
     cumulativeLayer.append("text")
       .attr("x", xCumulative(endpoint.contribution))
-      .attr("y", y(endpoint.terminalPrice) - 7)
+      .attr("y", binPriceY(endpoint.terminalPrice) - 7)
       .attr("text-anchor", "middle")
       .attr("fill", "#fff")
       .attr("font-size", 10)
@@ -2205,12 +2218,16 @@ const updateDynamicScene = (
   }
 
   // Right-hand price axis: labels the vertical extent of both histogram columns.
-  const priceTicks = d3.ticks(safeFinalMin, safeFinalMax, 4);
+  const priceTicks = (useLogScale ? d3.scaleLog() : d3.scaleLinear())
+    .domain([safeFinalMin, safeFinalMax]).ticks(4);
+  let previousTickY = Infinity;
   for (const tick of priceTicks) {
     const tickY = y(tick);
     if (tickY < dataTopY - 4 || tickY > dataBottomY + 4) continue;
+    if (Math.abs(tickY - previousTickY) < 24) continue;
     // Leave room for the mean annotation while keeping its exact price anchor.
     if (averagePayoffY != null && Math.abs(tickY - averagePayoffY) < 18) continue;
+    previousTickY = tickY;
     axisGroup
       .append("text")
       .attr("x", 8)
@@ -2366,15 +2383,9 @@ const updateDynamicScene = (
     .y((d) => y(d.value));
 
   const drawMuGuide = (mu: number, vol: number): void => {
-    const endPrice = baseline * Math.exp(mu * maxElapsed);
-    const endY = y(endPrice);
     muGuide.style("display", "block");
     updateForwardLabels(mu, vol);
     muLine
-      .attr("x1", 0)
-      .attr("y1", baselineY)
-      .attr("x2", mainWidth)
-      .attr("y2", endY)
       .style("stroke-width", driftHover ? 4.5 : 2.2)
       .style("stroke-opacity", driftHover ? 1 : 0.85);
     emit("guide-update", { mu, vol });
@@ -2389,6 +2400,10 @@ const updateDynamicScene = (
       const lower = center * Math.exp(-band);
       points.push({ t, lower, upper });
     }
+    muLine.attr("d", muConeLine(points.map((point) => ({
+      t: point.t,
+      value: baseline * Math.exp(mu * point.t),
+    }))));
     muConeFill.attr("d", muConeArea(points));
     muConeUpper.attr(
       "d",
@@ -2669,6 +2684,9 @@ const draw = async (): Promise<void> => {
         ? Math.floor(props.valuationTs)
         : Math.floor(Date.now() / 1000);
     const horizonSeconds = Math.max(0, props.params.T * SECONDS_PER_YEAR);
+    const histogramScale = props.payoffDisplayMode == null
+      ? props.priceScale ?? "log"
+      : "linear";
     const histBins = Math.max(
       10,
       Math.min(400, Math.round(props.histBins ?? HISTOGRAM_BIN_COUNT)),
@@ -2709,6 +2727,7 @@ const draw = async (): Promise<void> => {
       ),
       valuationTs,
       horizonSeconds,
+      histogramScale,
       histBins,
       histBinsMultiplier,
       samplePathLimit,
@@ -2726,6 +2745,7 @@ const draw = async (): Promise<void> => {
         ),
         valuationTs,
         horizonSeconds,
+        histogramScale,
         histBins,
         histBinsMultiplier,
         samplePathLimit,
@@ -2831,6 +2851,7 @@ watch(
     props.params.dt,
     props.params.rows,
     JSON.stringify(sanitizePathModel(props.pathModel)),
+    props.payoffDisplayMode == null ? props.priceScale ?? "log" : "linear",
     props.histBins,
     props.histBinsMultiplier,
     props.samplePathLimit,
@@ -2925,7 +2946,7 @@ onUnmounted(() => {
       :aria-label="
         payoffDisplayMode
           ? `${payoffChartMode === 'cumulative' ? 'Cumulative expected value' : payoffDisplayMode === 'frequency' ? 'Frequency weighted' : 'Payoff'} option and perpetual comparison`
-          : 'Brownian motion cloud chart'
+          : `Brownian motion cloud chart, ${priceScale ?? 'log'} price scale`
       "
     ></svg>
     <Transition name="histogram-tooltip">
@@ -3401,7 +3422,7 @@ onUnmounted(() => {
   vector-effect: non-scaling-stroke;
 }
 
-:deep(.mu-guide line) {
+:deep(.mu-drift-line) {
   stroke: #fff;
 }
 
