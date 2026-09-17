@@ -253,6 +253,7 @@ type SimWorkerRequest = {
   samplingStopLoss?: {
     side: "buy" | "sell";
     price: number;
+    takeProfit?: number | null;
   };
 };
 
@@ -451,6 +452,8 @@ const sanitizeLegsForWorker = (
             leg.stopLoss == null || !Number.isFinite(Number(leg.stopLoss))
               ? null
               : Number(leg.stopLoss),
+          takeProfit: leg.takeProfit != null && Number.isFinite(Number(leg.takeProfit))
+            ? Number(leg.takeProfit) : null,
           annualFundingRate: Number.isFinite(Number(leg.annualFundingRate))
             ? Number(leg.annualFundingRate)
             : 0,
@@ -1553,6 +1556,8 @@ const updateDynamicScene = (
         let stopStep = -1;
         for (let step = 0; step < path.length; step += 1) {
           const price = path[step];
+          if (stopLeg.takeProfit != null && (stopLeg.side === "buy"
+            ? price >= stopLeg.takeProfit : price <= stopLeg.takeProfit)) break;
           const hit =
             stopLeg.side === "buy"
               ? price <= Number(stopLeg.stopLoss)
@@ -2715,6 +2720,7 @@ const draw = async (): Promise<void> => {
         ? {
             side: samplingStopLeg.side,
             price: Number(samplingStopLeg.stopLoss),
+            takeProfit: samplingStopLeg.takeProfit,
           }
         : undefined;
     sim = await requestSimulation({

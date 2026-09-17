@@ -32,9 +32,9 @@ test("maturity options represent distinct eligible listed expiries", () => {
   const selectable = selectableExpiryQuotes(quotes, valuationTs, 14, "up");
 
   assert.deepEqual(maturityOptionsForQuotes(selectable, valuationTs), [
-    { label: "14d", value: valuationTs + 14 * DAY },
-    { label: "21d", value: valuationTs + 21 * DAY },
-    { label: "42d", value: valuationTs + 42 * DAY },
+    { label: "14d [28 Nov 2023]", value: valuationTs + 14 * DAY },
+    { label: "21d [05 Dec 2023]", value: valuationTs + 21 * DAY },
+    { label: "42d [26 Dec 2023]", value: valuationTs + 42 * DAY },
   ]);
 });
 

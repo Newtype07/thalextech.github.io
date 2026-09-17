@@ -1,6 +1,12 @@
 import type { AtmOptionExpiryQuote } from "./atmOptionChain";
 
 const SECONDS_PER_DAY = 24 * 60 * 60;
+const expiryDateFormatter = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "short",
+  year: "numeric",
+  timeZone: "UTC",
+});
 
 export type StopLossDirection = "up" | "down";
 
@@ -35,7 +41,7 @@ export const maturityOptionsForQuotes = (
   valuationTs: number,
 ): MaturityOption[] =>
   quotes.map((quote) => ({
-    label: `${displayedDaysToExpiry(quote.expirationTs, valuationTs)}d`,
+    label: `${displayedDaysToExpiry(quote.expirationTs, valuationTs)}d [${expiryDateFormatter.format(new Date(quote.expirationTs * 1000))}]`,
     value: quote.expirationTs,
   }));
 

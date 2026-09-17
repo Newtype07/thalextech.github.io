@@ -40,6 +40,7 @@ type SimWorkerRequest = {
   samplingStopLoss?: {
     side: "buy" | "sell";
     price: number;
+    takeProfit?: number | null;
   };
 };
 
@@ -117,6 +118,7 @@ type PreparedFuturePathLeg = {
   qty: number;
   entry: number | null;
   stopLoss: number | null;
+  takeProfit: number | null;
   isBuy: boolean;
   annualFundingRate: number;
 };
@@ -316,6 +318,7 @@ const prepareLegs = (
         qty,
         entry,
         stopLoss,
+        takeProfit: future.takeProfit != null && Number.isFinite(future.takeProfit) ? future.takeProfit : null,
         isBuy: future.side === "buy",
         annualFundingRate: Number.isFinite(future.annualFundingRate)
           ? Number(future.annualFundingRate)
@@ -363,6 +366,7 @@ const prepareLegs = (
   return { hasPositionLegs, optionLegs, futureLegs };
 };
 
+// Exit state: 0 = open, 1 = stop-loss, 2 = take-profit.
 const updateFutureStops = (
   spot: number,
   stepIndex: number,
@@ -374,12 +378,15 @@ const updateFutureStops = (
   for (let index = 0; index < futureLegs.length; index += 1) {
     if (stopHit[index]) continue;
     const leg = futureLegs[index];
-    if (leg.stopLoss == null) continue;
-    if (
+    if (leg.stopLoss != null && (
       (leg.isBuy && Number.isFinite(spot) && spot <= leg.stopLoss) ||
       (!leg.isBuy && Number.isFinite(spot) && spot >= leg.stopLoss)
-    ) {
+    )) {
       stopHit[index] = 1;
+      if (stopHitStep) stopHitStep[index] = stepIndex;
+    } else if (leg.takeProfit != null && Number.isFinite(spot) &&
+      (leg.isBuy ? spot >= leg.takeProfit : spot <= leg.takeProfit)) {
+      stopHit[index] = 2;
       if (stopHitStep) stopHitStep[index] = stepIndex;
     }
   }
@@ -393,9 +400,9 @@ const activeStopPrices = (
 ): number[] => {
   const prices: number[] = [];
   for (let index = 0; index < futureLegs.length; index += 1) {
-    const stopPrice = futureLegs[index].stopLoss;
-    if (!stopHit?.[index] && stopPrice != null && Number.isFinite(stopPrice)) {
-      prices.push(stopPrice);
+    if (stopHit?.[index]) continue;
+    for (const price of [futureLegs[index].stopLoss, futureLegs[index].takeProfit]) {
+      if (price != null && Number.isFinite(price)) prices.push(price);
     }
   }
   if (
@@ -404,6 +411,9 @@ const activeStopPrices = (
     Number.isFinite(samplingStopLoss.price)
   ) {
     prices.push(samplingStopLoss.price);
+    if (samplingStopLoss.takeProfit != null && Number.isFinite(samplingStopLoss.takeProfit)) {
+      prices.push(samplingStopLoss.takeProfit);
+    }
   }
   return prices;
 };
@@ -444,7 +454,7 @@ const positionPnlAt = ({
     const leg = futureLegs[index];
     const entryPrice = leg.entry ?? spot;
     const exitPrice =
-      leg.stopLoss != null && stopHit?.[index] ? leg.stopLoss : spot;
+      stopHit?.[index] === 1 ? leg.stopLoss! : stopHit?.[index] === 2 ? leg.takeProfit! : spot;
     total += leg.sign * leg.qty * (exitPrice - entryPrice);
     const fundedSteps =
       stopHitStep?.[index] != null && stopHitStep[index] >= 0
@@ -605,8 +615,8 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
         if (!samplingStopHit && request.samplingStopLoss) {
           samplingStopHit =
             request.samplingStopLoss.side === "buy"
-              ? s <= request.samplingStopLoss.price
-              : s >= request.samplingStopLoss.price;
+              ? s <= request.samplingStopLoss.price || (request.samplingStopLoss.takeProfit != null && s >= request.samplingStopLoss.takeProfit)
+              : s >= request.samplingStopLoss.price || (request.samplingStopLoss.takeProfit != null && s <= request.samplingStopLoss.takeProfit);
         }
       }
       squaredLogReturns += Math.log(s / stepStartPrice) ** 2;
@@ -638,7 +648,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
       const leg = futureLegs[i];
       // Opportunity cost of a bad stop: path hit the stop, then recovered
       // past it by horizon. Price-only (matches stop-path highlight).
-      if (leg.stopLoss != null && stopHit?.[i]) {
+      if (leg.stopLoss != null && stopHit?.[i] === 1) {
         const recovered =
           (leg.isBuy && s > leg.stopLoss) ||
           (!leg.isBuy && s < leg.stopLoss);
@@ -885,8 +895,8 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
           if (!samplingStopHit && request.samplingStopLoss) {
             samplingStopHit =
               request.samplingStopLoss.side === "buy"
-                ? s <= request.samplingStopLoss.price
-                : s >= request.samplingStopLoss.price;
+                ? s <= request.samplingStopLoss.price || (request.samplingStopLoss.takeProfit != null && s >= request.samplingStopLoss.takeProfit)
+                : s >= request.samplingStopLoss.price || (request.samplingStopLoss.takeProfit != null && s <= request.samplingStopLoss.takeProfit);
           }
         }
         if (writeOffset >= 0) {

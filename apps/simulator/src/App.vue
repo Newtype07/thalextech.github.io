@@ -576,8 +576,8 @@ const setMuFromChart = (mu: number): void => {
 
 const setVolFromChart = (vol: number): void => {
   if (!Number.isFinite(vol)) return;
-  const clamped = clamp(vol, volBounds.min, volBounds.max);
-  const next = roundTo(clamped, 4);
+  // Preserve quote precision so setting VRP to zero gives RV = IV.
+  const next = clamp(vol, volBounds.min, volBounds.max);
   if (
     Math.abs(pendingParams.vol - next) < 1e-9 &&
     Math.abs(appliedParams.vol - next) < 1e-9
@@ -1325,6 +1325,8 @@ const indexDisplay = computed(() => {
 });
 
 type AtmExpiryInstruments = {
+  callStrikes: number[];
+  putStrikes: number[];
   expirationTs: number;
   strike: number;
   callInstrumentName: string;
@@ -1392,6 +1394,8 @@ const stopLossAtmExpiryInstruments = computed<AtmExpiryInstruments[]>(() => {
         Number(instrument.strike_price) === strike,
     );
     rows.push({
+      callStrikes: [...new Set(calls.map((instrument) => Number(instrument.strike_price)))].filter((strike) => strike > 0).sort((a, b) => a - b),
+      putStrikes: [...new Set(instrumentsForExpiry.filter((instrument) => instrument.option_type === "put").map((instrument) => Number(instrument.strike_price)))].filter((strike) => strike > 0).sort((a, b) => a - b),
       expirationTs,
       strike,
       callInstrumentName: atmCall.instrument_name,

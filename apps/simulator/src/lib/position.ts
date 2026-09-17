@@ -19,6 +19,7 @@ export type FutureLeg = {
   qty: number;
   entry: number;
   stopLoss?: number | null;
+  takeProfit?: number | null;
   annualFundingRate?: number;
 };
 
@@ -50,12 +51,18 @@ export const payoffAtPriceForLeg = (leg: PositionLeg, price: number): number => 
   const stopLoss =
     leg.stopLoss == null || !Number.isFinite(leg.stopLoss) ? null : leg.stopLoss;
 
-  const effectivePrice =
+  let effectivePrice =
     stopLoss == null
       ? price
       : leg.side === "buy"
         ? Math.max(price, stopLoss)
         : Math.min(price, stopLoss);
+
+  if (leg.takeProfit != null && Number.isFinite(leg.takeProfit)) {
+    effectivePrice = leg.side === "buy"
+      ? Math.min(effectivePrice, leg.takeProfit)
+      : Math.max(effectivePrice, leg.takeProfit);
+  }
 
   return sign * qty * (effectivePrice - entry);
 };
@@ -85,21 +92,16 @@ export const payoffForPath = (
       leg.stopLoss == null || !Number.isFinite(leg.stopLoss) ? null : leg.stopLoss;
 
     let exitPrice = finalPrice;
-    if (stopLoss != null) {
-      if (leg.side === "buy") {
-        for (const price of path) {
-          if (Number.isFinite(price) && price <= stopLoss) {
-            exitPrice = stopLoss;
-            break;
-          }
-        }
-      } else {
-        for (const price of path) {
-          if (Number.isFinite(price) && price >= stopLoss) {
-            exitPrice = stopLoss;
-            break;
-          }
-        }
+    for (const price of path) {
+      if (!Number.isFinite(price)) continue;
+      if (stopLoss != null && (leg.side === "buy" ? price <= stopLoss : price >= stopLoss)) {
+        exitPrice = stopLoss;
+        break;
+      }
+      if (leg.takeProfit != null && Number.isFinite(leg.takeProfit) &&
+          (leg.side === "buy" ? price >= leg.takeProfit : price <= leg.takeProfit)) {
+        exitPrice = leg.takeProfit;
+        break;
       }
     }
     total += sign * qty * (exitPrice - entry);

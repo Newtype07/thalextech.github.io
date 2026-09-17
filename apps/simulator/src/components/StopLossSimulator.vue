@@ -49,7 +49,6 @@ const RV_MIN_PERCENT = 10;
 const RV_MAX_PERCENT = 120;
 const DRIFT_MIN_PERCENT = -500;
 const DRIFT_MAX_PERCENT = 500;
-const STRIKE_STEP = 500;
 const MATURITY_DAYS = [7, 14, 30, 60, 90, 180] as const;
 const DEFAULT_MATURITY_DAYS = 60;
 const EMPTY_OPTION_PRICING = Object.freeze({});
@@ -73,7 +72,7 @@ const riskBudget = ref(10_000);
 const leverage = ref(10);
 const leverageDraft = ref(10);
 const leverageOverridden = ref(false);
-const realizedVolOverridden = ref(false);
+const targetVrpPoints = ref<number | null>(0);
 const annualFundingPercent = ref(8);
 const horizonDays = ref(14);
 const selectedExpirationTs = ref(0);
@@ -219,36 +218,20 @@ const setFunding = (value: number): void => {
 };
 
 const setLongStrike = (value: number): void => {
-  if (!Number.isFinite(value) || value <= 0) return;
-  longStrike.value = value;
-  if (optionType.value === "put") {
-    if (shortStrike.value >= value) {
-      shortStrike.value = Math.max(1, value - STRIKE_STEP);
-    }
-  } else if (shortStrike.value <= value) {
-    shortStrike.value = value + STRIKE_STEP;
+  if (longStrikeOptions.value.some((option) => option.value === value)) {
+    longStrike.value = value;
   }
 };
 
 const setShortStrike = (value: number): void => {
-  if (optionType.value === "put") {
-    if (!Number.isFinite(value) || value >= longStrike.value || value <= 0) {
-      shortStrike.value = Math.max(1, longStrike.value - STRIKE_STEP);
-      return;
-    }
+  if (shortStrikeOptions.value.some((option) => option.value === value)) {
     shortStrike.value = value;
-    return;
   }
-  if (!Number.isFinite(value) || value <= longStrike.value) {
-    shortStrike.value = longStrike.value + STRIKE_STEP;
-    return;
-  }
-  shortStrike.value = value;
 };
 
 const setRealizedVolPercent = (value: number): void => {
   if (!Number.isFinite(value)) return;
-  realizedVolOverridden.value = true;
+  targetVrpPoints.value = null;
   emit(
     "set-vol",
     clamp(value, RV_MIN_PERCENT, RV_MAX_PERCENT) / 100,
@@ -314,31 +297,33 @@ const selectedExpiryQuote = computed(
     ) ?? null,
 );
 
-watch(
-  () => [
-    selectedExpiryQuote.value?.expirationTs,
-    selectedExpiryQuote.value?.strike,
-    optionType.value,
-  ],
-  ([, atmStrike]) => {
-    const strike = Number(atmStrike);
-    if (!Number.isFinite(strike) || strike <= 0) return;
-    longStrike.value = strike;
-    shortStrike.value = optionType.value === "put"
-      ? Math.max(
-          1,
-          Math.min(
-            strike - STRIKE_STEP,
-            Math.round((strike * 0.9) / STRIKE_STEP) * STRIKE_STEP,
-          ),
-        )
-      : Math.max(
-          strike + STRIKE_STEP,
-          Math.round((strike * 1.1) / STRIKE_STEP) * STRIKE_STEP,
-        );
-  },
-  { immediate: true },
-);
+const listedStrikes = computed(() => {
+  const quote = selectedExpiryQuote.value;
+  return (optionType.value === "put" ? quote?.putStrikes : quote?.callStrikes) ?? [];
+});
+const longStrikeOptions = computed(() => listedStrikes.value
+  .filter((strike) => !isSpread.value || listedStrikes.value.some((other) =>
+    optionType.value === "put" ? other < strike : other > strike))
+  .map((value) => ({ label: value.toLocaleString("en-US"), value })));
+const shortStrikeOptions = computed(() => listedStrikes.value
+  .filter((strike) => optionType.value === "put" ? strike < longStrike.value : strike > longStrike.value)
+  .map((value) => ({ label: value.toLocaleString("en-US"), value })));
+
+const nearestStrike = (options: { value: number }[], target: number): number =>
+  options.reduce((nearest, option) =>
+    Math.abs(option.value - target) < Math.abs(nearest - target) ? option.value : nearest,
+    options[0]?.value ?? 0);
+
+watch(longStrikeOptions, (options) => {
+  if (!options.some(({ value }) => value === longStrike.value)) {
+    longStrike.value = nearestStrike(options, selectedExpiryQuote.value?.strike ?? 0);
+  }
+}, { immediate: true });
+watch(shortStrikeOptions, (options) => {
+  if (!options.some(({ value }) => value === shortStrike.value)) {
+    shortStrike.value = nearestStrike(options, longStrike.value * (optionType.value === "put" ? 0.9 : 1.1));
+  }
+}, { immediate: true });
 
 const selectedOptionIv = computed(() =>
   optionType.value === "put"
@@ -346,19 +331,29 @@ const selectedOptionIv = computed(() =>
     : selectedExpiryQuote.value?.callIv,
 );
 
+const hasOptionIv = computed(() =>
+  selectedOptionIv.value != null &&
+  Number.isFinite(selectedOptionIv.value) && Number(selectedOptionIv.value) > 0,
+);
+const vrpPoints = computed(() => hasOptionIv.value
+  ? (Number(selectedOptionIv.value) - props.params.vol) * 100
+  : null);
+const canMatchIv = computed(() => hasOptionIv.value &&
+  Number(selectedOptionIv.value) >= RV_MIN_PERCENT / 100 &&
+  Number(selectedOptionIv.value) <= RV_MAX_PERCENT / 100);
+
+const setVrpPoints = (value: number): void => {
+  if (!hasOptionIv.value || !Number.isFinite(value)) return;
+  targetVrpPoints.value = value;
+};
+
 watch(
-  selectedOptionIv,
-  (iv) => {
-    if (
-      realizedVolOverridden.value ||
-      !Number.isFinite(iv) ||
-      Number(iv) <= 0
-    ) {
-      return;
-    }
+  [selectedOptionIv, targetVrpPoints],
+  ([iv, vrp]) => {
+    if (!hasOptionIv.value || vrp == null) return;
     emit(
       "set-vol",
-      clamp(Number(iv), RV_MIN_PERCENT / 100, RV_MAX_PERCENT / 100),
+      clamp(Number(iv) - vrp / 100, RV_MIN_PERCENT / 100, RV_MAX_PERCENT / 100),
     );
   },
   { immediate: true },
@@ -586,6 +581,9 @@ const stopPrice = computed(() =>
     ? props.params.s0 + stopDistance.value
     : Math.max(0, props.params.s0 - stopDistance.value),
 );
+const takeProfitPrice = computed(() => isSpread.value
+  ? props.params.s0 + (perpSide.value === "buy" ? 1 : -1) * Math.abs(shortStrike.value - longStrike.value)
+  : null);
 const perpLegs = computed<PositionLeg[]>(() => [
   {
     id: "stop-loss-perp",
@@ -594,6 +592,7 @@ const perpLegs = computed<PositionLeg[]>(() => [
     qty: perpContracts.value,
     entry: props.params.s0,
     stopLoss: stopPrice.value,
+    takeProfit: takeProfitPrice.value,
     annualFundingRate: annualFundingPercent.value / 100,
   },
 ]);
@@ -638,6 +637,7 @@ const payoffChartContext = computed(() => {
     `Drift ${(props.params.mu * 100).toFixed(1)}%`,
     `Risk ${formatUsd(riskBudget.value)}`,
     `Perp ${leverage.value.toFixed(2)}×`,
+    ...(takeProfitPrice.value != null ? [`Take profit ${formatUsd(takeProfitPrice.value)}`] : []),
     `Funding ${funding}%/yr`,
     `Horizon ${horizonDays.value}d`,
     `Maturity ${maturityDays}d`,
@@ -648,7 +648,9 @@ const optionMarketReady = computed(
   () =>
     Number.isFinite(selectedOptionIv.value) &&
     Number(selectedOptionIv.value) > 0 &&
-    optionPremium.value > 0,
+    optionPremium.value > 0 &&
+    longStrikeOptions.value.some(({ value }) => value === longStrike.value) &&
+    (!isSpread.value || shortStrikeOptions.value.some(({ value }) => value === shortStrike.value)),
 );
 
 const optionResultStats = computed(() =>
@@ -694,56 +696,30 @@ const hoveredPriceRangeLabel = computed(() => {
             />
           </span>
         </div>
-        <label class="control-pill control-pill--strike">
+        <div class="control-pill control-pill--strike">
           <span class="pill-label">Long K</span>
           <span class="pill-value">
-            <input
-              type="number"
-              min="1"
-              :step="STRIKE_STEP"
-              :value="longStrike"
-              :aria-label="`Long ${optionType} strike`"
-              @focus="selectAssumptionInput"
-              @change="
-                setLongStrike(
-                  Number(($event.target as HTMLInputElement).value),
-                )
-              "
-              @blur="
-                setLongStrike(
-                  Number(($event.target as HTMLInputElement).value),
-                )
-              "
+            <StyledSelectMenu
+              :model-value="longStrike"
+              :label="`Long ${optionType} strike`"
+              :options="longStrikeOptions"
+              embedded
+              @update:model-value="setLongStrike(Number($event))"
             />
           </span>
-        </label>
-        <label
-          v-if="isSpread"
-          class="control-pill control-pill--strike"
-        >
+        </div>
+        <div v-if="isSpread" class="control-pill control-pill--strike">
           <span class="pill-label">Short K</span>
           <span class="pill-value">
-            <input
-              type="number"
-              :min="optionType === 'put' ? 1 : longStrike + 1"
-              :max="optionType === 'put' ? longStrike - 1 : undefined"
-              :step="STRIKE_STEP"
-              :value="shortStrike"
-              :aria-label="`Short ${optionType} strike`"
-              @focus="selectAssumptionInput"
-              @change="
-                setShortStrike(
-                  Number(($event.target as HTMLInputElement).value),
-                )
-              "
-              @blur="
-                setShortStrike(
-                  Number(($event.target as HTMLInputElement).value),
-                )
-              "
+            <StyledSelectMenu
+              :model-value="shortStrike"
+              :label="`Short ${optionType} strike`"
+              :options="shortStrikeOptions"
+              embedded
+              @update:model-value="setShortStrike(Number($event))"
             />
           </span>
-        </label>
+        </div>
       <label class="control-pill control-pill--risk">
         <span class="pill-label">Risk</span>
         <span class="pill-value">
@@ -831,7 +807,7 @@ const hoveredPriceRangeLabel = computed(() => {
           />
         </span>
       </div>
-      <div class="control-pill select-pill">
+      <div class="control-pill select-pill maturity-pill">
         <span class="pill-label">Maturity</span>
         <span class="pill-value">
           <StyledSelectMenu
@@ -869,6 +845,32 @@ const hoveredPriceRangeLabel = computed(() => {
           %
         </span>
       </label>
+      <div class="control-pill control-pill--vrp" title="VRP = IV − RV, in volatility points">
+        <label class="vrp-input-label">
+          <span class="pill-label">VRP</span>
+          <span class="pill-value">
+            <input
+              type="number"
+              step="0.1"
+              :disabled="!hasOptionIv"
+              :value="vrpPoints == null ? '' : Number(vrpPoints.toFixed(1))"
+              aria-label="Volatility risk premium in volatility points (IV minus RV)"
+              @focus="selectAssumptionInput"
+              @change="setVrpPoints(Number(($event.target as HTMLInputElement).value))"
+            />
+            pts
+          </span>
+        </label>
+        <button
+          type="button"
+          class="vrp-zero-button"
+          :disabled="!canMatchIv"
+          :aria-pressed="targetVrpPoints === 0 && canMatchIv"
+          aria-label="Set VRP to zero: match RV to IV"
+          :title="canMatchIv ? 'Set RV equal to IV' : 'IV must be available and within the RV range'"
+          @click="setVrpPoints(0)"
+        >0</button>
+      </div>
       <label class="control-pill control-pill--drift">
         <span class="pill-label">Drift</span>
         <span class="pill-value">
@@ -1005,7 +1007,7 @@ const hoveredPriceRangeLabel = computed(() => {
             :payoffChartMode="payoffChartMode"
             :payoffChartContext="payoffChartContext"
             @set-mu="emit('set-mu', $event)"
-            @set-vol="emit('set-vol', $event)"
+            @set-vol="setRealizedVolPercent($event * 100)"
             @stats-update="optionStats = $event"
             @comparison-stats-update="perpStats = $event"
             @histogram-bin-hover="hoveredBinStats = $event"
@@ -1252,8 +1254,39 @@ const hoveredPriceRangeLabel = computed(() => {
   width: 6ch;
 }
 
-.control-pill--strike .pill-value input {
-  width: 7ch;
+.vrp-input-label {
+  display: flex;
+  align-items: center;
+  gap: clamp(10px, 0.625cqw, 13px);
+}
+
+.control-pill--vrp .pill-value {
+  gap: 3px;
+}
+
+.control-pill--vrp .pill-value input {
+  width: 5ch;
+}
+
+.vrp-zero-button {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: #1a1c21;
+  color: #e8eaed;
+  font: inherit;
+  font-size: var(--comparison-font-body);
+  cursor: pointer;
+}
+
+.vrp-zero-button:hover:not(:disabled),
+.vrp-zero-button[aria-pressed="true"] {
+  border-color: #70767d;
+}
+
+.vrp-zero-button:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .pill-value input::-webkit-inner-spin-button,
@@ -1370,6 +1403,10 @@ const hoveredPriceRangeLabel = computed(() => {
 
 .select-pill :deep(.styled-select) {
   width: 28px;
+}
+
+.maturity-pill :deep(.styled-select) {
+  width: auto;
 }
 
 .option-structure-pill :deep(.styled-select) {
