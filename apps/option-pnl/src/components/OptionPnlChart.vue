@@ -1,5 +1,6 @@
 <script setup>
 import * as d3 from "d3";
+import { calculateAttribution } from "../lib/attribution.js";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { exportChartToPng } from "../../../../lib/export-png.js";
 
@@ -8,6 +9,8 @@ const props = defineProps({
   optionPnlData: { type: Array, default: () => [] },
   optionInstrumentName: { type: String, default: "" },
   loading: { type: Boolean, default: false },
+  attributionMethod: { type: String, default: "pathwise" },
+  instrument: { type: Object, default: () => ({}) },
 });
 
 const svgRef = ref(null);
@@ -56,7 +59,16 @@ const DETAIL_SERIES_ORDER = [
 ];
 const DETAIL_SERIES_COLOR_STEP = 1 / DETAIL_SERIES_ORDER.length;
 const DETAIL_SERIES_COLOR_INDEX_OFFSET = 0.5;
-const DETAIL_SERIES_CONFIG = DETAIL_SERIES_ORDER.map((series, index) => ({
+const END_STATE_SERIES_ORDER = [
+  { key: "time", label: "Time decay" },
+  { key: "volatility", label: "Volatility" },
+  { key: "total", label: "Total" },
+  { key: "residual", label: "Residual" },
+  { key: "spot", label: "Spot" },
+].map((series) => ({ ...series, strokeWidth: 0.8, areaOpacity: 0.04 }));
+const detailSeriesConfig = computed(() => (
+  props.attributionMethod === "end_state" ? END_STATE_SERIES_ORDER : DETAIL_SERIES_ORDER
+).map((series, index) => ({
   ...series,
   color: d3.interpolateRdBu(
     Math.min(
@@ -64,7 +76,7 @@ const DETAIL_SERIES_CONFIG = DETAIL_SERIES_ORDER.map((series, index) => ({
       (index + DETAIL_SERIES_COLOR_INDEX_OFFSET) * DETAIL_SERIES_COLOR_STEP,
     ),
   ),
-}));
+})));
 
 const chartState = {
   gradient: null,
@@ -845,7 +857,7 @@ function render() {
   chartState.detailTitleText
     .attr("x", detailWidth / 2)
     .attr("y", 30)
-    .text("Greeks P&L");
+    .text(props.attributionMethod === "end_state" ? "End-state P&L" : "Greeks P&L");
   chartState.detailSubtitleText
     .attr("x", detailWidth / 2)
     .attr("y", 54)
@@ -1024,63 +1036,10 @@ function render() {
       return;
     }
 
-    const cumulative = {
-      total: 0,
-      delta: 0,
-      gammaTheta: 0,
-      vega: 0,
-      residual: 0,
-    };
-    const seriesByKey = {
-      total: [],
-      delta: [],
-      gammaTheta: [],
-      vega: [],
-      residual: [],
-    };
+    const seriesByKey = calculateAttribution(pnlWindow, props.instrument, props.attributionMethod);
+    const cumulative = { total: seriesByKey.total.at(-1)?.value };
 
-    pnlWindow.forEach((point, index) => {
-      const date = point.date;
-
-      // The first point marks the start of our range (t=0).
-      // We set it to zero and skip its P&L values, because point.PL
-      // represents the interval *ending* at this timestamp (before our window).
-      if (index === 0) {
-        seriesByKey.total.push({ date, value: 0 });
-        seriesByKey.delta.push({ date, value: 0 });
-        seriesByKey.gammaTheta.push({ date, value: 0 });
-        seriesByKey.vega.push({ date, value: 0 });
-        seriesByKey.residual.push({ date, value: 0 });
-        return;
-      }
-
-      // Accumulate P&L for all points after the first
-      const deltaPL = Number.isFinite(point.delta_PL) ? point.delta_PL : 0;
-      const gammaThetaPL = Number.isFinite(point.gamma_theta_PL)
-        ? point.gamma_theta_PL
-        : 0;
-      const vegaPL = Number.isFinite(point.vega_PL) ? point.vega_PL : 0;
-      const residualPL = Number.isFinite(point.residual_PL)
-        ? point.residual_PL
-        : 0;
-      const totalPL = Number.isFinite(point.PL)
-        ? point.PL
-        : deltaPL + gammaThetaPL + vegaPL + residualPL;
-
-      cumulative.delta += deltaPL;
-      cumulative.gammaTheta += gammaThetaPL;
-      cumulative.vega += vegaPL;
-      cumulative.residual += residualPL;
-      cumulative.total += totalPL;
-
-      seriesByKey.total.push({ date, value: cumulative.total });
-      seriesByKey.delta.push({ date, value: cumulative.delta });
-      seriesByKey.gammaTheta.push({ date, value: cumulative.gammaTheta });
-      seriesByKey.vega.push({ date, value: cumulative.vega });
-      seriesByKey.residual.push({ date, value: cumulative.residual });
-    });
-
-    const seriesList = DETAIL_SERIES_CONFIG.map((series) => ({
+    const seriesList = detailSeriesConfig.value.map((series) => ({
       ...series,
       values: seriesByKey[series.key] || [],
     }));
@@ -1144,11 +1103,13 @@ function render() {
 
     const line = d3
       .line()
+      .defined((d) => Number.isFinite(d.value))
       .x((d) => detailX(d.date))
       .y((d) => detailY(d.value))
       .curve(d3.curveMonotoneX);
     const area = d3
       .area()
+      .defined((d) => Number.isFinite(d.value))
       .x((d) => detailX(d.date))
       .y0(detailY(0))
       .y1((d) => detailY(d.value))
@@ -1448,7 +1409,7 @@ function render() {
 }
 
 watch(
-  () => [props.data, props.optionPnlData, props.optionInstrumentName],
+  () => [props.data, props.optionPnlData, props.optionInstrumentName, props.attributionMethod, props.instrument],
   () => render(),
   { deep: false },
 );

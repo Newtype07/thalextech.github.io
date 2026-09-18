@@ -47,6 +47,7 @@ const ui = reactive({
   optionStrike: "",
   optionType: "call",
   maxPoints: DEFAULT_LOOKBACK_POINT_LIMIT,
+  pnlAttributionMethod: "pathwise",
   loading: false,
   error: "",
 });
@@ -277,6 +278,11 @@ const optionStrikes = computed(() => {
 });
 
 const selectedStrike = computed(() => Number(ui.optionStrike));
+
+const attributionMethods = [
+  { value: "pathwise", label: "Pathwise Greeks" },
+  { value: "end_state", label: "End-state" },
+];
 
 const optionTypes = [
   { value: "call", label: "Call" },
@@ -664,6 +670,15 @@ watch(
           />
         </div>
 
+        <div class="field">
+          <span class="fieldLabel">P&amp;L attribution</span>
+          <StyledSelectMenu
+            v-model="ui.pnlAttributionMethod"
+            label="P&L attribution"
+            :options="attributionMethods"
+          />
+        </div>
+
         <button
           class="saveButton"
           type="button"
@@ -712,18 +727,31 @@ watch(
         </div>
       </div>
 
+      <p class="attributionHint">
+        {{ ui.pnlAttributionMethod === "end_state"
+          ? "End-state: Spot, Volatility and Time decay explain the change from the selected entry to each timestamp, independent of the path. Total is current mark minus entry mark; Residual includes other mark effects."
+          : "Pathwise Greeks: accumulated local Greek P&L along the selected price and volatility path. Legacy Total sums candle P&L and can differ from end-state Total across gaps." }}
+      </p>
       <OptionPnlChart
         ref="chartRef"
         :data="mainSeries"
         :option-pnl-data="optionPnlSeries"
         :option-instrument-name="optionInstrumentName"
         :loading="ui.loading"
+        :attribution-method="ui.pnlAttributionMethod"
+        :instrument="selectedOptionInstrument || {}"
       />
     </div>
   </div>
 </template>
 
 <style scoped>
+.attributionHint {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0 6px 10px;
+}
+
 .fieldLabel {
   color: var(--muted);
   font-size: 13px;
