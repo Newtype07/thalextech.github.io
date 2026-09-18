@@ -283,6 +283,15 @@ const formatDate = d3.utcFormat("%d %b %y %H:%M");
 const formatPnl = d3.format("$,.0f");
 const formatMarkAxis = d3.format(",.0f");
 const formatMarkDelta = d3.format("+,.0f");
+const formatRoi = (pnl, initialMark) => {
+  const roi = pnl / Math.abs(initialMark);
+  return Number.isFinite(pnl) &&
+    Number.isFinite(initialMark) &&
+    initialMark !== 0 &&
+    Number.isFinite(roi)
+    ? `ROI: ${d3.format("+.2%")(roi)}`
+    : "ROI: n/a";
+};
 const formatVol = d3.format(".1%");
 
 const axisStyle = (axisG) => {
@@ -1201,6 +1210,12 @@ const render = () => {
           };
         })
         .filter((point) => Number.isFinite(point.mark_price_close));
+      const firstMarkPoint = markPoints[0];
+      const lastVisibleMarkPoint = markPoints[markPoints.length - 1];
+      const markRoi = formatRoi(
+        lastVisibleMarkPoint?.mark_price_close - firstMarkPoint?.mark_price_close,
+        firstMarkPoint?.option_mark_price_close,
+      );
 
       bottomPanelGroup
         .append("text")
@@ -1219,7 +1234,7 @@ const render = () => {
         .attr("text-anchor", "middle")
         .attr("fill", CHART_COLORS.secondaryText)
         .style("font-size", "12px")
-        .text(subtitle);
+        .text(`${subtitle} | ${markRoi}`);
 
       if (!markPoints.length) {
         plotGroup
@@ -1936,7 +1951,9 @@ const render = () => {
       .attr("text-anchor", "middle")
       .attr("fill", CHART_COLORS.secondaryText)
       .style("font-size", "12px")
-      .text(subtitle);
+      .text(
+        `${subtitle} | ${formatRoi(cumulative.total, comboFiltered[0]?.option_mark_price_close)}`,
+      );
 
     const legendLineLength = 18;
     const legendLabelOffset = 6;
