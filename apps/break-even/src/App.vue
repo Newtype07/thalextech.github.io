@@ -35,8 +35,6 @@ const MAX_LOOKBACK_POINT_LIMIT = 1440;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const MARK_HISTORY_REQUEST_POINT_LIMIT = 360;
 const MAX_ABS_DELTA = 0.55;
-const STRIKE_MIN_INDEX_MULTIPLIER = 0.8;
-const STRIKE_MAX_INDEX_MULTIPLIER = 1.2;
 
 const UNDERLYING_OPTIONS = [
   { value: "BTCUSD", label: "BTC" },
@@ -159,43 +157,6 @@ const getLatestIndexPoint = (rows) => {
     }
   }
   return null;
-};
-
-const getIndexCloseRange = (rows) => {
-  let minClose = Infinity;
-  let maxClose = -Infinity;
-  for (const row of rows || []) {
-    const close = Number(row?.index_price_close);
-    if (!Number.isFinite(close)) continue;
-    if (close < minClose) minClose = close;
-    if (close > maxClose) maxClose = close;
-  }
-  if (!Number.isFinite(minClose) || !Number.isFinite(maxClose)) return null;
-  return { minClose, maxClose };
-};
-
-const getStrikeBoundsFromIndexRows = (rows) => {
-  const range = getIndexCloseRange(rows);
-  if (!range) return null;
-  return {
-    minStrike: range.minClose * STRIKE_MIN_INDEX_MULTIPLIER,
-    maxStrike: range.maxClose * STRIKE_MAX_INDEX_MULTIPLIER,
-  };
-};
-
-const filterInstrumentsByStrikeBounds = (instruments, bounds) => {
-  if (!bounds) return instruments || [];
-  const minStrike = Number(bounds?.minStrike);
-  const maxStrike = Number(bounds?.maxStrike);
-  if (!Number.isFinite(minStrike) || !Number.isFinite(maxStrike)) {
-    return instruments || [];
-  }
-  return (instruments || []).filter((instrument) => {
-    const strike = Number(instrument?.strike);
-    return (
-      Number.isFinite(strike) && strike >= minStrike && strike <= maxStrike
-    );
-  });
 };
 
 const latestMarkValue = (row, fields) => {
@@ -445,9 +406,6 @@ const optionInstrumentsForMaturity = computed(() => {
 });
 
 const currentIndexRows = computed(() => data.index[ui.resolutionKey] || []);
-const strikeBoundsForCurrentIndex = computed(() =>
-  getStrikeBoundsFromIndexRows(currentIndexRows.value),
-);
 
 const latestIndexPoint = computed(() => getLatestIndexPoint(currentIndexRows.value));
 const latestSpot = computed(() => latestIndexPoint.value?.index_price_close ?? null);
@@ -478,13 +436,6 @@ const chartIndexProjectedData = computed(() => {
   ];
 });
 
-const boundedOptionInstrumentsForMaturity = computed(() =>
-  filterInstrumentsByStrikeBounds(
-    optionInstrumentsForMaturity.value,
-    strikeBoundsForCurrentIndex.value,
-  ),
-);
-
 const breakEvenTracks = computed(() => {
   const expiryTs = selectedMaturityTs.value;
   const spot = latestSpot.value;
@@ -506,7 +457,7 @@ const breakEvenTracks = computed(() => {
 
   const tracks = [];
 
-  for (const instrument of boundedOptionInstrumentsForMaturity.value) {
+  for (const instrument of optionInstrumentsForMaturity.value) {
     const optionType = instrument.option_type_normalized;
     const strike = instrument.strike;
     const instrumentName = instrument.instrument_name;
@@ -735,17 +686,12 @@ async function load() {
     const indexRows = await indexPromise;
     if (requestId !== loadRequestId) return;
     const normalizedIndexRows = Array.isArray(indexRows) ? indexRows : [];
-    const strikeBounds = getStrikeBoundsFromIndexRows(normalizedIndexRows);
-    const boundedMaturityInstruments = filterInstrumentsByStrikeBounds(
-      maturityInstruments,
-      strikeBounds,
-    );
     data.index[ui.resolutionKey] = normalizedIndexRows;
     data.markByInstrument = {};
 
     const { rowsByInstrument } =
       await fetchMarkHistoriesByInstrument({
-        instruments: boundedMaturityInstruments,
+        instruments: maturityInstruments,
         resolution,
         intervalSeconds:
           RESOLUTION_CONFIG[ui.resolutionKey]?.interval_seconds ??
