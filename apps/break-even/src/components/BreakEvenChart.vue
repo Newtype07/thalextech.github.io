@@ -1,8 +1,10 @@
 <script setup>
 import * as d3 from "d3";
-import { onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { exportChartToPng } from "../../../../lib/export-png.js";
 import { buildBreakEvenSnapshot } from "../lib/breakEvenSnapshot.js";
+
+import { buildTrackProbabilityHistory, nearestTrack } from "../lib/trackSelection.js";
 
 const props = defineProps({
   tracks: { type: Array, default: () => [] },
@@ -18,6 +20,14 @@ const props = defineProps({
 });
 
 const svgRef = ref(null);
+const selectedInstrument = ref(null);
+const selectedTrack = computed(() => props.tracks.find(track => track.instrumentName === selectedInstrument.value));
+const selectedLabel = computed(() => selectedTrack.value
+  ? `${selectedTrack.value.optionType === "put" ? "Put" : "Call"} ${formatPrice(selectedTrack.value.strike)}` : "");
+const clearSelection = () => { selectedInstrument.value = null; };
+watch(() => props.tracks, tracks => {
+  if (!tracks.some(track => track.instrumentName === selectedInstrument.value)) clearSelection();
+});
 
 const layout = {
   width: 1800,
@@ -122,7 +132,8 @@ function render() {
   const svg = d3.select(svgEl);
   svg.selectAll("*").remove();
 
-  const { width, height, margin } = layout;
+  const { width, height } = layout;
+  const margin = selectedTrack.value ? { ...layout.margin, left: 140, right: 140 } : layout.margin;
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = height - margin.top - margin.bottom;
 
@@ -144,7 +155,7 @@ function render() {
     .style("font-size", "22px")
     .style("font-weight", 650)
     .style("font-family", "ui-sans-serif, system-ui")
-    .text(props.title);
+    .text(selectedTrack.value ? `${selectedLabel.value} · Probability and Index History` : props.title);
 
   if (props.subtitle) {
     svg
@@ -155,7 +166,7 @@ function render() {
       .attr("fill", "#a0a0a0")
       .style("font-size", "18px")
       .style("font-family", "ui-sans-serif, system-ui")
-      .text(props.subtitle);
+      .text(selectedTrack.value ? `Expiry ${new Date(props.expiryTs * 1000).toISOString().slice(0, 10)} · Historical observations` : props.subtitle);
   }
 
   const rawTracks = Array.isArray(props.tracks) ? props.tracks : [];
@@ -190,6 +201,17 @@ function render() {
       (point) => point?.date instanceof Date && Number.isFinite(point?.breakEven),
     ),
   }));
+
+  const selected = tracks.find(track => track.instrumentName === selectedInstrument.value);
+  const probabilityLabel = selected?.optionType === "put" ? "N(-d2)" : "N(d2)";
+  const probabilityColor = selected?.optionType === "put" ? "#ff5e8c" : "#34ffb4";
+  const probabilityHistory = buildTrackProbabilityHistory(selected, indexActual, props.expiryTs);
+  if (selected && !probabilityHistory.length) {
+    svg.append("text").attr("x", width / 2).attr("y", height / 2)
+      .attr("text-anchor", "middle").attr("fill", "#aaa")
+      .text("No matching historical IV and index marks available for this selection.");
+    return;
+  }
 
   const allPoints = tracks.flatMap((track) =>
     track.points.map((point) => ({
@@ -253,18 +275,31 @@ function render() {
 
   if (!(domainStart instanceof Date) || !(domainEnd instanceof Date)) return;
 
-  if (+domainStart === +domainEnd) {
-    domainEnd = new Date(domainEnd.getTime() + 60 * 60 * 1000);
+  if (selected) {
+    [domainStart, domainEnd] = d3.extent(probabilityHistory, point => point.date);
   }
 
-  const yValues = allPoints.map((point) => point.breakEven);
-  for (const point of indexActual) {
+  if (+domainStart === +domainEnd) {
+    // Center a lone observation using the loaded history's sampling interval.
+    const interval = selected
+      ? d3.min(d3.pairs(indexActual, (a, b) => +b.date - +a.date).filter(value => value > 0))
+      : null;
+    const padding = (interval ?? 60 * 60 * 1000) / 2;
+    if (selected) domainStart = new Date(+domainStart - padding);
+    domainEnd = new Date(+domainEnd + (selected ? padding : padding * 2));
+  }
+
+  const visibleIndex = selected
+    ? indexActual.filter(point => point.date >= domainStart && point.date <= domainEnd)
+    : indexActual;
+  const yValues = selected ? [] : allPoints.map((point) => point.breakEven);
+  for (const point of visibleIndex) {
     yValues.push(point.value);
   }
-  for (const point of indexProjected) {
+  for (const point of selected ? [] : indexProjected) {
     yValues.push(point.value);
   }
-  if (Number.isFinite(props.spotPrice)) {
+  if (!selected && Number.isFinite(props.spotPrice)) {
     yValues.push(props.spotPrice);
   }
 
@@ -285,14 +320,24 @@ function render() {
     .append("g")
     .attr("transform", `translate(${margin.left},${margin.top})`);
 
+  const timeAxis = d3.axisBottom(x).ticks(10).tickSize(0).tickPadding(15);
+  if (selected) {
+    const ticks = x.ticks(10);
+    const tickInterval = ticks.length > 1 ? +ticks[1] - +ticks[0] : +domainEnd - +domainStart;
+    timeAxis.tickFormat(d3.utcFormat(tickInterval < 60 * 1000
+      ? "%b %d %H:%M:%S"
+      : tickInterval < 24 * 60 * 60 * 1000 ? "%b %d %H:%M" : "%b %d"));
+  }
+
   g.append("g")
     .attr("transform", `translate(0,${innerHeight})`)
-    .call(d3.axisBottom(x).ticks(10).tickSize(0).tickPadding(15))
+    .call(timeAxis)
     .call(axisStyle);
 
   g.append("g")
+    .attr("transform", selected ? `translate(${innerWidth + 14},0)` : null)
     .call(
-      d3.axisLeft(y).ticks(6).tickSize(0).tickPadding(15).tickFormat(d3.format(",.0f")),
+      (selected ? d3.axisRight(y) : d3.axisLeft(y)).ticks(6).tickSize(0).tickPadding(15).tickFormat(d3.format(",.0f")),
     )
     .call(axisStyle);
 
@@ -313,7 +358,7 @@ function render() {
     .attr("fill", "#a0a0a0")
     .style("font-size", "13px")
     .style("font-family", "ui-sans-serif, system-ui")
-    .text("Break-even level");
+    .text(selected ? probabilityLabel : "Break-even level");
 
   const indexLine = d3
     .line()
@@ -321,7 +366,49 @@ function render() {
     .y((point) => y(point.value))
     .curve(d3.curveBasis);
 
-  if (indexActual.length >= 2) {
+  if (selected) {
+    const [minProbability, maxProbability] = d3.extent(probabilityHistory, point => point.probability);
+    const probabilitySpan = maxProbability - minProbability;
+    const probabilityPadding = probabilitySpan > 0
+      ? probabilitySpan * 0.1
+      : Math.max(Math.abs(maxProbability) * 0.01, 1e-12);
+    const probabilityDomain = Number.isFinite(minProbability)
+      ? [Math.max(0, minProbability - probabilityPadding), Math.min(1, maxProbability + probabilityPadding)]
+      : [0, 1];
+    const probabilityY = d3.scaleLinear().domain(probabilityDomain).nice(5).range([innerHeight, 0]);
+    probabilityY.domain(probabilityY.domain().map(value => Math.max(0, Math.min(1, value))));
+    g.append("g")
+      .call(d3.axisLeft(probabilityY).ticks(5).tickSize(0).tickPadding(12).tickFormat(probabilityY.tickFormat(5, "%")))
+      .call(axisStyle);
+    g.append("text").attr("transform", `translate(${innerWidth + 100},${innerHeight / 2}) rotate(90)`)
+      .attr("text-anchor", "middle").attr("fill", "#c0c0c0").style("font-size", "15px")
+      .text("Index price (USD)");
+    const scatter = g.append("g").attr("pointer-events", "none");
+    scatter.selectAll("rect.indexSquare").data(visibleIndex).join("rect")
+      .attr("class", "indexSquare").attr("x", d => x(d.date) - 3).attr("y", d => y(d.value) - 3)
+      .attr("width", 6).attr("height", 6).attr("fill", "#bfc9da").attr("opacity", 0.4);
+    const probabilityLine = d3.line()
+      .x(point => x(point.date))
+      .y(point => probabilityY(point.probability))
+      .curve(d3.curveMonotoneX);
+    g.append("path").datum(probabilityHistory)
+      .attr("class", "probabilityLine").attr("fill", "none")
+      .attr("stroke", probabilityColor).attr("stroke-width", 2.8)
+      .attr("stroke-linecap", "round").attr("stroke-linejoin", "round")
+      .attr("d", probabilityLine);
+    if (probabilityHistory.length === 1) {
+      const point = probabilityHistory[0];
+      g.append("circle").attr("cx", x(point.date)).attr("cy", probabilityY(point.probability))
+        .attr("r", 3).attr("fill", probabilityColor);
+    }
+    svg.append("text").attr("x", width / 2).attr("y", 84).attr("text-anchor", "middle")
+      .attr("fill", "#a0a0a0").style("font-size", "18px")
+      .style("font-family", "ui-sans-serif, system-ui")
+      .text(`${selectedLabel.value} · ${probabilityHistory.length ? `${probabilityLabel} ${selected.optionType === "put" ? "red" : "green"} line (auto-scaled left axis) · Index grey squares (right axis) · Historical marks only` : "No matching historical IV and index marks"}`);
+    return;
+  }
+
+  if (!selected && indexActual.length >= 2) {
     g.append("path")
       .datum(indexActual)
       .attr("fill", "none")
@@ -346,19 +433,44 @@ function render() {
     .line()
     .x((point) => x(point.date))
     .y((point) => y(point.breakEven))
-    .curve(d3.curveMonotoneX);
+    .curve(d3.curveLinear);
+  const trackPaths = [];
   for (const track of tracks) {
     if (!Array.isArray(track.points) || track.points.length < 2) continue;
-    g.append("path")
+    const path = g.append("path")
+      .attr("class", "selectableTrack")
+      .attr("tabindex", 0).attr("role", "button")
+      .attr("aria-label", `Select ${track.optionType} ${formatPrice(track.strike)} probability history`)
+      .attr("aria-pressed", track.instrumentName === selectedInstrument.value)
       .datum(track.points)
       .attr("fill", "none")
       .attr("stroke", track.color)
       .attr("stroke-width", 2.6)
       .attr("opacity", 0.95)
       .attr("d", breakEvenLine);
+    path.on("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectedInstrument.value = selectedInstrument.value === track.instrumentName ? null : track.instrumentName;
+      } else if (event.key === "Escape") clearSelection();
+    });
+    trackPaths.push({ track, path });
+  }
+  const highlight = id => {
+    for (const { track, path } of trackPaths) {
+      const active = track.instrumentName === id;
+      const chosen = track.instrumentName === selectedInstrument.value;
+      path.attr("stroke-width", active ? 5 : chosen ? 3.8 : 2.6)
+        .attr("opacity", active || chosen ? 1 : id || selected ? 0.18 : 0.95)
+        .style("filter", active ? `drop-shadow(0 0 5px ${track.color})` : null);
+    }
+  };
+  highlight(null);
+  for (const { track, path } of trackPaths) {
+    path.on("focus", () => highlight(track.instrumentName)).on("blur", () => highlight(null));
   }
 
-  if (Number.isFinite(props.currentTs)) {
+  if (!selected && Number.isFinite(props.currentTs)) {
     const nowSnapshot = buildBreakEvenSnapshot({
       tracks,
       indexCurvePoints,
@@ -465,6 +577,32 @@ function render() {
     .style("font-size", "12px")
     .style("font-family", "ui-sans-serif, system-ui")
     .text("Break-even paths are line projections");
+
+  const hitTracks = trackPaths.map(({ track }) => ({
+    id: track.instrumentName, points: track.points.map(point => [x(point.date), y(point.breakEven)]),
+  }));
+  const hitPlane = g.append("rect").attr("width", innerWidth).attr("height", innerHeight)
+    .attr("fill", "transparent").attr("class", "trackHitPlane");
+  const hoverLabel = g.append("text").attr("pointer-events", "none").attr("fill", "white")
+    .attr("paint-order", "stroke").attr("stroke", "#000").attr("stroke-width", 4)
+    .style("font-size", "14px").style("font-family", "ui-sans-serif, system-ui");
+  const hit = event => {
+    const [px, py] = d3.pointer(event, g.node());
+    const scale = svgEl.getBoundingClientRect().width / width || 1;
+    return { px, py, id: nearestTrack(hitTracks, px, py, 10 / scale) };
+  };
+  hitPlane.on("pointermove", event => {
+    const { px, py, id } = hit(event);
+    highlight(id);
+    hitPlane.style("cursor", id ? "pointer" : "default");
+    const track = tracks.find(track => track.instrumentName === id);
+    hoverLabel.attr("x", Math.min(px + 14, innerWidth - 240)).attr("y", Math.max(18, py - 14))
+      .text(track ? `${track.optionType === "put" ? "Put" : "Call"} ${formatPrice(track.strike)} · Click to ${id === selectedInstrument.value ? "clear" : "select"}` : "");
+  }).on("pointerleave", () => { highlight(null); hoverLabel.text(""); })
+    .on("click", event => {
+      const { id } = hit(event);
+      if (id) selectedInstrument.value = id === selectedInstrument.value ? null : id;
+    });
 }
 
 watch(
@@ -479,6 +617,7 @@ watch(
     props.title,
     props.subtitle,
     props.loading,
+    selectedInstrument.value,
   ],
   () => render(),
   { deep: true },
@@ -488,13 +627,19 @@ onMounted(() => render());
 </script>
 
 <template>
-  <div class="chartWrap">
+  <div class="chartWrap" @keydown.esc="clearSelection">
+    <div class="selectionToolbar">
+      <span>{{ selectedTrack ? `${selectedLabel} selected` : 'Hover near a line and click to explore its probability history.' }}</span>
+      <button v-if="selectedTrack" type="button" @click="clearSelection">Back to break-even</button>
+    </div>
     <svg ref="svgRef" class="chartSvg" />
     <div v-if="loading" class="overlay">Loading...</div>
   </div>
 </template>
 
 <style scoped>
+.selectionToolbar { display: flex; align-items: center; gap: 14px; min-height: 36px; padding: 8px 16px; color: #aaa; font-size: 12px; }
+.selectionToolbar button { padding: 5px 10px; border: 1px solid #555; border-radius: 5px; background: #20252c; color: white; cursor: pointer; }
 .chartWrap {
   position: relative;
   border-radius: 14px;

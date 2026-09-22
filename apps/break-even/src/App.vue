@@ -540,7 +540,7 @@ const breakEvenTracks = computed(() => {
   });
 });
 
-const breakEvenTitle = "BTC Option Break-Even Forecast";
+const breakEvenTitle = computed(() => `${underlying.value.slice(0, 3)} Option Break-Even Forecast`);
 const breakEvenSubtitle = computed(() => {
   const expiryTs = selectedMaturityTs.value;
   if (!Number.isFinite(expiryTs)) return "";
@@ -727,7 +727,7 @@ function handleSavePng() {
     ? new Date(expiryTs * 1000).toISOString().slice(0, 10)
     : "expiry";
   chartRef.value.exportPng({
-    filename: `break-even-${datePart}-${ui.resolutionKey}.png`,
+    filename: `break-even-${underlying.value}-${datePart}-${ui.resolutionKey}.png`,
   });
 }
 

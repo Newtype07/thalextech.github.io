@@ -80,7 +80,7 @@ const calcNd2 = ({ spot, strike, iv, tauSeconds }) => {
   return normalCdf(d2);
 };
 
-const calcOptionNd2 = ({ optionType, spot, strike, iv, tauSeconds }) => {
+export const calcOptionNd2 = ({ optionType, spot, strike, iv, tauSeconds }) => {
   const callNd2 = calcNd2({ spot, strike, iv, tauSeconds });
   if (!Number.isFinite(callNd2)) return null;
   return optionType === "put" ? 1 - callNd2 : callNd2;
