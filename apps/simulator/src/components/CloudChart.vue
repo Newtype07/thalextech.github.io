@@ -190,6 +190,7 @@ type PayoffComparisonPoint = {
   optionValue: number;
   perpValue: number;
   difference: number;
+  interpolated: boolean;
 };
 
 const showPayoffBinTooltip = (
@@ -220,7 +221,7 @@ const showPayoffBinTooltip = (
       Math.max(8, layerRect.height - PAYOFF_BIN_TOOLTIP_HEIGHT - 8),
     ),
     priceRange: `${formatTooltipPrice(point.priceMin)} – ${formatTooltipPrice(point.priceMax)}`,
-    valueLabel: displayMode === "frequency" ? "EV contribution" : "Mean P&L",
+    valueLabel: `${point.interpolated ? "Interpolated " : ""}${displayMode === "frequency" ? "EV contribution" : "Mean P&L"}`,
     optionValue: formatTooltipContribution(point.optionValue),
     perpValue: formatTooltipContribution(point.perpValue),
     difference: formatTooltipContribution(point.difference),
@@ -695,30 +696,32 @@ type PayoffChartPoint = {
   priceMax: number;
   terminalPrice: number;
   value: number;
+  interpolated: boolean;
 };
 
 const payoffPointsFromBins = (
   bins: SimBin[],
   totalCount: number,
   displayMode: "payoff" | "frequency",
-): PayoffChartPoint[] =>
-  bins.flatMap((bin) =>
-    bin.count > 0
-      ? [
-          {
-            priceMin: bin.x0,
-            priceMax: bin.x1,
-            terminalPrice: (bin.x0 + bin.x1) * 0.5,
-            value: computePayoffBinValue(
-              bin.sumPayoff,
-              bin.count,
-              totalCount,
-              displayMode,
-            ),
-          },
-        ]
-      : [],
-  );
+): PayoffChartPoint[] => {
+  const values = interpolatePayoffGaps(bins.map((bin) => ({
+    price: (bin.x0 + bin.x1) * 0.5,
+    value: bin.count > 0
+      ? computePayoffBinValue(bin.sumPayoff, bin.count, totalCount, displayMode)
+      : null,
+  })));
+  // Fill only the display series; simulation totals and EV stay sample-based.
+  return bins.flatMap((bin, index) => {
+    const value = values[index];
+    return value == null ? [] : [{
+      priceMin: bin.x0,
+      priceMax: bin.x1,
+      terminalPrice: (bin.x0 + bin.x1) * 0.5,
+      value,
+      interpolated: bin.count === 0,
+    }];
+  });
+};
 
 const renderCumulativePayoffChart = (
   svg: d3.Selection<SVGSVGElement, unknown, null, undefined>,
@@ -744,7 +747,7 @@ const renderCumulativePayoffChart = (
 
   const optionColor = "#9bcdf3";
   const perpColor = "#f2ad67";
-  const chartMargin = { top: 76, right: 128, bottom: 60, left: 82 };
+  const chartMargin = { top: 94, right: 128, bottom: 60, left: 82 };
   const plotWidth = CHART_WIDTH - chartMargin.left - chartMargin.right;
   const plotHeight =
     CUMUL_CHART_HEIGHT - chartMargin.top - chartMargin.bottom;
@@ -885,27 +888,34 @@ const renderCumulativePayoffChart = (
 
   const titleGroup = svg
     .append("g")
-    .attr("class", "ev-contribution-chart ev-chart-heading");
+    .attr("class", "ev-contribution-chart ev-chart-heading")
+    .attr("text-anchor", "middle");
   titleGroup
     .append("text")
     .attr("class", "ev-title")
-    .attr("x", chartMargin.left)
+    .attr("x", CHART_WIDTH / 2)
     .attr("y", 23)
     .text("Cumulative EV contribution");
   titleGroup
     .append("text")
     .attr("class", "ev-subtitle")
-    .attr("x", chartMargin.left)
+    .attr("x", CHART_WIDTH / 2)
     .attr("y", 41)
     .text("Shared paths sorted by terminal BTC price · smoothed display · exact EV endpoints");
   if (props.payoffChartContext) {
     titleGroup
       .append("text")
       .attr("class", "ev-subtitle ev-context")
-      .attr("x", chartMargin.left)
+      .attr("x", CHART_WIDTH / 2)
       .attr("y", 57)
       .text(props.payoffChartContext);
   }
+  titleGroup
+    .append("text")
+    .attr("class", "ev-subtitle ev-expected-values")
+    .attr("x", CHART_WIDTH / 2)
+    .attr("y", 75)
+    .text(`${props.primarySeriesLabel || "Option"} EV ${formatTooltipPayoff(sim.meanPayoff)} · Perp EV ${formatTooltipPayoff(comparisonSim.meanPayoff)}`);
 
   const endpointLabels = [
     {
@@ -988,9 +998,10 @@ const renderPayoffComparisonChart = (
 
   const optionColor = "#9bcdf3";
   const perpColor = "#f2ad67";
-  const chartMargin = { top: 76, right: 48, bottom: 60, left: 82 };
+  const headingOffset = displayMode === "frequency" ? 0 : 16;
+  const chartMargin = { top: 118 - headingOffset, right: 48, bottom: 60, left: 82 };
   const plotWidth = CHART_WIDTH - chartMargin.left - chartMargin.right;
-  const plotHeight = 300;
+  const plotHeight = 394 - chartMargin.top;
   const allPoints = [...optionPoints, ...perpPoints];
   const rawXMin = Math.min(...allPoints.map((point) => point.terminalPrice));
   const rawXMax = Math.max(...allPoints.map((point) => point.terminalPrice));
@@ -1026,6 +1037,7 @@ const renderPayoffComparisonChart = (
           optionValue: optionPoint.value,
           perpValue: perpPoint.value,
           difference: optionPoint.value - perpPoint.value,
+          interpolated: optionPoint.interpolated || perpPoint.interpolated,
         },
       ];
     },
@@ -1160,42 +1172,51 @@ const renderPayoffComparisonChart = (
     .attr("text-anchor", "middle")
     .text(displayMode === "frequency" ? "EV contribution" : "Mean P&L");
 
+  const optionLegs = (props.legs ?? []).filter(leg => leg.kind === "option");
+  const optionName = optionLegs[0]?.optionType === "put" ? "Put" : "Call";
+  const comparisonTitle = `Payoff Comparison - Perp vs ${optionName}${optionLegs.length > 1 ? " Spread" : ""}`;
+
   const titleGroup = svg
     .append("g")
-    .attr("class", "ev-contribution-chart ev-chart-heading");
+    .attr("class", "ev-contribution-chart ev-chart-heading")
+    .attr("text-anchor", "middle");
   titleGroup
     .append("text")
     .attr("class", "ev-title")
-    .attr("x", chartMargin.left + 4)
+    .attr("x", CHART_WIDTH / 2)
     .attr("y", 23)
     .text(
       displayMode === "frequency"
-        ? "Frequency × payoff by terminal BTC price bin"
-        : "Mean P&L by terminal BTC price bin",
+        ? `${comparisonTitle} · Frequency × Payoff`
+        : comparisonTitle,
     );
-  titleGroup
-    .append("text")
-    .attr("class", "ev-subtitle")
-    .attr("x", chartMargin.left + 4)
-    .attr("y", 41)
-    .text(
-      displayMode === "frequency"
-        ? "Sum of path P&L in each terminal-price bin ÷ all simulated paths"
-        : "Option and perpetual-with-stop outcomes overlaid · each bar is the bin mean",
-    );
+  if (displayMode === "frequency") {
+    titleGroup
+      .append("text")
+      .attr("class", "ev-subtitle")
+      .attr("x", CHART_WIDTH / 2)
+      .attr("y", 41)
+      .text("Sum of path P&L in each terminal-price bin ÷ all simulated paths · interior gaps interpolated");
+  }
   if (props.payoffChartContext) {
     titleGroup
       .append("text")
       .attr("class", "ev-subtitle ev-context")
-      .attr("x", chartMargin.left + 4)
-      .attr("y", 57)
+      .attr("x", CHART_WIDTH / 2)
+      .attr("y", 57 - headingOffset)
       .text(props.payoffChartContext);
   }
+  titleGroup
+    .append("text")
+    .attr("class", "ev-subtitle ev-expected-values")
+    .attr("x", CHART_WIDTH / 2)
+    .attr("y", 75 - headingOffset)
+    .text(`${props.primarySeriesLabel || "Option"} EV ${formatTooltipPayoff(sim.meanPayoff)} · Perp EV ${formatTooltipPayoff(comparisonSim.meanPayoff)}`);
 
   const stopPrice = Number(props.comparisonReferencePrice);
   const legend = titleGroup
     .append("g")
-    .attr("transform", `translate(${CHART_WIDTH - 355}, 20)`);
+    .attr("text-anchor", "start");
   [
     { label: "Option P&L", color: optionColor, x: 0 },
     {
@@ -1219,8 +1240,13 @@ const renderPayoffComparisonChart = (
       .attr("x", x + 20)
       .attr("y", 0)
       .attr("dominant-baseline", "middle")
+      .style("font-size", "11px")
+      .style("font-weight", "600")
       .text(label);
   });
+
+  const legendBounds = legend.node()!.getBBox();
+  legend.attr("transform", `translate(${(CHART_WIDTH - legendBounds.width) / 2 - legendBounds.x}, ${98 - headingOffset})`);
 
   const differencePoints = comparisonPoints;
   const panelHeight = 178;
@@ -3301,14 +3327,12 @@ onUnmounted(() => {
 }
 
 :deep(.ev-subtitle) {
-  fill: #626b74;
+  fill: #7b848d;
   font-size: 8.5px;
   font-weight: 500;
 }
 
 :deep(.ev-context) {
-  fill: #7b848d;
-  font-size: 8px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -3364,9 +3388,9 @@ onUnmounted(() => {
 }
 
 :deep(.ev-chart-heading g text) {
-  fill: #8b9198;
-  font-size: 8.5px;
-  font-weight: 500;
+  fill: #fff;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 :deep(.ev-endpoint) {

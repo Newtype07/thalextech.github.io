@@ -204,14 +204,14 @@ const SVG_EXPORT_STYLE = `
   .ev-axis-title { fill: #969fa8; font-size: 13px; font-weight: 600; }
   .ev-region-label { fill: #8b949d; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
   .ev-title { fill: #e2e7ec; font-size: 17px; font-weight: 700; }
-  .ev-subtitle { fill: #7d8791; font-size: 12px; font-weight: 500; }
-  .ev-context { fill: #939ca5; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .ev-subtitle { fill: #939ca5; font-size: 11px; font-weight: 500; }
+  .ev-context { font-variant-numeric: tabular-nums; }
   .ev-panel-title { fill: #aeb6be; font-size: 12px; font-weight: 600; }
   .ev-panel-caption { fill: #7f8993; font-size: 11px; font-weight: 500; }
   .ev-stop-price-line { stroke: rgba(226, 232, 240, 0.58); stroke-width: 1.25; stroke-dasharray: 5 5; }
   .ev-stop-price-label { fill: #e4a766; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .ev-chart-heading g line { stroke-width: 3; stroke-linecap: round; }
-  .ev-chart-heading g text { fill: #a0a8b0; font-size: 12px; font-weight: 600; }
+  .ev-chart-heading g text { fill: #fff; font-size: 11px; font-weight: 600; }
   .ev-endpoint { stroke: #0a0b0e; stroke-width: 1.25; }
   .ev-endpoint-leader { stroke-width: 1.25; stroke-opacity: 0.8; }
   .ev-endpoint-label { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; paint-order: stroke; stroke: #0a0b0e; stroke-width: 4px; }
@@ -288,14 +288,16 @@ const loadImage = (url: string): Promise<HTMLImageElement> =>
 
 const svgElementToImage = (
   svgElement: SVGSVGElement,
+  rasterScale: number,
 ): Promise<HTMLImageElement> => {
   const clone = svgElement.cloneNode(true) as SVGSVGElement;
   if (!clone.getAttribute("xmlns")) {
     clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   }
   const rect = svgElement.getBoundingClientRect();
-  clone.setAttribute("width", String(Math.max(1, Math.ceil(rect.width))));
-  clone.setAttribute("height", String(Math.max(1, Math.ceil(rect.height))));
+  // Rasterize vectors at their final pixel size, before canvas compositing.
+  clone.setAttribute("width", String(Math.max(1, Math.ceil(rect.width * rasterScale))));
+  clone.setAttribute("height", String(Math.max(1, Math.ceil(rect.height * rasterScale))));
   const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
   style.textContent = SVG_EXPORT_STYLE;
   const defs = clone.querySelector("defs");
@@ -442,7 +444,8 @@ const renderElementToCanvas = async (
 
   if (element instanceof SVGSVGElement) {
     const rect = element.getBoundingClientRect();
-    const image = await svgElementToImage(element);
+    const transform = ctx.getTransform();
+    const image = await svgElementToImage(element, Math.hypot(transform.a, transform.b));
     ctx.drawImage(
       image,
       rect.left - rootRect.left,
@@ -500,6 +503,12 @@ const downloadCanvas = (canvas: HTMLCanvasElement, filename: string): void => {
 const exportElementScreenshot = async (
   element: HTMLElement,
   filename: string,
+  {
+    outputWidth = EXPORT_WIDTH,
+    outputHeight = EXPORT_HEIGHT,
+    paddingX = EXPORT_PADDING_X,
+    paddingY = EXPORT_PADDING_Y,
+  } = {},
 ): Promise<void> => {
   await document.fonts?.ready;
 
@@ -508,26 +517,26 @@ const exportElementScreenshot = async (
   const height = Math.ceil(rect.height);
   if (width <= 0 || height <= 0) return;
 
-  const availableWidth = EXPORT_WIDTH - EXPORT_PADDING_X * 2;
-  const availableHeight = EXPORT_HEIGHT - EXPORT_PADDING_Y * 2;
+  const availableWidth = outputWidth - paddingX * 2;
+  const availableHeight = outputHeight - paddingY * 2;
   const fitScale = Math.min(
     availableWidth / width,
     availableHeight / height,
   );
   const renderedWidth = width * fitScale;
   const renderedHeight = height * fitScale;
-  const offsetX = (EXPORT_WIDTH - renderedWidth) / 2;
-  const offsetY = (EXPORT_HEIGHT - renderedHeight) / 2;
+  const offsetX = (outputWidth - renderedWidth) / 2;
+  const offsetY = (outputHeight - renderedHeight) / 2;
   // HTML text is painted separately from the DOM snapshot, so let it scale
   // with the composition at the export resolution.
   const fontScale = EXPORT_HTML_FONT_SCALE;
   const output = document.createElement("canvas");
-  output.width = EXPORT_WIDTH;
-  output.height = EXPORT_HEIGHT;
+  output.width = outputWidth;
+  output.height = outputHeight;
   const ctx = output.getContext("2d");
   if (!ctx) return;
   ctx.fillStyle = "#000";
-  ctx.fillRect(0, 0, EXPORT_WIDTH, EXPORT_HEIGHT);
+  ctx.fillRect(0, 0, outputWidth, outputHeight);
   ctx.save();
   ctx.translate(offsetX, offsetY);
   ctx.scale(fitScale, fitScale);
@@ -542,7 +551,10 @@ const waitForLayoutPaint = (): Promise<void> =>
   });
 
 const handleSavePng = async (): Promise<void> => {
-  const exportRoot = workspaceRef.value ?? appMainRef.value;
+  const isStopLoss = activeSimulatorTab.value === "stop-loss";
+  const exportRoot = isStopLoss
+    ? workspaceRef.value?.querySelector<HTMLElement>(".comparison-chart")
+    : workspaceRef.value ?? appMainRef.value;
   if (!exportRoot || exportInProgress.value) return;
   const appRoot = appMainRef.value;
   const exportClass =
@@ -553,11 +565,21 @@ const handleSavePng = async (): Promise<void> => {
   exportInProgress.value = true;
   try {
     await waitForLayoutPaint();
+    const rect = exportRoot.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
     await exportElementScreenshot(
       exportRoot,
       activeSimulatorTab.value === "stop-loss"
         ? "simulator-stop-loss-comparison.png"
         : `simulator-${histogramMode.value}.png`,
+      isStopLoss
+        ? {
+            outputWidth: 4800,
+            outputHeight: Math.round((4800 - 96) * rect.height / rect.width) + 96,
+            paddingX: 48,
+            paddingY: 48,
+          }
+        : undefined,
     );
   } catch (error) {
     console.error("Failed to export simulator PNG", error);
@@ -2535,8 +2557,6 @@ watch(
   outline: none;
 }
 
-.app-main.is-exporting-stop-loss :deep(.comparison-bar),
-.app-main.is-exporting-stop-loss :deep(.comparison-row > header),
 .app-main.is-exporting-stop-loss :deep(.histogram-tooltip) {
   display: none !important;
 }
