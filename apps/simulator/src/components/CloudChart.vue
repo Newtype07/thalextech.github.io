@@ -998,8 +998,7 @@ const renderPayoffComparisonChart = (
 
   const optionColor = "#9bcdf3";
   const perpColor = "#f2ad67";
-  const headingOffset = displayMode === "frequency" ? 0 : 16;
-  const chartMargin = { top: 118 - headingOffset, right: 48, bottom: 60, left: 82 };
+  const chartMargin = { top: 102, right: 48, bottom: 60, left: 82 };
   const plotWidth = CHART_WIDTH - chartMargin.left - chartMargin.right;
   const plotHeight = 394 - chartMargin.top;
   const allPoints = [...optionPoints, ...perpPoints];
@@ -1190,27 +1189,19 @@ const renderPayoffComparisonChart = (
         ? `${comparisonTitle} · Frequency × Payoff`
         : comparisonTitle,
     );
-  if (displayMode === "frequency") {
-    titleGroup
-      .append("text")
-      .attr("class", "ev-subtitle")
-      .attr("x", CHART_WIDTH / 2)
-      .attr("y", 41)
-      .text("Sum of path P&L in each terminal-price bin ÷ all simulated paths · interior gaps interpolated");
-  }
   if (props.payoffChartContext) {
     titleGroup
       .append("text")
       .attr("class", "ev-subtitle ev-context")
       .attr("x", CHART_WIDTH / 2)
-      .attr("y", 57 - headingOffset)
+      .attr("y", 41)
       .text(props.payoffChartContext);
   }
   titleGroup
     .append("text")
     .attr("class", "ev-subtitle ev-expected-values")
     .attr("x", CHART_WIDTH / 2)
-    .attr("y", 75 - headingOffset)
+    .attr("y", 59)
     .text(`${props.primarySeriesLabel || "Option"} EV ${formatTooltipPayoff(sim.meanPayoff)} · Perp EV ${formatTooltipPayoff(comparisonSim.meanPayoff)}`);
 
   const stopPrice = Number(props.comparisonReferencePrice);
@@ -1246,7 +1237,7 @@ const renderPayoffComparisonChart = (
   });
 
   const legendBounds = legend.node()!.getBBox();
-  legend.attr("transform", `translate(${(CHART_WIDTH - legendBounds.width) / 2 - legendBounds.x}, ${98 - headingOffset})`);
+  legend.attr("transform", `translate(${(CHART_WIDTH - legendBounds.width) / 2 - legendBounds.x}, 82)`);
 
   const differencePoints = comparisonPoints;
   const panelHeight = 178;

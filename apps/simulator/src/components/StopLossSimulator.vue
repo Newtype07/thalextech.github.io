@@ -597,6 +597,10 @@ const perpLegs = computed<PositionLeg[]>(() => [
   },
 ]);
 
+const numericInputStyle = (value: number | string) => ({
+  width: `${Math.max(3, String(value).length) + 0.5}ch`,
+});
+
 const formatUsd = (value: number, digits = 0): string => {
   if (!Number.isFinite(value)) return "—";
   const sign = value < 0 ? "−" : "";
@@ -730,6 +734,7 @@ const hoveredPriceRangeLabel = computed(() => {
             max="10000000"
             step="100"
             :value="riskBudget"
+            :style="numericInputStyle(riskBudget)"
             aria-label="Risk budget in US dollars"
             @focus="selectAssumptionInput"
             @change="
@@ -784,6 +789,7 @@ const hoveredPriceRangeLabel = computed(() => {
             max="100"
             step="0.5"
             :value="annualFundingPercent"
+            :style="numericInputStyle(annualFundingPercent)"
             aria-label="Annual funding percentage"
             @focus="selectAssumptionInput"
             @change="
@@ -829,6 +835,7 @@ const hoveredPriceRangeLabel = computed(() => {
             :max="RV_MAX_PERCENT"
             step="0.1"
             :value="Number((params.vol * 100).toFixed(1))"
+            :style="numericInputStyle(Number((params.vol * 100).toFixed(1)))"
             aria-label="Annual realized volatility percentage"
             @focus="selectAssumptionInput"
             @change="
@@ -854,6 +861,7 @@ const hoveredPriceRangeLabel = computed(() => {
               step="0.1"
               :disabled="!hasOptionIv"
               :value="vrpPoints == null ? '' : Number(vrpPoints.toFixed(1))"
+              :style="numericInputStyle(vrpPoints == null ? '' : Number(vrpPoints.toFixed(1)))"
               aria-label="Volatility risk premium in volatility points (IV minus RV)"
               @focus="selectAssumptionInput"
               @change="setVrpPoints(Number(($event.target as HTMLInputElement).value))"
@@ -880,6 +888,7 @@ const hoveredPriceRangeLabel = computed(() => {
             :max="DRIFT_MAX_PERCENT"
             step="0.1"
             :value="Number((params.mu * 100).toFixed(1))"
+            :style="numericInputStyle(Number((params.mu * 100).toFixed(1)))"
             aria-label="Annual drift percentage"
             @focus="selectAssumptionInput"
             @change="
@@ -1127,9 +1136,9 @@ const hoveredPriceRangeLabel = computed(() => {
 }
 
 .comparison-shell {
-  --comparison-control-height: clamp(36px, 2.25cqw, 46px);
-  --comparison-gap: clamp(6px, 0.375cqw, 9px);
-  --comparison-padding: clamp(6px, 0.375cqw, 9px);
+  --comparison-control-height: 34px;
+  --comparison-gap: 4px;
+  --comparison-padding: 6px;
   --comparison-font-small: clamp(10px, 0.625cqw, 13px);
   --comparison-font-body: clamp(11px, 0.6875cqw, 14px);
   display: flex;
@@ -1151,6 +1160,7 @@ const hoveredPriceRangeLabel = computed(() => {
 .comparison-bar {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   box-sizing: border-box;
   width: 100%;
@@ -1169,9 +1179,9 @@ const hoveredPriceRangeLabel = computed(() => {
   align-items: center;
   box-sizing: border-box;
   height: var(--comparison-control-height);
-  gap: clamp(10px, 0.625cqw, 13px);
+  gap: 6px;
   min-width: 0;
-  padding: 0 clamp(11px, 0.6875cqw, 15px);
+  padding: 0 8px;
   border: 1px solid var(--color-border);
   border-radius: 7px;
   background: transparent;
@@ -1241,31 +1251,14 @@ const hoveredPriceRangeLabel = computed(() => {
   gap: 3px;
 }
 
-.control-pill--risk .pill-value input {
-  width: 8ch;
-}
-
-.control-pill--funding .pill-value input {
-  width: 5ch;
-}
-
-.control-pill--rv .pill-value input,
-.control-pill--drift .pill-value input {
-  width: 6ch;
-}
-
 .vrp-input-label {
   display: flex;
   align-items: center;
-  gap: clamp(10px, 0.625cqw, 13px);
+  gap: 6px;
 }
 
 .control-pill--vrp .pill-value {
   gap: 3px;
-}
-
-.control-pill--vrp .pill-value input {
-  width: 5ch;
 }
 
 .vrp-zero-button {
@@ -1309,8 +1302,8 @@ const hoveredPriceRangeLabel = computed(() => {
   align-items: center;
   box-sizing: border-box;
   height: calc(var(--comparison-control-height) - 2px);
-  gap: clamp(10px, 0.625cqw, 13px);
-  padding: 0 clamp(11px, 0.6875cqw, 15px);
+  gap: 6px;
+  padding: 0 8px;
   cursor: pointer;
   list-style: none;
 }
@@ -1402,16 +1395,7 @@ const hoveredPriceRangeLabel = computed(() => {
 }
 
 .select-pill :deep(.styled-select) {
-  width: 28px;
-}
-
-.maturity-pill :deep(.styled-select) {
   width: auto;
-}
-
-.option-structure-pill :deep(.styled-select) {
-  width: auto;
-  min-width: 68px;
 }
 
 .comparison-controls {
@@ -1755,33 +1739,33 @@ const hoveredPriceRangeLabel = computed(() => {
 
 .comparison-view-toggles {
   display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--comparison-gap);
-  margin-left: auto;
+  max-width: 100%;
+  margin-left: 0;
 }
 
 .comparison-view-toggles .path-mode-toggle {
+  flex: 0 0 auto;
   margin-left: 0;
 }
 
 .path-mode-toggle {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: max-content max-content;
   box-sizing: border-box;
   height: var(--comparison-control-height);
-  margin-left: auto;
+  margin-left: 0;
   padding: 3px;
   border-radius: 7px;
   background: #111216;
 }
 
-.chart-mode-toggle {
-  grid-template-columns: repeat(2, 1fr);
-}
-
 .path-mode-toggle button {
-  min-width: 48px;
-  padding: 0 10px;
+  min-width: 32px;
+  padding: 0 8px;
   border: 0;
   border-radius: 5px;
   background: transparent;
@@ -1943,10 +1927,6 @@ const hoveredPriceRangeLabel = computed(() => {
 }
 
 @media (max-width: 1050px) {
-  .comparison-bar {
-    flex-wrap: wrap;
-  }
-
   .comparison-controls {
     grid-template-columns: repeat(4, minmax(120px, 1fr));
   }
@@ -1957,25 +1937,16 @@ const hoveredPriceRangeLabel = computed(() => {
 
 }
 
-@media (max-width: 1280px) {
-  .comparison-bar {
-    flex-wrap: wrap;
-  }
-
-  .comparison-view-toggles {
-    flex: 1 1 100%;
-    justify-content: flex-end;
-  }
-}
-
 @media (max-width: 760px) {
   .comparison-view-toggles {
+    flex: 1 1 100%;
     align-items: stretch;
     flex-direction: column;
   }
 
   .comparison-view-toggles .path-mode-toggle {
     width: 100%;
+    grid-template-columns: 1fr 1fr;
   }
 
   .control-pill {

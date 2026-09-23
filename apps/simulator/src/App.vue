@@ -26,7 +26,7 @@ const defaultParams: GBMParams = {
   vol: 0.4,
   T: 14 / 365.25,
   dt: 1 / (365.25 * 24),
-  rows: 10_000,
+  rows: 20_000,
 };
 const driftBounds = { min: -5, max: 5 };
 const volBounds = { min: 0.1, max: 1.2 };
