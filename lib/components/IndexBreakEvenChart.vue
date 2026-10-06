@@ -10,6 +10,7 @@ const props = defineProps({
   breakEvenHigh: { type: Number, default: null },
   breakEvenLowLabel: { type: String, default: "BE Low" },
   breakEvenHighLabel: { type: String, default: "BE High" },
+  breakEvenLabelColor: { type: String, default: null },
   breakEvenStrokeWidth: { type: Number, default: 2 },
   indexStrokeWidth: { type: Number, default: 1.75 },
   indexCurve: { type: Function, default: d3.curveBasis },
@@ -253,7 +254,7 @@ function render() {
     {
       id: "break-even-low",
       value: props.breakEvenLow,
-      color: "firebrick",
+      color: props.breakEvenLabelColor ?? "firebrick",
       text: Number.isFinite(props.breakEvenLow)
         ? `${props.breakEvenLowLabel} = ${formatPrice(props.breakEvenLow)}`
         : "",
@@ -261,7 +262,7 @@ function render() {
     {
       id: "break-even-high",
       value: props.breakEvenHigh,
-      color: "forestgreen",
+      color: props.breakEvenLabelColor ?? "forestgreen",
       text: Number.isFinite(props.breakEvenHigh)
         ? `${props.breakEvenHighLabel} = ${formatPrice(props.breakEvenHigh)}`
         : "",
@@ -371,6 +372,7 @@ watch(
     props.breakEvenHigh,
     props.breakEvenLowLabel,
     props.breakEvenHighLabel,
+    props.breakEvenLabelColor,
     props.breakEvenStrokeWidth,
     props.indexStrokeWidth,
     props.indexCurve,

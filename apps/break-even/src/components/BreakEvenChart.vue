@@ -704,6 +704,7 @@ onMounted(() => render());
       :break-even-high="selectedTrack.optionType === 'call' ? selectedTrack.currentBreakEven : null"
       break-even-low-label="BE"
       break-even-high-label="BE"
+      :break-even-label-color="selectedTrack.optionType === 'put' ? '#f87171' : '#4ade80'"
       :break-even-stroke-width="4"
       :index-stroke-width="2"
       :index-curve="d3.curveNatural"
