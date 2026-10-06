@@ -50,6 +50,17 @@ const layout = {
 
 const formatPrice = d3.format(",.0f");
 const formatProb = d3.format(".1%");
+const selectedWinProbability = computed(() => {
+  const track = selectedTrack.value;
+  if (!track) return null;
+  return calcOptionNd2({
+    optionType: track.optionType,
+    spot: props.spotPrice,
+    strike: track.currentBreakEven,
+    iv: track.referenceIv,
+    tauSeconds: props.expiryTs - props.spotTs,
+  });
+});
 const selectedSubtitle = computed(() => {
   const track = selectedTrack.value;
   if (!track) return props.subtitle;
@@ -705,6 +716,7 @@ onMounted(() => render());
       break-even-low-label="BE"
       break-even-high-label="BE"
       :break-even-label-color="selectedTrack.optionType === 'put' ? '#f87171' : '#4ade80'"
+      :break-even-win-probability="selectedWinProbability"
       :break-even-stroke-width="4"
       :index-stroke-width="2"
       :index-curve="d3.curveNatural"

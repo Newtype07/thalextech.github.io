@@ -11,6 +11,7 @@ const props = defineProps({
   breakEvenLowLabel: { type: String, default: "BE Low" },
   breakEvenHighLabel: { type: String, default: "BE High" },
   breakEvenLabelColor: { type: String, default: null },
+  breakEvenWinProbability: { type: Number, default: null },
   breakEvenStrokeWidth: { type: Number, default: 2 },
   indexStrokeWidth: { type: Number, default: 1.75 },
   indexCurve: { type: Function, default: d3.curveBasis },
@@ -362,6 +363,21 @@ function render() {
     .attr("stroke", "#0a0b0e")
     .attr("stroke-width", 3)
     .text((label) => label.text);
+
+  if (Number.isFinite(props.breakEvenWinProbability)) {
+    const breakEvenLabel = priceLabels.find(label => label.id.startsWith("break-even-"));
+    if (breakEvenLabel) {
+      g.append("text")
+        .attr("class", "breakEvenWinProbability")
+        .attr("x", innerWidth + 12).attr("y", breakEvenLabel.y)
+        .attr("text-anchor", "start").attr("fill", "#f5f5f7")
+        .style("font-size", "14px").style("font-family", CHART_FONT_FAMILY)
+        .attr("paint-order", "stroke").attr("stroke", "#0a0b0e").attr("stroke-width", 3)
+        .text(`P(win) = ${d3.format(".1%")(props.breakEvenWinProbability)}`)
+        .append("title")
+        .text("Model probability of expiring beyond the break-even price: above for calls, below for puts.");
+    }
+  }
 }
 
 watch(
@@ -373,6 +389,7 @@ watch(
     props.breakEvenLowLabel,
     props.breakEvenHighLabel,
     props.breakEvenLabelColor,
+    props.breakEvenWinProbability,
     props.breakEvenStrokeWidth,
     props.indexStrokeWidth,
     props.indexCurve,
