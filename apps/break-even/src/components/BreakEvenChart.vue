@@ -2,7 +2,8 @@
 import * as d3 from "d3";
 import { computed, onMounted, ref, watch } from "vue";
 import { exportChartToPng } from "../../../../lib/export-png.js";
-import { buildBreakEvenSnapshot } from "../lib/breakEvenSnapshot.js";
+import { buildBreakEvenSnapshot, calcOptionNd2 } from "../lib/breakEvenSnapshot.js";
+import IndexBreakEvenChart from "../../../../lib/components/IndexBreakEvenChart.vue";
 
 import { buildTrackProbabilityHistory, nearestTrack } from "../lib/trackSelection.js";
 
@@ -17,17 +18,29 @@ const props = defineProps({
   title: { type: String, default: "BTC Option Break-Even Forecast" },
   subtitle: { type: String, default: "" },
   loading: { type: Boolean, default: false },
+  selectedInstrument: { type: String, default: null },
+  selectedOption: { type: Object, default: null },
+  detailView: { type: String, default: "break-even" },
 });
 
+const emit = defineEmits(["update:selectedInstrument", "update:detailView"]);
 const svgRef = ref(null);
-const selectedInstrument = ref(null);
-const selectedTrack = computed(() => props.tracks.find(track => track.instrumentName === selectedInstrument.value));
-const selectedLabel = computed(() => selectedTrack.value
-  ? `${selectedTrack.value.optionType === "put" ? "Put" : "Call"} ${formatPrice(selectedTrack.value.strike)}` : "");
-const clearSelection = () => { selectedInstrument.value = null; };
-watch(() => props.tracks, tracks => {
-  if (!tracks.some(track => track.instrumentName === selectedInstrument.value)) clearSelection();
+const selectedInstrument = computed({
+  get: () => props.selectedInstrument,
+  set: value => emit("update:selectedInstrument", value),
 });
+const detailView = computed({
+  get: () => props.detailView,
+  set: value => emit("update:detailView", value),
+});
+const priceChartRef = ref(null);
+const selectedTrack = computed(() => props.tracks.find(track => track.instrumentName === selectedInstrument.value));
+const selectedLabel = computed(() => {
+  const strike = selectedTrack.value?.strike ?? props.selectedOption?.strike;
+  const type = selectedTrack.value?.optionType ?? props.selectedOption?.option_type_normalized;
+  return Number.isFinite(strike) ? `${type === "put" ? "Put" : "Call"} ${formatPrice(strike)}` : "";
+});
+const clearSelection = () => { selectedInstrument.value = null; };
 
 const layout = {
   width: 1800,
@@ -37,6 +50,21 @@ const layout = {
 
 const formatPrice = d3.format(",.0f");
 const formatProb = d3.format(".1%");
+const selectedSubtitle = computed(() => {
+  const track = selectedTrack.value;
+  if (!track) return props.subtitle;
+  const probabilityAboveStrike = calcOptionNd2({
+    optionType: "call",
+    spot: props.spotPrice,
+    strike: track.strike,
+    iv: track.referenceIv,
+    tauSeconds: props.expiryTs - props.spotTs,
+  });
+  const expiry = Number.isFinite(props.expiryTs)
+    ? new Date(props.expiryTs * 1000).toISOString().slice(0, 10) : "n/a";
+  const probability = Number.isFinite(probabilityAboveStrike) ? formatProb(probabilityAboveStrike) : "n/a";
+  return `Expiry ${expiry} · Current probability of expiring above the strike (N(d2)): ${probability}`;
+});
 const RULER_LABEL_VERTICAL_OFFSET = 8;
 const NOW_LABEL_BASELINE_OFFSET = 4;
 const NOW_LABEL_MIN_SPACING = 15;
@@ -115,6 +143,10 @@ const deCollideLabels = (items, minY, maxY, spacing) => {
 };
 
 function exportPng({ filename = "break-even.png", scale = 4, padding = 24 } = {}) {
+  if (selectedTrack.value && detailView.value === "break-even") {
+    priceChartRef.value?.exportPng({ filename, scale, padding });
+    return;
+  }
   exportChartToPng({
     element: svgRef.value,
     filename,
@@ -166,7 +198,7 @@ function render() {
       .attr("fill", "#a0a0a0")
       .style("font-size", "18px")
       .style("font-family", "ui-sans-serif, system-ui")
-      .text(selectedTrack.value ? `Expiry ${new Date(props.expiryTs * 1000).toISOString().slice(0, 10)} · Historical observations` : props.subtitle);
+      .text(selectedTrack.value ? selectedSubtitle.value : props.subtitle);
   }
 
   const rawTracks = Array.isArray(props.tracks) ? props.tracks : [];
@@ -204,7 +236,7 @@ function render() {
 
   const selected = tracks.find(track => track.instrumentName === selectedInstrument.value);
   const probabilityLabel = selected?.optionType === "put" ? "N(-d2)" : "N(d2)";
-  const probabilityColor = selected?.optionType === "put" ? "#ff5e8c" : "#34ffb4";
+  const probabilityColor = "#f5f5f7";
   const probabilityHistory = buildTrackProbabilityHistory(selected, indexActual, props.expiryTs);
   if (selected && !probabilityHistory.length) {
     svg.append("text").attr("x", width / 2).attr("y", height / 2)
@@ -377,23 +409,41 @@ function render() {
       : [0, 1];
     const probabilityY = d3.scaleLinear().domain(probabilityDomain).nice(5).range([innerHeight, 0]);
     probabilityY.domain(probabilityY.domain().map(value => Math.max(0, Math.min(1, value))));
+    const latestProbability = probabilityHistory[probabilityHistory.length - 1].probability;
+    const latestProbabilityY = probabilityY(latestProbability);
+    g.append("line")
+      .attr("class", "latestProbabilityLevel")
+      .attr("x1", 0).attr("x2", innerWidth)
+      .attr("y1", latestProbabilityY).attr("y2", latestProbabilityY)
+      .attr("stroke", probabilityColor).attr("stroke-width", 1)
+      .attr("opacity", 0.6).attr("pointer-events", "none");
     g.append("g")
       .call(d3.axisLeft(probabilityY).ticks(5).tickSize(0).tickPadding(12).tickFormat(probabilityY.tickFormat(5, "%")))
       .call(axisStyle);
     g.append("text").attr("transform", `translate(${innerWidth + 100},${innerHeight / 2}) rotate(90)`)
       .attr("text-anchor", "middle").attr("fill", "#c0c0c0").style("font-size", "15px")
       .text("Index price (USD)");
-    const scatter = g.append("g").attr("pointer-events", "none");
-    scatter.selectAll("rect.indexSquare").data(visibleIndex).join("rect")
-      .attr("class", "indexSquare").attr("x", d => x(d.date) - 3).attr("y", d => y(d.value) - 3)
-      .attr("width", 6).attr("height", 6).attr("fill", "#bfc9da").attr("opacity", 0.4);
+    const historicalIndexLine = d3.line()
+      .x(point => x(point.date))
+      .y(point => y(point.value))
+      .curve(d3.curveBasis);
+    g.append("path").datum(visibleIndex)
+      .attr("class", "historicalIndexLine").attr("fill", "none")
+      .attr("stroke", "#858b94").attr("stroke-width", 3.6)
+      .attr("stroke-linecap", "round").attr("stroke-linejoin", "round")
+      .attr("pointer-events", "none").attr("d", historicalIndexLine);
+    if (visibleIndex.length === 1) {
+      const point = visibleIndex[0];
+      g.append("circle").attr("cx", x(point.date)).attr("cy", y(point.value))
+        .attr("r", 3).attr("fill", "#858b94");
+    }
     const probabilityLine = d3.line()
       .x(point => x(point.date))
       .y(point => probabilityY(point.probability))
-      .curve(d3.curveMonotoneX);
+      .curve(d3.curveBasis);
     g.append("path").datum(probabilityHistory)
       .attr("class", "probabilityLine").attr("fill", "none")
-      .attr("stroke", probabilityColor).attr("stroke-width", 2.8)
+      .attr("stroke", probabilityColor).attr("stroke-width", 3.6)
       .attr("stroke-linecap", "round").attr("stroke-linejoin", "round")
       .attr("d", probabilityLine);
     if (probabilityHistory.length === 1) {
@@ -401,10 +451,18 @@ function render() {
       g.append("circle").attr("cx", x(point.date)).attr("cy", probabilityY(point.probability))
         .attr("r", 3).attr("fill", probabilityColor);
     }
+    g.append("text")
+      .attr("class", "latestProbabilityLabel")
+      .attr("x", innerWidth - 8).attr("y", latestProbabilityY - 10)
+      .attr("text-anchor", "end").attr("fill", probabilityColor)
+      .attr("paint-order", "stroke").attr("stroke", "#000").attr("stroke-width", 4)
+      .attr("pointer-events", "none")
+      .style("font-size", "16px").style("font-family", "ui-sans-serif, system-ui")
+      .text(`Latest ${probabilityLabel} = ${formatProb(latestProbability)}`);
     svg.append("text").attr("x", width / 2).attr("y", 84).attr("text-anchor", "middle")
       .attr("fill", "#a0a0a0").style("font-size", "18px")
       .style("font-family", "ui-sans-serif, system-ui")
-      .text(`${selectedLabel.value} · ${probabilityHistory.length ? `${probabilityLabel} ${selected.optionType === "put" ? "red" : "green"} line (auto-scaled left axis) · Index grey squares (right axis) · Historical marks only` : "No matching historical IV and index marks"}`);
+      .text(`${selectedLabel.value} · ${probabilityHistory.length ? `${probabilityLabel} white line (auto-scaled left axis) · Index grey line (right axis) · Historical marks only` : "No matching historical IV and index marks"}`);
     return;
   }
 
@@ -440,7 +498,7 @@ function render() {
     const path = g.append("path")
       .attr("class", "selectableTrack")
       .attr("tabindex", 0).attr("role", "button")
-      .attr("aria-label", `Select ${track.optionType} ${formatPrice(track.strike)} probability history`)
+      .attr("aria-label", `Select ${track.optionType} ${formatPrice(track.strike)} break-even price history`)
       .attr("aria-pressed", track.instrumentName === selectedInstrument.value)
       .datum(track.points)
       .attr("fill", "none")
@@ -618,6 +676,7 @@ watch(
     props.subtitle,
     props.loading,
     selectedInstrument.value,
+    detailView.value,
   ],
   () => render(),
   { deep: true },
@@ -629,17 +688,48 @@ onMounted(() => render());
 <template>
   <div class="chartWrap" @keydown.esc="clearSelection">
     <div class="selectionToolbar">
-      <span>{{ selectedTrack ? `${selectedLabel} selected` : 'Hover near a line and click to explore its probability history.' }}</span>
-      <button v-if="selectedTrack" type="button" @click="clearSelection">Back to break-even</button>
+      <div v-if="selectedInstrument" class="detailToggle" role="group" aria-label="Instrument chart view">
+        <button type="button" :aria-pressed="detailView === 'break-even'" @click="detailView = 'break-even'">Break-even price</button>
+        <button type="button" :aria-pressed="detailView === 'probability'" @click="detailView = 'probability'">Probability</button>
+      </div>
+      <span>{{ selectedInstrument ? `${selectedLabel} selected` : 'Hover near a line and click to explore its break-even price history.' }}</span>
+      <button v-if="selectedInstrument" class="backButton" type="button" @click="clearSelection">← Back to break-even prices</button>
     </div>
-    <svg ref="svgRef" class="chartSvg" />
+    <IndexBreakEvenChart
+      v-if="selectedTrack && detailView === 'break-even'"
+      ref="priceChartRef"
+      :actual-data="indexData"
+      :projected-data="indexProjectedData"
+      :break-even-low="selectedTrack.optionType === 'put' ? selectedTrack.currentBreakEven : null"
+      :break-even-high="selectedTrack.optionType === 'call' ? selectedTrack.currentBreakEven : null"
+      break-even-low-label="BE"
+      break-even-high-label="BE"
+      :break-even-stroke-width="4"
+      :index-stroke-width="2"
+      :index-curve="d3.curveNatural"
+      :current-index="spotPrice"
+      :expiry-ts="expiryTs"
+      :title="`${selectedLabel} · Break-Even and Index History`"
+      :subtitle="selectedSubtitle"
+      :loading="loading"
+    />
+    <div v-if="selectedInstrument && !selectedTrack" class="selectionEmpty" role="status">{{ loading ? 'Loading selected instrument history…' : 'No history available for this strike and maturity.' }}</div>
+    <svg v-show="!selectedInstrument || (selectedTrack && detailView === 'probability')" ref="svgRef" class="chartSvg" />
     <div v-if="loading" class="overlay">Loading...</div>
   </div>
 </template>
 
 <style scoped>
-.selectionToolbar { display: flex; align-items: center; gap: 14px; min-height: 36px; padding: 8px 16px; color: #aaa; font-size: 12px; }
-.selectionToolbar button { padding: 5px 10px; border: 1px solid #555; border-radius: 5px; background: #20252c; color: white; cursor: pointer; }
+.selectionToolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; min-height: 36px; padding: 8px 16px; color: #aaa; font-size: 12px; }
+.selectionToolbar button { padding: 6px 12px; font: inherit; cursor: pointer; }
+.selectionToolbar button:focus-visible { outline: 2px solid #aab8cc; outline-offset: 3px; }
+.detailToggle { display: flex; gap: 3px; padding: 3px; border: 1px solid #414751; border-radius: 8px; background: #15181d; }
+.detailToggle button { border: 0; border-radius: 5px; background: transparent; color: #a9b0ba; }
+.detailToggle button:hover { color: white; }
+.detailToggle button[aria-pressed="true"] { background: #edf0f4; color: #15181d; font-weight: 600; }
+.selectionToolbar .backButton { margin-left: auto; border: 1px solid #414751; border-radius: 5px; background: transparent; color: #c2c7cf; }
+.selectionToolbar .backButton:hover { background: #20252c; color: white; }
+.selectionEmpty { min-height: 320px; display: grid; place-items: center; color: #aaa; font-size: 14px; }
 .chartWrap {
   position: relative;
   border-radius: 14px;

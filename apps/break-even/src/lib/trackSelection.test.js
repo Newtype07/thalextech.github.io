@@ -45,3 +45,14 @@ test('hit testing selects the closest line segment within the hover radius', () 
   assert.equal(nearestTrack([{ id: 'slope', points: [[0, 0], [100, 100]] }], 50, 60, 8), 'slope');
   assert.equal(nearestTrack([], 50, 50), null);
 });
+
+test('maturity changes match the same strike and option type without picking a substitute', async () => {
+  const { findSameStrikeInstrument } = await import('./trackSelection.js');
+  const selected = { strike: 90000, option_type_normalized: 'call' };
+  const put = { instrument_name: 'new-put', strike: 90000, option_type_normalized: 'put' };
+  const otherStrike = { instrument_name: 'other-call', strike: 95000, option_type_normalized: 'call' };
+  const call = { instrument_name: 'new-call', strike: 90000, option_type_normalized: 'call' };
+  assert.equal(findSameStrikeInstrument(selected, [put, otherStrike, call]), call);
+  assert.equal(findSameStrikeInstrument(selected, [put, otherStrike]), null);
+  assert.equal(findSameStrikeInstrument(null, [call]), null);
+});

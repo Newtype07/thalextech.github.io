@@ -9,6 +9,7 @@ import {
   watch,
 } from "vue";
 import BreakEvenChart from "./components/BreakEvenChart.vue";
+import StyledSelectMenu from "../../../lib/components/StyledSelectMenu.vue";
 import {
   calcGreeks,
   fetchIndexHistory as fetchIndexHistoryRaw,
@@ -17,6 +18,7 @@ import {
 } from "../../../lib/thalex.js";
 
 import { createHistoryRequester } from "./lib/historyRequests.js";
+import { findSameStrikeInstrument } from "./lib/trackSelection.js";
 
 const requestHistory = createHistoryRequester();
 const fetchIndexHistory = (params) => {
@@ -28,8 +30,10 @@ const fetchInstruments = () => requestHistory(() => fetchInstrumentsRaw());
 const RESOLUTION_CONFIG = {
   900: { label: "15m", resolution: "15m", interval_seconds: 15 * 60 },
   3600: { label: "1h", resolution: "1h", interval_seconds: 60 * 60 },
+  86400: { label: "1d", resolution: "1d", interval_seconds: 24 * 60 * 60 },
 };
 const DEFAULT_LOOKBACK_POINT_LIMIT = 360;
+const DEFAULT_PRICE_LOOKBACK_POINT_LIMIT = 800;
 const MIN_LOOKBACK_POINT_LIMIT = 120;
 const MAX_LOOKBACK_POINT_LIMIT = 1440;
 const SECONDS_PER_DAY = 24 * 60 * 60;
@@ -45,17 +49,51 @@ const ui = reactive({
   resolutionKey: "3600",
   optionMaturity: "",
   maxPoints: DEFAULT_LOOKBACK_POINT_LIMIT,
+  instrumentMaxPoints: DEFAULT_LOOKBACK_POINT_LIMIT,
+  priceMaxPoints: DEFAULT_PRICE_LOOKBACK_POINT_LIMIT,
   loading: false,
   error: "",
 });
 
 const underlying = ref("BTCUSD");
+const selectedInstrument = ref(null);
+const detailView = ref("break-even");
+const lastIntradayResolution = ref(ui.resolutionKey);
+const dailyResolutionAvailable = computed(() =>
+  !!selectedInstrument.value && detailView.value === "break-even",
+);
+const availableResolutionKeys = computed(() =>
+  Object.keys(RESOLUTION_CONFIG).filter(key => key !== "86400" || dailyResolutionAvailable.value),
+);
+watch(() => ui.resolutionKey, key => {
+  if (key !== "86400") lastIntradayResolution.value = key;
+}, { flush: "sync" });
+watch(dailyResolutionAvailable, available => {
+  if (available) {
+    ui.resolutionKey = "86400";
+  } else if (ui.resolutionKey === "86400") {
+    ui.resolutionKey = lastIntradayResolution.value;
+  }
+}, { flush: "sync" });
+const historyPointLimit = computed({
+  get: () => dailyResolutionAvailable.value
+    ? ui.priceMaxPoints
+    : selectedInstrument.value ? ui.instrumentMaxPoints : ui.maxPoints,
+  set: value => {
+    if (dailyResolutionAvailable.value) ui.priceMaxPoints = value;
+    else if (selectedInstrument.value) ui.instrumentMaxPoints = value;
+    else ui.maxPoints = value;
+  },
+});
 const allInstruments = ref([]);
 const data = reactive({
   optionInstruments: [],
   index: {},
   markByInstrument: {},
 });
+const selectedOption = computed(() => data.optionInstruments.find(
+  instrument => instrument.instrument_name === selectedInstrument.value,
+));
 
 const chartRef = ref(null);
 const settingsMenuRef = ref(null);
@@ -105,7 +143,7 @@ const getOldestOptionInstrument = (instruments) => {
 };
 
 const maxPointsToFetch = computed(() => {
-  const value = Math.floor(Number(ui.maxPoints));
+  const value = Math.floor(Number(historyPointLimit.value));
   if (!Number.isFinite(value)) return DEFAULT_LOOKBACK_POINT_LIMIT;
   return Math.max(
     MIN_LOOKBACK_POINT_LIMIT,
@@ -421,6 +459,8 @@ const chartIndexData = computed(() =>
       ts: row.ts,
       date: new Date(row.ts * 1000),
       value: row.index_price_close,
+      low: row.index_price_low,
+      high: row.index_price_high,
     })),
 );
 const chartIndexProjectedData = computed(() => {
@@ -475,10 +515,11 @@ const breakEvenTracks = computed(() => {
       snapshot.iv,
       optionType,
     )?.delta;
-    if (!Number.isFinite(delta) || Math.abs(delta) >= MAX_ABS_DELTA) continue;
+    const isSelected = instrumentName === selectedInstrument.value;
+    if (!isSelected && (!Number.isFinite(delta) || Math.abs(delta) >= MAX_ABS_DELTA)) continue;
     const isOutOfMoney =
       optionType === "call" ? strike >= spot : strike <= spot;
-    if (!isOutOfMoney) continue;
+    if (!isSelected && !isOutOfMoney) continue;
 
     let markAtAnchor = snapshot.mark;
     if (snapshot.ts < anchorTs) {
@@ -529,6 +570,7 @@ const breakEvenTracks = computed(() => {
       optionType,
       strike,
       referenceIv: snapshot.iv,
+      currentBreakEven: optionType === "put" ? strike - markAtAnchor : strike + markAtAnchor,
       points,
     });
   }
@@ -660,7 +702,15 @@ async function load() {
   ui.loading = true;
   ui.error = "";
 
-  const maturityInstruments = optionInstrumentsForMaturity.value;
+  const instrumentName = selectedInstrument.value;
+  const maturityInstruments = instrumentName
+    ? optionInstrumentsForMaturity.value.filter(instrument => instrument.instrument_name === instrumentName)
+    : optionInstrumentsForMaturity.value;
+  if (instrumentName && !maturityInstruments.length) {
+    ui.error = "The selected strike and option type are unavailable for this maturity. Choose another maturity or return to break-even prices.";
+    ui.loading = false;
+    return;
+  }
   const { resolution, from, to } = getTimestampRange();
   const canUsePrefetchedIndex =
     prefetchedIndexForInitialLoad &&
@@ -687,7 +737,7 @@ async function load() {
     if (requestId !== loadRequestId) return;
     const normalizedIndexRows = Array.isArray(indexRows) ? indexRows : [];
     data.index[ui.resolutionKey] = normalizedIndexRows;
-    data.markByInstrument = {};
+    if (!instrumentName) data.markByInstrument = {};
 
     const { rowsByInstrument } =
       await fetchMarkHistoriesByInstrument({
@@ -708,7 +758,9 @@ async function load() {
 
     if (requestId !== loadRequestId) return;
 
-    data.markByInstrument = rowsByInstrument || {};
+    data.markByInstrument = instrumentName
+      ? { ...data.markByInstrument, ...rowsByInstrument }
+      : rowsByInstrument || {};
 
   } catch (error) {
     if (requestId !== loadRequestId) return;
@@ -870,7 +922,26 @@ watch(
 );
 
 watch(
-  () => [ui.resolutionKey, ui.optionMaturity, maxPointsToFetch.value],
+  underlying,
+  () => { selectedInstrument.value = null; },
+  { flush: "sync" },
+);
+
+watch(() => ui.optionMaturity, () => {
+  if (!selectedInstrument.value) return;
+  const matchingInstrument = findSameStrikeInstrument(selectedOption.value, optionInstrumentsForMaturity.value);
+  // Keep the selection intent if this expiry has no matching strike, so a
+  // subsequent maturity change can find it without returning to the overview.
+  if (matchingInstrument) selectedInstrument.value = matchingInstrument.instrument_name;
+}, { flush: "sync" });
+
+watch(selectedInstrument, (instrumentName, previous) => {
+  if (instrumentName && !previous) detailView.value = "break-even";
+  if (instrumentName && !previous) ui.instrumentMaxPoints = ui.maxPoints;
+}, { flush: "sync" });
+
+watch(
+  () => [ui.resolutionKey, ui.optionMaturity, maxPointsToFetch.value, selectedInstrument.value],
   async () => {
     if (isInitializing.value) return;
     if (!ui.optionMaturity) return;
@@ -903,31 +974,22 @@ watch(
         </div>
         <div class="field">
           <label for="option-maturity">Maturity</label>
-          <select id="option-maturity" v-model="ui.optionMaturity">
-            <option
-              v-for="maturity in optionMaturities"
-              :key="maturity.value"
-              :value="maturity.value"
-            >
-              {{ maturity.label }}
-            </option>
-            <option v-if="!optionMaturities.length" :value="ui.optionMaturity">
-              {{ ui.optionMaturity }}
-            </option>
-          </select>
+          <StyledSelectMenu
+            id="option-maturity"
+            v-model="ui.optionMaturity"
+            label="Maturity"
+            :options="optionMaturities"
+          />
         </div>
 
         <div class="field">
           <label for="resolution">Resolution</label>
-          <select id="resolution" v-model="ui.resolutionKey">
-            <option
-              v-for="key in Object.keys(RESOLUTION_CONFIG)"
-              :key="key"
-              :value="key"
-            >
-              {{ RESOLUTION_CONFIG[key].label }}
-            </option>
-          </select>
+          <StyledSelectMenu
+            id="resolution"
+            v-model="ui.resolutionKey"
+            label="Resolution"
+            :options="availableResolutionKeys.map(value => ({ value, label: RESOLUTION_CONFIG[value].label }))"
+          />
         </div>
 
         <button
@@ -960,15 +1022,15 @@ watch(
           <div v-if="settingsOpen" class="settingsDropdown">
             <div class="settingsTitle">Chart settings</div>
             <div class="settingsHint">
-              Historic data points: {{ maxPointsToFetch }}
+              Historic data points{{ selectedInstrument ? ' (selected instrument and index)' : '' }}: {{ maxPointsToFetch }}
             </div>
             <input
-              v-model.number="ui.maxPoints"
+              v-model.number="historyPointLimit"
               class="settingsSlider"
               type="range"
               :min="MIN_LOOKBACK_POINT_LIMIT"
               :max="MAX_LOOKBACK_POINT_LIMIT"
-              step="30"
+              step="10"
             />
             <div class="settingsRange">
               <span>{{ MIN_LOOKBACK_POINT_LIMIT }}</span>
@@ -980,6 +1042,9 @@ watch(
 
       <BreakEvenChart
         ref="chartRef"
+        v-model:selected-instrument="selectedInstrument"
+        v-model:detail-view="detailView"
+        :selected-option="selectedOption"
         :tracks="breakEvenTracks"
         :index-data="chartIndexData"
         :index-projected-data="chartIndexProjectedData"

@@ -1,5 +1,13 @@
 import { calcOptionNd2 } from './breakEvenSnapshot.js';
 
+export function findSameStrikeInstrument(selected, candidates) {
+  if (!selected) return null;
+  return candidates.find(instrument =>
+    instrument.strike === selected.strike &&
+    instrument.option_type_normalized === selected.option_type_normalized,
+  ) ?? null;
+}
+
 // Only pair observed index prices with IV marks at the same timestamp.
 // Projected track points and current-IV fallbacks are not historical data.
 export function buildTrackProbabilityHistory(track, indexPoints, expiryTs) {
