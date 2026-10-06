@@ -20,9 +20,26 @@ const props = defineProps({
   title: { type: String, default: "BTC Straddle Break-Evens" },
   subtitle: { type: String, default: "" },
   loading: { type: Boolean, default: false },
+  enablePriceLevels: { type: Boolean, default: false },
 });
 
 const svgRef = ref(null);
+const priceLevels = ref([]);
+const priceLevelHistory = ref([]);
+let nextPriceLevelId = 0;
+const commitPriceLevels = levels => {
+  priceLevelHistory.value = [...priceLevelHistory.value.slice(-99), priceLevels.value];
+  priceLevels.value = levels;
+};
+const undoPriceLevels = () => {
+  if (!priceLevelHistory.value.length) return;
+  priceLevels.value = priceLevelHistory.value[priceLevelHistory.value.length - 1];
+  priceLevelHistory.value = priceLevelHistory.value.slice(0, -1);
+};
+const clearPriceLevels = () => { if (priceLevels.value.length) commitPriceLevels([]); };
+const removePriceLevel = id => {
+  commitPriceLevels(priceLevels.value.filter(level => level.id !== id));
+};
 const CHART_FONT_FAMILY =
   '"Helvetica Neue", Helvetica, -apple-system, sans-serif';
 const PRICE_LABEL_BASELINE_OFFSET = 10;
@@ -87,6 +104,7 @@ function render() {
   if (!svgEl) return;
   const svg = d3.select(svgEl);
   svg.selectAll("*").remove();
+  svg.on("click.priceLevels", null);
 
   const { width, height, margin } = layout;
   const innerWidth = width - margin.left - margin.right;
@@ -181,6 +199,14 @@ function render() {
   const g = svg
     .append("g")
     .attr("transform", `translate(${margin.left},${margin.top})`);
+
+  if (props.enablePriceLevels) {
+    svg.on("click.priceLevels", event => {
+      const [px, py] = d3.pointer(event, g.node());
+      if (px < 0 || px > innerWidth || py < 0 || py > innerHeight) return;
+      commitPriceLevels([...priceLevels.value, { id: ++nextPriceLevelId, price: y.invert(py) }]);
+    });
+  }
 
   g.append("g")
     .attr("transform", `translate(0,${innerHeight})`)
@@ -378,6 +404,55 @@ function render() {
         .text("Model probability of expiring beyond the break-even price: above for calls, below for puts.");
     }
   }
+
+  if (props.enablePriceLevels) {
+    const levels = g.append("g").attr("class", "userPriceLevels");
+    for (const level of priceLevels.value) {
+      const levelY = y(level.price);
+      if (levelY < 0 || levelY > innerHeight) continue;
+      const annotation = levels.append("g")
+        .attr("class", "userPriceLevel").attr("role", "button").attr("tabindex", 0)
+        .attr("aria-label", `Price level ${formatPrice(level.price)}. Drag to move; click or press Delete to remove.`)
+        .style("cursor", "ns-resize").style("touch-action", "none")
+        .on("click", event => { event.stopPropagation(); removePriceLevel(level.id); })
+        .on("keydown", event => {
+          if (event.key === "Enter" || event.key === " " || event.key === "Delete") {
+            event.preventDefault(); removePriceLevel(level.id);
+          }
+        });
+      annotation.append("line")
+        .attr("x1", 0).attr("x2", innerWidth).attr("y1", levelY).attr("y2", levelY)
+        .attr("stroke", "#aab8cc").attr("stroke-width", 1).attr("stroke-dasharray", "5,4");
+      annotation.append("line")
+        .attr("x1", 0).attr("x2", innerWidth).attr("y1", levelY).attr("y2", levelY)
+        .attr("stroke", "transparent").attr("stroke-width", 12);
+      const label = annotation.append("text")
+        .attr("x", 8).attr("y", Math.max(14, levelY - 8))
+        .attr("fill", "#f5f5f7").style("font-size", "14px").style("font-family", CHART_FONT_FAMILY)
+        .attr("paint-order", "stroke").attr("stroke", "#0a0b0e").attr("stroke-width", 3)
+        .text(`Price = ${formatPrice(level.price)}`);
+      let draggedPrice = level.price;
+      annotation.call(d3.drag()
+        .container(() => g.node())
+        .subject(() => ({ x: 0, y: levelY }))
+        .clickDistance(3)
+        .on("start", () => { draggedPrice = level.price; })
+        .on("drag", event => {
+          const draggedY = Math.max(0, Math.min(innerHeight, event.y));
+          draggedPrice = y.invert(draggedY);
+          // Keep the dragged SVG node alive; commit once on release so the
+          // complete move is one undo step and Vue does not rebuild mid-drag.
+          annotation.selectAll("line").attr("y1", draggedY).attr("y2", draggedY);
+          label.attr("y", Math.max(14, draggedY - 8)).text(`Price = ${formatPrice(draggedPrice)}`);
+        })
+        .on("end", () => {
+          if (draggedPrice !== level.price) {
+            commitPriceLevels(priceLevels.value.map(item => item.id === level.id
+              ? { ...item, price: draggedPrice } : item));
+          }
+        }));
+    }
+  }
 }
 
 watch(
@@ -398,6 +473,8 @@ watch(
     props.title,
     props.subtitle,
     props.loading,
+    props.enablePriceLevels,
+    priceLevels.value,
   ],
   () => render(),
   { deep: false },
@@ -408,12 +485,21 @@ onMounted(() => render());
 
 <template>
   <div class="chartWrap">
+    <div v-if="enablePriceLevels" class="priceLevelControls">
+      <span>Click to add a price level. Drag a line or label to move it; click it to remove.</span>
+      <button type="button" :disabled="!priceLevelHistory.length" @click="undoPriceLevels">Undo</button>
+      <button v-if="priceLevels.length" type="button" @click="clearPriceLevels">Clear levels</button>
+    </div>
     <svg ref="svgRef" class="chartSvg" />
     <div v-if="loading" class="overlay">Loading...</div>
   </div>
 </template>
 
 <style scoped>
+.priceLevelControls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 6px 16px; color: #a9abb6; font-size: 12px; }
+.priceLevelControls button { border: 1px solid #414751; border-radius: 5px; padding: 4px 8px; background: transparent; color: #e8e8ea; font: inherit; cursor: pointer; }
+.priceLevelControls button:focus-visible { outline: 2px solid #aab8cc; outline-offset: 2px; }
+.priceLevelControls button:disabled { opacity: 0.4; cursor: default; }
 .chartWrap {
   position: relative;
   border-radius: 7px;

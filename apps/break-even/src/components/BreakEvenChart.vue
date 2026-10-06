@@ -708,6 +708,8 @@ onMounted(() => render());
     </div>
     <IndexBreakEvenChart
       v-if="selectedTrack && detailView === 'break-even'"
+      :key="selectedInstrument"
+      enable-price-levels
       ref="priceChartRef"
       :actual-data="indexData"
       :projected-data="indexProjectedData"
