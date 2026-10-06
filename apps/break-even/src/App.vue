@@ -48,41 +48,46 @@ const UNDERLYING_OPTIONS = [
 const ui = reactive({
   resolutionKey: "3600",
   optionMaturity: "",
-  maxPoints: DEFAULT_LOOKBACK_POINT_LIMIT,
   instrumentMaxPoints: DEFAULT_LOOKBACK_POINT_LIMIT,
   priceMaxPoints: DEFAULT_PRICE_LOOKBACK_POINT_LIMIT,
   loading: false,
   error: "",
 });
 
+const nowTs = ref(Math.floor(Date.now() / 1000));
+const selectedMaturityTs = computed(() => Number(ui.optionMaturity));
+const defaultPriceResolution = computed(() => {
+  const secondsToExpiry = selectedMaturityTs.value - nowTs.value;
+  return secondsToExpiry > 0 && secondsToExpiry < 7 * SECONDS_PER_DAY ? "3600" : "86400";
+});
 const underlying = ref("BTCUSD");
 const selectedInstrument = ref(null);
 const detailView = ref("break-even");
+const overviewPriceActive = computed(() => !selectedInstrument.value);
 const lastIntradayResolution = ref(ui.resolutionKey);
-const dailyResolutionAvailable = computed(() =>
-  !!selectedInstrument.value && detailView.value === "break-even",
+const priceViewActive = computed(() =>
+  overviewPriceActive.value || (!!selectedInstrument.value && detailView.value === "break-even"),
 );
 const availableResolutionKeys = computed(() =>
-  Object.keys(RESOLUTION_CONFIG).filter(key => key !== "86400" || dailyResolutionAvailable.value),
+  Object.keys(RESOLUTION_CONFIG).filter(key => key !== "86400" || priceViewActive.value),
 );
 watch(() => ui.resolutionKey, key => {
   if (key !== "86400") lastIntradayResolution.value = key;
 }, { flush: "sync" });
-watch(dailyResolutionAvailable, available => {
-  if (available) {
-    ui.resolutionKey = "86400";
+watch([priceViewActive, overviewPriceActive, () => ui.optionMaturity, defaultPriceResolution], ([active]) => {
+  if (active) {
+    ui.resolutionKey = defaultPriceResolution.value;
   } else if (ui.resolutionKey === "86400") {
     ui.resolutionKey = lastIntradayResolution.value;
   }
 }, { flush: "sync" });
 const historyPointLimit = computed({
-  get: () => dailyResolutionAvailable.value
+  get: () => priceViewActive.value
     ? ui.priceMaxPoints
-    : selectedInstrument.value ? ui.instrumentMaxPoints : ui.maxPoints,
+    : ui.instrumentMaxPoints,
   set: value => {
-    if (dailyResolutionAvailable.value) ui.priceMaxPoints = value;
-    else if (selectedInstrument.value) ui.instrumentMaxPoints = value;
-    else ui.maxPoints = value;
+    if (priceViewActive.value) ui.priceMaxPoints = value;
+    else ui.instrumentMaxPoints = value;
   },
 });
 const allInstruments = ref([]);
@@ -99,9 +104,7 @@ const chartRef = ref(null);
 const settingsMenuRef = ref(null);
 const settingsButtonRef = ref(null);
 const settingsOpen = ref(false);
-const nowTs = ref(Math.floor(Date.now() / 1000));
 const isInitializing = ref(true);
-let prefetchedIndexForInitialLoad = null;
 let loadRequestId = 0;
 let nowTimer = null;
 
@@ -297,72 +300,6 @@ const evolveMarkWithTheta = ({
   return Math.max(currentMark, intrinsic);
 };
 
-const buildBreakEvenForecast = ({
-  optionType,
-  strike,
-  spot,
-  markStart,
-  iv,
-  startTs,
-  expiryTs,
-  stepSeconds,
-}) => {
-  if (
-    !Number.isFinite(strike) ||
-    !Number.isFinite(spot) ||
-    !Number.isFinite(markStart) ||
-    !Number.isFinite(startTs) ||
-    !Number.isFinite(expiryTs) ||
-    !Number.isFinite(stepSeconds) ||
-    stepSeconds <= 0
-  ) {
-    return [];
-  }
-
-  const points = [];
-  let ts = Math.min(startTs, expiryTs);
-  let mark = markStart;
-
-  const pushPoint = () => {
-    const breakEven = optionType === "put" ? strike - mark : strike + mark;
-    const move = breakEven - spot;
-    points.push({
-      ts,
-      date: new Date(ts * 1000),
-      mark,
-      iv,
-      breakEven,
-      move,
-      movePct: spot !== 0 ? move / spot : null,
-    });
-  };
-
-  pushPoint();
-
-  let guard = 0;
-  while (ts < expiryTs && guard < 25000) {
-    const nextTs = Math.min(expiryTs, ts + stepSeconds);
-    const nextMark = evolveMarkWithTheta({
-      mark,
-      optionType,
-      strike,
-      spot,
-      iv,
-      fromTs: ts,
-      toTs: nextTs,
-      expiryTs,
-    });
-    if (!Number.isFinite(nextMark)) break;
-
-    ts = nextTs;
-    mark = nextMark;
-    pushPoint();
-    guard += 1;
-  }
-
-  return points;
-};
-
 const buildHistoricalBreakEvenPoints = ({
   markRows,
   optionType,
@@ -409,8 +346,6 @@ const optionMaturities = computed(() => {
     label: `${maturityFormatter.format(new Date(ts * 1000))} UTC`,
   }));
 });
-
-const selectedMaturityTs = computed(() => Number(ui.optionMaturity));
 
 const optionInstrumentsForMaturity = computed(() => {
   const maturityTs = selectedMaturityTs.value;
@@ -480,17 +415,10 @@ const breakEvenTracks = computed(() => {
   const expiryTs = selectedMaturityTs.value;
   const spot = latestSpot.value;
   const spotTs = latestSpotTs.value;
-  const stepSeconds =
-    RESOLUTION_CONFIG[ui.resolutionKey]?.interval_seconds ??
-    Number(ui.resolutionKey) ??
-    0;
-
   if (
     !Number.isFinite(expiryTs) ||
     !Number.isFinite(spot) ||
-    !Number.isFinite(spotTs) ||
-    !Number.isFinite(stepSeconds) ||
-    stepSeconds <= 0
+    !Number.isFinite(spotTs)
   ) {
     return [];
   }
@@ -521,6 +449,20 @@ const breakEvenTracks = computed(() => {
       optionType === "call" ? strike >= spot : strike <= spot;
     if (!isSelected && !isOutOfMoney) continue;
 
+    // Price context displays the latest observed premium, without forecasting
+    // its decay or loading an option's entire history.
+    if (overviewPriceActive.value) {
+      tracks.push({
+        instrumentName,
+        optionType,
+        strike,
+        referenceIv: snapshot.iv,
+        currentBreakEven: optionType === "put" ? strike - snapshot.mark : strike + snapshot.mark,
+        points: [],
+      });
+      continue;
+    }
+
     let markAtAnchor = snapshot.mark;
     if (snapshot.ts < anchorTs) {
       markAtAnchor = evolveMarkWithTheta({
@@ -536,34 +478,13 @@ const breakEvenTracks = computed(() => {
     }
     if (!Number.isFinite(markAtAnchor)) continue;
 
-    const projectedPoints = buildBreakEvenForecast({
-      optionType,
-      strike,
-      spot,
-      markStart: markAtAnchor,
-      iv: snapshot.iv,
-      startTs: anchorTs,
-      expiryTs,
-      stepSeconds,
-    });
-
-    if (!projectedPoints.length) continue;
-    const historicalPoints = buildHistoricalBreakEvenPoints({
+    const points = buildHistoricalBreakEvenPoints({
       markRows,
       optionType,
       strike,
       spot,
       maxTs: anchorTs,
     });
-    const points = historicalPoints.slice();
-    const lastHistoricalTs = points.length ? points[points.length - 1].ts : null;
-    for (const point of projectedPoints) {
-      if (Number.isFinite(lastHistoricalTs) && point.ts === lastHistoricalTs) {
-        continue;
-      }
-      points.push(point);
-    }
-    if (!points.length) continue;
 
     tracks.push({
       instrumentName,
@@ -582,11 +503,14 @@ const breakEvenTracks = computed(() => {
   });
 });
 
-const breakEvenTitle = computed(() => `${underlying.value.slice(0, 3)} Option Break-Even Forecast`);
+const priceHistoryLabel = computed(() => ({ 900: "15-Minute", 3600: "Hourly", 86400: "Daily" })[ui.resolutionKey]);
+const breakEvenTitle = computed(() => `${underlying.value.slice(0, 3)} Latest Break-Evens and ${priceHistoryLabel.value} Price History`);
 const breakEvenSubtitle = computed(() => {
   const expiryTs = selectedMaturityTs.value;
   if (!Number.isFinite(expiryTs)) return "";
-  const resolutionLabel = RESOLUTION_CONFIG[ui.resolutionKey]?.label || "";
+  const resolutionLabel = overviewPriceActive.value
+    ? `${RESOLUTION_CONFIG[ui.resolutionKey]?.label} · ${maxPointsToFetch.value} price points · Latest option marks`
+    : RESOLUTION_CONFIG[ui.resolutionKey]?.label || "";
   return `Expiry: ${maturityFormatter.format(new Date(expiryTs * 1000))} UTC | Resolution: ${resolutionLabel} | OTM, |delta| < ${MAX_ABS_DELTA.toFixed(2)}`;
 });
 
@@ -638,7 +562,8 @@ async function fetchMarkHistoriesByInstrument({
           resolution,
           from: chunkFrom,
           to: chunkTo,
-          count: MARK_HISTORY_REQUEST_POINT_LIMIT,
+          count: Math.min(MARK_HISTORY_REQUEST_POINT_LIMIT,
+            Math.floor((chunkTo - chunkFrom) / intervalSeconds) + 1),
           requestOptions: { timeoutMs: 45000, maxRetries: 0 },
         }),
         {
@@ -707,33 +632,28 @@ async function load() {
     ? optionInstrumentsForMaturity.value.filter(instrument => instrument.instrument_name === instrumentName)
     : optionInstrumentsForMaturity.value;
   if (instrumentName && !maturityInstruments.length) {
-    ui.error = "The selected strike and option type are unavailable for this maturity. Choose another maturity or return to break-even prices.";
+    ui.error = "The selected strike and option type are unavailable for this maturity. Choose another maturity or return to price context.";
     ui.loading = false;
     return;
   }
   const { resolution, from, to } = getTimestampRange();
-  const canUsePrefetchedIndex =
-    prefetchedIndexForInitialLoad &&
-    prefetchedIndexForInitialLoad.resolutionKey === ui.resolutionKey;
-  const prefetchedIndex = canUsePrefetchedIndex
-    ? prefetchedIndexForInitialLoad.rows
-    : null;
-  if (canUsePrefetchedIndex) {
-    prefetchedIndexForInitialLoad = null;
-  }
-
+  // Index price history and recent option marks have different lookbacks.
+  const markConfig = RESOLUTION_CONFIG[overviewPriceActive.value ? lastIntradayResolution.value : ui.resolutionKey];
+  const markTo = overviewPriceActive.value
+    ? Math.floor(Date.now() / 1000 / markConfig.interval_seconds) * markConfig.interval_seconds
+    : to;
+  const markFrom = overviewPriceActive.value
+    ? markTo - 23 * markConfig.interval_seconds
+    : from;
   try {
-    const indexPromise = prefetchedIndex
-      ? Promise.resolve(prefetchedIndex)
-      : fetchIndexHistory({
-          index_name: underlying.value,
-          resolution,
-          from,
-          to,
-          count: maxPointsToFetch.value,
-        });
+    const indexRows = await fetchIndexHistory({
+      index_name: underlying.value,
+      resolution,
+      from,
+      to,
+      count: maxPointsToFetch.value,
+    });
 
-    const indexRows = await indexPromise;
     if (requestId !== loadRequestId) return;
     const normalizedIndexRows = Array.isArray(indexRows) ? indexRows : [];
     data.index[ui.resolutionKey] = normalizedIndexRows;
@@ -742,13 +662,10 @@ async function load() {
     const { rowsByInstrument } =
       await fetchMarkHistoriesByInstrument({
         instruments: maturityInstruments,
-        resolution,
-        intervalSeconds:
-          RESOLUTION_CONFIG[ui.resolutionKey]?.interval_seconds ??
-          Number(ui.resolutionKey) ??
-          0,
-        from,
-        to,
+        resolution: markConfig.resolution,
+        intervalSeconds: markConfig.interval_seconds,
+        from: markFrom,
+        to: markTo,
         requestId,
         onInstrumentRows: (rows, { instrumentName }) => {
           if (requestId !== loadRequestId) return;
@@ -820,29 +737,14 @@ const switchUnderlying = async (next) => {
   data.index = {};
   data.markByInstrument = {};
   ui.optionMaturity = "";
-  prefetchedIndexForInitialLoad = null;
   isInitializing.value = true;
   try {
     rebuildOptionInstruments();
-    const { resolution, from, to } = getTimestampRange();
-    const prefetchedIndex = await fetchIndexHistory({
-      index_name: next,
-      resolution,
-      from,
-      to,
-      count: maxPointsToFetch.value,
-    });
-    data.index[ui.resolutionKey] = Array.isArray(prefetchedIndex)
-      ? prefetchedIndex
-      : [];
-    prefetchedIndexForInitialLoad = {
-      resolutionKey: ui.resolutionKey,
-      rows: Array.isArray(prefetchedIndex) ? prefetchedIndex : [],
-    };
     ui.optionMaturity = pickDefaultMaturity();
   } catch (error) {
     ui.error = `Unable to load complete data: ${error.message}`;
   } finally {
+    await nextTick();
     isInitializing.value = false;
     if (ui.optionMaturity) {
       await load();
@@ -858,33 +760,13 @@ onMounted(async () => {
 
   document.addEventListener("pointerdown", handleDocumentPointerDown);
   try {
-    const { resolution, from, to } = getTimestampRange();
-    const [fetchedInstruments, prefetchedIndex] = await Promise.all([
-      fetchInstruments(),
-      fetchIndexHistory({
-        index_name: underlying.value,
-        resolution,
-        from,
-        to,
-        count: maxPointsToFetch.value,
-      }),
-    ]);
-
-    allInstruments.value = fetchedInstruments || [];
+    allInstruments.value = await fetchInstruments() || [];
     rebuildOptionInstruments();
-
-    data.index[ui.resolutionKey] = Array.isArray(prefetchedIndex)
-      ? prefetchedIndex
-      : [];
-    prefetchedIndexForInitialLoad = {
-      resolutionKey: ui.resolutionKey,
-      rows: Array.isArray(prefetchedIndex) ? prefetchedIndex : [],
-    };
-
     ui.optionMaturity = pickDefaultMaturity();
   } catch (error) {
     ui.error = `Unable to load complete data: ${error.message}`;
   } finally {
+    await nextTick();
     isInitializing.value = false;
     if (ui.optionMaturity) {
       await load();
@@ -937,7 +819,6 @@ watch(() => ui.optionMaturity, () => {
 
 watch(selectedInstrument, (instrumentName, previous) => {
   if (instrumentName && !previous) detailView.value = "break-even";
-  if (instrumentName && !previous) ui.instrumentMaxPoints = ui.maxPoints;
 }, { flush: "sync" });
 
 watch(
@@ -1022,7 +903,7 @@ watch(
           <div v-if="settingsOpen" class="settingsDropdown">
             <div class="settingsTitle">Chart settings</div>
             <div class="settingsHint">
-              Historic data points{{ selectedInstrument ? ' (selected instrument and index)' : '' }}: {{ maxPointsToFetch }}
+              Historic data points{{ overviewPriceActive ? ' (index)' : selectedInstrument ? ' (selected instrument and index)' : '' }}: {{ maxPointsToFetch }}
             </div>
             <input
               v-model.number="historyPointLimit"

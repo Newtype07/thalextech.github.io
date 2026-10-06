@@ -8,6 +8,7 @@ const props = defineProps({
   projectedData: { type: Array, default: () => [] },
   breakEvenLow: { type: Number, default: null },
   breakEvenHigh: { type: Number, default: null },
+  breakEvenLevels: { type: Array, default: () => [] },
   breakEvenLowLabel: { type: String, default: "BE Low" },
   breakEvenHighLabel: { type: String, default: "BE High" },
   breakEvenLabelColor: { type: String, default: null },
@@ -23,6 +24,7 @@ const props = defineProps({
   enablePriceLevels: { type: Boolean, default: false },
 });
 
+const emit = defineEmits(["select-break-even"]);
 const svgRef = ref(null);
 const priceLevels = ref([]);
 const priceLevelHistory = ref([]);
@@ -71,18 +73,19 @@ const axisStyle = (axisG) => {
 // keeping the resulting text baselines inside the plot.
 const deCollidePriceLabels = (labels, minY, maxY) => {
   const sorted = [...labels].sort((a, b) => a.targetY - b.targetY);
+  const spacing = Math.min(PRICE_LABEL_MIN_SPACING, (maxY - minY) / Math.max(1, sorted.length - 1));
 
-  let previousY = minY - PRICE_LABEL_MIN_SPACING;
+  let previousY = minY - spacing;
   for (const label of sorted) {
-    label.y = Math.max(label.targetY, previousY + PRICE_LABEL_MIN_SPACING);
+    label.y = Math.max(label.targetY, previousY + spacing);
     previousY = label.y;
   }
 
-  let nextY = maxY + PRICE_LABEL_MIN_SPACING;
+  let nextY = maxY + spacing;
   for (let index = sorted.length - 1; index >= 0; index -= 1) {
     sorted[index].y = Math.min(
       sorted[index].y,
-      nextY - PRICE_LABEL_MIN_SPACING,
+      nextY - spacing,
     );
     nextY = sorted[index].y;
   }
@@ -106,7 +109,9 @@ function render() {
   svg.selectAll("*").remove();
   svg.on("click.priceLevels", null);
 
-  const { width, height, margin } = layout;
+  const levels = props.breakEvenLevels.filter(level => Number.isFinite(level?.value));
+  const { width, height } = layout;
+  const margin = levels.length ? { ...layout.margin, right: 420 } : layout.margin;
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = height - margin.top - margin.bottom;
 
@@ -177,6 +182,7 @@ function render() {
   }
   if (Number.isFinite(props.breakEvenLow)) yValues.push(props.breakEvenLow);
   if (Number.isFinite(props.breakEvenHigh)) yValues.push(props.breakEvenHigh);
+  yValues.push(...levels.map(level => level.value));
   if (Number.isFinite(props.currentIndex)) yValues.push(props.currentIndex);
 
   const minBase = d3.min(yValues) ?? 0;
@@ -269,15 +275,54 @@ function render() {
       .attr("stroke-linecap", "round");
   }
 
+  const selectLevel = (event, level) => {
+    event.stopPropagation();
+    emit("select-break-even", level.id);
+  };
+  const levelLines = g.append("g")
+    .attr("class", "breakEvenLevels")
+    .selectAll("g")
+    .data(levels, level => level.id)
+    .join("g")
+    .attr("role", "button").attr("tabindex", 0)
+    .attr("aria-label", level => `Explore ${level.label}${level.tooltip ? `. ${level.tooltip}` : ""}`)
+    .style("cursor", "pointer")
+    .on("click", selectLevel)
+    .on("keydown", (event, level) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectLevel(event, level);
+      }
+    });
+  levelLines.append("line")
+    .attr("x1", 0).attr("x2", innerWidth)
+    .attr("y1", level => y(level.value)).attr("y2", level => y(level.value))
+    .attr("stroke", level => level.color).attr("stroke-width", props.breakEvenStrokeWidth)
+    .attr("opacity", 0.7);
+  levelLines.append("line")
+    .attr("x1", 0).attr("x2", innerWidth)
+    .attr("y1", level => y(level.value)).attr("y2", level => y(level.value))
+    .attr("stroke", "transparent").attr("stroke-width", 12);
+  levelLines.append("title").text(level => level.tooltip ?? level.label);
+
   const formatPrice = d3.format(",.0f");
   const rightX = innerWidth - 8;
   const currentLabelX = innerWidth + 12;
   const hasCompactBreakEvenRange =
+    !levels.length &&
     Number.isFinite(props.breakEvenLow) &&
     Number.isFinite(props.breakEvenHigh) &&
     Math.abs(y(props.breakEvenLow) - y(props.breakEvenHigh)) <
       COMPACT_BREAK_EVEN_RANGE;
   const priceLabels = [
+    ...levels.map(level => ({
+      id: level.id,
+      value: level.value,
+      color: level.color,
+      text: level.label,
+      tooltip: level.tooltip,
+      selectable: true,
+    })),
     {
       id: "break-even-low",
       value: props.breakEvenLow,
@@ -307,9 +352,9 @@ function render() {
     .map((label) => ({
       ...label,
       anchorY: y(label.value),
-      targetY: y(label.value) - PRICE_LABEL_BASELINE_OFFSET,
-      x: rightX,
-      textAnchor: "end",
+      targetY: y(label.value) - (levels.length ? 0 : PRICE_LABEL_BASELINE_OFFSET),
+      x: levels.length ? currentLabelX : rightX,
+      textAnchor: levels.length ? "start" : "end",
     }));
 
   if (hasCompactBreakEvenRange) {
@@ -350,15 +395,15 @@ function render() {
     : priceLabels
         .filter(
           (label) =>
-            Math.abs(label.y - label.targetY) >
+            levels.length || Math.abs(label.y - label.targetY) >
             PRICE_LABEL_LEADER_THRESHOLD,
         )
         .map((label) => ({
           ...label,
           x1: innerWidth,
-          x2: rightX + 2,
+          x2: levels.length ? currentLabelX - 4 : rightX + 2,
           y1: label.anchorY,
-          y2: label.y + PRICE_LABEL_BASELINE_OFFSET,
+          y2: label.y + (levels.length ? 0 : PRICE_LABEL_BASELINE_OFFSET),
         }));
 
   g.append("g")
@@ -388,7 +433,18 @@ function render() {
     .attr("paint-order", "stroke")
     .attr("stroke", "#0a0b0e")
     .attr("stroke-width", 3)
-    .text((label) => label.text);
+    .text((label) => label.text)
+    .attr("role", label => label.selectable ? "button" : null)
+    .attr("tabindex", label => label.selectable ? 0 : null)
+    .style("cursor", label => label.selectable ? "pointer" : null)
+    .on("click", (event, label) => { if (label.selectable) selectLevel(event, label); })
+    .on("keydown", (event, label) => {
+      if (label.selectable && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        selectLevel(event, label);
+      }
+    })
+    .append("title").text(label => label.tooltip ?? label.text);
 
   if (Number.isFinite(props.breakEvenWinProbability)) {
     const breakEvenLabel = priceLabels.find(label => label.id.startsWith("break-even-"));
@@ -461,6 +517,7 @@ watch(
     props.projectedData,
     props.breakEvenLow,
     props.breakEvenHigh,
+    props.breakEvenLevels,
     props.breakEvenLowLabel,
     props.breakEvenHighLabel,
     props.breakEvenLabelColor,

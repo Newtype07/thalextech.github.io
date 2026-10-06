@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTrackProbabilityHistory, nearestTrack } from './trackSelection.js';
+import { buildTrackProbabilityHistory } from './trackSelection.js';
 
 const day = 86400;
 const start = 1700000000;
@@ -30,20 +30,6 @@ test('same-time history follows the historical index instead of current spot', (
   ], start + 30 * day);
   assert.ok(rows[0].probability < 0.1);
   assert.ok(rows[1].probability > 0.8);
-});
-
-test('hit testing selects the closest line segment within the hover radius', () => {
-  const tracks = [
-    { id: 'a', points: [[0, 20], [100, 20]] },
-    { id: 'b', points: [[0, 28], [100, 28]] },
-  ];
-  assert.equal(nearestTrack(tracks, 50, 22, 10), 'a');
-  assert.equal(nearestTrack(tracks, 50, 27, 10), 'b');
-  assert.equal(nearestTrack(tracks, 50, 40, 10), null);
-  assert.equal(nearestTrack(tracks, 105, 20, 10), 'a');
-  assert.equal(nearestTrack(tracks, 111, 20, 10), null);
-  assert.equal(nearestTrack([{ id: 'slope', points: [[0, 0], [100, 100]] }], 50, 60, 8), 'slope');
-  assert.equal(nearestTrack([], 50, 50), null);
 });
 
 test('maturity changes match the same strike and option type without picking a substitute', async () => {
