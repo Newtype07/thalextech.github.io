@@ -1,8 +1,8 @@
 const SECONDS_PER_BS_YEAR = 365.25 * 24 * 60 * 60;
 
-const erfApprox = (x) => {
-  const sign = x < 0 ? -1 : 1;
-  const absX = Math.abs(x);
+const normalCdf = (x) => {
+  if (x === 0) return 0.5;
+  const absX = Math.abs(x) / Math.SQRT2;
   const t = 1 / (1 + 0.5 * absX);
   const tau =
     t *
@@ -25,31 +25,41 @@ const erfApprox = (x) => {
                                   (1.48851587 +
                                     t * (-0.82215223 + t * 0.17087277)))))))),
     );
-  return sign * (1 - tau);
+  // Evaluate the small tail directly to avoid cancellation for rare wins.
+  return x < 0 ? 0.5 * tau : 1 - 0.5 * tau;
 };
 
-const normalCdf = (x) => 0.5 * (1 + erfApprox(x / Math.SQRT2));
-
-const calcNd2 = ({ spot, strike, iv, tauSeconds }) => {
+export const calcOptionNd2 = ({ optionType, spot, strike, iv, tauSeconds }) => {
   if (!Number.isFinite(spot) || spot <= 0) return null;
   if (!Number.isFinite(strike) || strike <= 0) return null;
   if (!Number.isFinite(iv) || iv <= 0) return null;
   if (!Number.isFinite(tauSeconds)) return null;
   if (tauSeconds <= 0) {
-    if (spot > strike) return 1;
-    if (spot < strike) return 0;
-    return 0.5;
+    const above = spot > strike ? 1 : spot < strike ? 0 : 0.5;
+    return optionType === "put" ? 1 - above : above;
   }
   const tau = tauSeconds / SECONDS_PER_BS_YEAR;
   if (!Number.isFinite(tau) || tau <= 0) return null;
   const sqrtTau = Math.sqrt(tau);
   const d2 = (Math.log(spot / strike) - 0.5 * iv * iv * tau) / (iv * sqrtTau);
   if (!Number.isFinite(d2)) return null;
-  return normalCdf(d2);
+  return normalCdf(optionType === "put" ? -d2 : d2);
 };
 
-export const calcOptionNd2 = ({ optionType, spot, strike, iv, tauSeconds }) => {
-  const callNd2 = calcNd2({ spot, strike, iv, tauSeconds });
-  if (!Number.isFinite(callNd2)) return null;
-  return optionType === "put" ? 1 - callNd2 : callNd2;
+// Same zero-rate, zero-carry lognormal model as P(win). Truncate at break-even,
+// rather than strike: a win means strictly positive option P&L at expiration.
+export const calcConditionalWinningPrice = ({ optionType, spot, breakEven, iv, tauSeconds }) => {
+  const probability = calcOptionNd2({ optionType, spot, strike: breakEven, iv, tauSeconds });
+  if (!(probability > 0)) return null;
+  if (tauSeconds <= 0) {
+    const wins = optionType === "put" ? spot < breakEven : spot > breakEven;
+    return wins ? spot : null;
+  }
+
+  const variance = iv * iv * tauSeconds / SECONDS_PER_BS_YEAR;
+  const standardDeviation = Math.sqrt(variance);
+  const d1 = (Math.log(spot / breakEven) + 0.5 * variance) / standardDeviation;
+  const winningMoment = spot * normalCdf(optionType === "put" ? -d1 : d1);
+  const mean = winningMoment / probability;
+  return Number.isFinite(mean) && mean > 0 ? mean : null;
 };

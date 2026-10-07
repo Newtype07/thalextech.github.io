@@ -2,7 +2,7 @@
 import * as d3 from "d3";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { exportChartToPng } from "../../../../lib/export-png.js";
-import { calcOptionNd2 } from "../lib/breakEvenSnapshot.js";
+import { calcConditionalWinningPrice, calcOptionNd2 } from "../lib/breakEvenSnapshot.js";
 import IndexBreakEvenChart from "../../../../lib/components/IndexBreakEvenChart.vue";
 
 import { buildTrackProbabilityHistory } from "../lib/trackSelection.js";
@@ -46,25 +46,47 @@ const clearSelection = () => { selectedInstrument.value = null; };
 
 const layout = {
   width: 1800,
-  height: 920,
-  margin: { top: 96, right: 140, bottom: 82, left: 140 },
+  height: 900,
+  margin: { top: 96, right: 140, bottom: 78, left: 140 },
 };
 
+const CHART_FONT_FAMILY = '"Helvetica Neue", Helvetica, -apple-system, sans-serif';
 const formatPrice = d3.format(",.0f");
 const formatProb = d3.format(".1%");
+const timeToExpiry = computed(() => {
+  const valuationTs = Number.isFinite(props.currentTs) ? props.currentTs : props.spotTs;
+  return Number.isFinite(props.expiryTs) && Number.isFinite(valuationTs)
+    ? props.expiryTs - valuationTs : null;
+});
 const getWinProbability = track => {
   if (!track) return null;
-  const valuationTs = Number.isFinite(props.currentTs) ? props.currentTs : props.spotTs;
-  if (!Number.isFinite(props.expiryTs) || !Number.isFinite(valuationTs)) return null;
   return calcOptionNd2({
     optionType: track.optionType,
     spot: props.spotPrice,
     strike: track.currentBreakEven,
     iv: track.referenceIv,
-    tauSeconds: props.expiryTs - valuationTs,
+    tauSeconds: timeToExpiry.value,
   });
 };
 const selectedWinProbability = computed(() => getWinProbability(selectedTrack.value));
+const selectedWinningPriceLevels = computed(() => {
+  const track = selectedTrack.value;
+  if (!track) return [];
+  const value = calcConditionalWinningPrice({
+    optionType: track.optionType,
+    spot: props.spotPrice,
+    breakEven: track.currentBreakEven,
+    iv: track.referenceIv,
+    tauSeconds: timeToExpiry.value,
+  });
+  return Number.isFinite(value) ? [{
+    id: "average-winning-price",
+    value,
+    label: `AWP = ${formatPrice(value)}`,
+    color: "#ffffff",
+    tooltip: `Expected terminal index price conditional on expiring ${track.optionType === "put" ? "below" : "above"} break-even, using the same zero-rate, zero-carry lognormal IV model as P(win).`,
+  }] : [];
+});
 const overviewLevels = computed(() => props.tracks.map(track => {
   const probability = getWinProbability(track);
   const probabilityText = Number.isFinite(probability) ? formatProb(probability) : "n/a";
@@ -89,7 +111,7 @@ const selectedSubtitle = computed(() => {
   const expiry = Number.isFinite(props.expiryTs)
     ? new Date(props.expiryTs * 1000).toISOString().slice(0, 10) : "n/a";
   const probability = Number.isFinite(probabilityAboveStrike) ? formatProb(probabilityAboveStrike) : "n/a";
-  return `Expiry ${expiry} · Current probability of expiring above the strike (N(d2)): ${probability}`;
+  return `Expiry ${expiry} · Current probability of expiring above the strike N(d2): ${probability}`;
 });
 const Y_AXIS_LABEL_PADDING = 72;
 
@@ -98,9 +120,9 @@ const axisStyle = (axisG) => {
   axisG.selectAll("path").remove();
   axisG
     .selectAll("text")
-    .attr("fill", "#c0c0c0")
-    .style("font-size", "14px")
-    .style("font-family", "ui-sans-serif, system-ui");
+    .attr("fill", "#70767d")
+    .style("font-size", "12px")
+    .style("font-family", CHART_FONT_FAMILY);
 };
 
 function exportPng({ filename = "break-even.png", scale = 4, padding = 24 } = {}) {
@@ -153,10 +175,10 @@ function render() {
     .attr("x", width / 2)
     .attr("y", 36)
     .attr("text-anchor", "middle")
-    .attr("fill", "white")
-    .style("font-size", "22px")
+    .attr("fill", "#e8eaed")
+    .style("font-size", "18px")
     .style("font-weight", 650)
-    .style("font-family", "ui-sans-serif, system-ui")
+    .style("font-family", CHART_FONT_FAMILY)
     .text(`${selectedLabel.value} · Probability and Index History`);
 
   if (props.subtitle) {
@@ -165,9 +187,9 @@ function render() {
       .attr("x", width / 2)
       .attr("y", 62)
       .attr("text-anchor", "middle")
-      .attr("fill", "#a0a0a0")
-      .style("font-size", "18px")
-      .style("font-family", "ui-sans-serif, system-ui")
+      .attr("fill", "#70767d")
+      .style("font-size", "14px")
+      .style("font-family", CHART_FONT_FAMILY)
       .text(selectedSubtitle.value);
   }
 
@@ -235,9 +257,9 @@ function render() {
     .attr("x", innerWidth / 2)
     .attr("y", innerHeight + 58)
     .attr("text-anchor", "middle")
-    .attr("fill", "#a0a0a0")
-    .style("font-size", "13px")
-    .style("font-family", "ui-sans-serif, system-ui")
+    .attr("fill", "#70767d")
+    .style("font-size", "12px")
+    .style("font-family", CHART_FONT_FAMILY)
     .text("Date (UTC)");
 
   g.append("text")
@@ -245,9 +267,9 @@ function render() {
     .attr("x", -innerHeight / 2)
     .attr("y", -Y_AXIS_LABEL_PADDING)
     .attr("text-anchor", "middle")
-    .attr("fill", "#a0a0a0")
-    .style("font-size", "13px")
-    .style("font-family", "ui-sans-serif, system-ui")
+    .attr("fill", "#70767d")
+    .style("font-size", "12px")
+    .style("font-family", CHART_FONT_FAMILY)
     .text(probabilityLabel);
 
   const [minProbability, maxProbability] = d3.extent(probabilityHistory, point => point.probability);
@@ -272,7 +294,8 @@ function render() {
     .call(d3.axisLeft(probabilityY).ticks(5).tickSize(0).tickPadding(12).tickFormat(probabilityY.tickFormat(5, "%")))
     .call(axisStyle);
   g.append("text").attr("transform", `translate(${innerWidth + 100},${innerHeight / 2}) rotate(90)`)
-    .attr("text-anchor", "middle").attr("fill", "#c0c0c0").style("font-size", "15px")
+    .attr("text-anchor", "middle").attr("fill", "#70767d").style("font-size", "12px")
+    .style("font-family", CHART_FONT_FAMILY)
     .text("Index price (USD)");
   const historicalIndexLine = d3.line()
     .x(point => x(point.date))
@@ -280,13 +303,13 @@ function render() {
     .curve(d3.curveBasis);
   g.append("path").datum(visibleIndex)
     .attr("class", "historicalIndexLine").attr("fill", "none")
-    .attr("stroke", "#858b94").attr("stroke-width", 3.6)
+    .attr("stroke", "#858b94").attr("stroke-width", 2)
     .attr("stroke-linecap", "round").attr("stroke-linejoin", "round")
     .attr("pointer-events", "none").attr("d", historicalIndexLine);
   if (visibleIndex.length === 1) {
     const point = visibleIndex[0];
     g.append("circle").attr("cx", x(point.date)).attr("cy", y(point.value))
-      .attr("r", 3).attr("fill", "#858b94");
+      .attr("r", 2).attr("fill", "#858b94");
   }
   const probabilityLine = d3.line()
     .x(point => x(point.date))
@@ -294,26 +317,22 @@ function render() {
     .curve(d3.curveBasis);
   g.append("path").datum(probabilityHistory)
     .attr("class", "probabilityLine").attr("fill", "none")
-    .attr("stroke", probabilityColor).attr("stroke-width", 3.6)
+    .attr("stroke", probabilityColor).attr("stroke-width", 2)
     .attr("stroke-linecap", "round").attr("stroke-linejoin", "round")
     .attr("d", probabilityLine);
   if (probabilityHistory.length === 1) {
     const point = probabilityHistory[0];
     g.append("circle").attr("cx", x(point.date)).attr("cy", probabilityY(point.probability))
-      .attr("r", 3).attr("fill", probabilityColor);
+      .attr("r", 2).attr("fill", probabilityColor);
   }
   g.append("text")
     .attr("class", "latestProbabilityLabel")
     .attr("x", innerWidth - 8).attr("y", latestProbabilityY - 10)
     .attr("text-anchor", "end").attr("fill", probabilityColor)
-    .attr("paint-order", "stroke").attr("stroke", "#000").attr("stroke-width", 4)
+    .attr("paint-order", "stroke").attr("stroke", "#000").attr("stroke-width", 3)
     .attr("pointer-events", "none")
-    .style("font-size", "16px").style("font-family", "ui-sans-serif, system-ui")
+    .style("font-size", "14px").style("font-family", CHART_FONT_FAMILY)
     .text(`Latest ${probabilityLabel} = ${formatProb(latestProbability)}`);
-  svg.append("text").attr("x", width / 2).attr("y", 84).attr("text-anchor", "middle")
-    .attr("fill", "#a0a0a0").style("font-size", "18px")
-    .style("font-family", "ui-sans-serif, system-ui")
-    .text(`${selectedLabel.value} · ${probabilityHistory.length ? `${probabilityLabel} white line (auto-scaled left axis) · Index grey line (right axis) · Historical marks only` : "No matching historical IV and index marks"}`);
 }
 
 watch(
@@ -345,13 +364,13 @@ onUnmounted(() => resizeObserver?.disconnect());
 
 <template>
   <div class="chartWrap" @keydown.esc="clearSelection">
-    <div class="selectionToolbar">
+    <div class="selectionToolbar" :class="{ 'selectionToolbar--instrument': selectedInstrument }">
+      <button v-if="selectedInstrument" class="backButton" type="button" @click="clearSelection">← Back to price context</button>
       <div v-if="selectedInstrument" class="detailToggle" role="group" aria-label="Instrument chart view">
         <button type="button" :aria-pressed="detailView === 'break-even'" @click="detailView = 'break-even'">Break-even price</button>
         <button type="button" :aria-pressed="detailView === 'probability'" @click="detailView = 'probability'">Probability</button>
       </div>
-      <span>{{ selectedInstrument ? `${selectedLabel} selected` : 'Latest break-even prices · Calls in green, puts in red · Click a line or label to explore.' }}</span>
-      <button v-if="selectedInstrument" class="backButton" type="button" @click="clearSelection">← Back to price context</button>
+      <span class="selectionLabel">{{ selectedInstrument ? `${selectedLabel} selected` : 'Latest break-even prices · Calls in green, puts in red · Click a line or label to explore.' }}</span>
     </div>
     <IndexBreakEvenChart
       v-if="!selectedInstrument"
@@ -377,7 +396,6 @@ onUnmounted(() => resizeObserver?.disconnect());
       fit-container
       background-color="#000"
       :key="selectedInstrument"
-      enable-price-levels
       ref="priceChartRef"
       :actual-data="indexData"
       :projected-data="indexProjectedData"
@@ -387,6 +405,7 @@ onUnmounted(() => resizeObserver?.disconnect());
       break-even-high-label="BE"
       :break-even-label-color="selectedTrack.optionType === 'put' ? '#f87171' : '#4ade80'"
       :break-even-win-probability="selectedWinProbability"
+      :reference-levels="selectedWinningPriceLevels"
       :break-even-stroke-width="4"
       :index-stroke-width="2"
       :index-curve="d3.curveNatural"
@@ -404,13 +423,16 @@ onUnmounted(() => resizeObserver?.disconnect());
 
 <style scoped>
 .selectionToolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; min-height: 36px; padding: 8px 16px; color: #aaa; font-size: 12px; }
+.selectionToolbar--instrument { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
+.selectionToolbar--instrument .detailToggle { justify-self: center; }
+.selectionToolbar--instrument .selectionLabel { justify-self: end; text-align: right; }
 .selectionToolbar button { padding: 6px 12px; font: inherit; cursor: pointer; }
 .selectionToolbar button:focus-visible { outline: 2px solid #aab8cc; outline-offset: 3px; }
 .detailToggle { display: flex; gap: 3px; padding: 3px; border: 1px solid #414751; border-radius: 8px; background: #15181d; }
 .detailToggle button { border: 0; border-radius: 5px; background: transparent; color: #a9b0ba; }
 .detailToggle button:hover { color: white; }
 .detailToggle button[aria-pressed="true"] { background: #edf0f4; color: #15181d; font-weight: 600; }
-.selectionToolbar .backButton { margin-left: auto; border: 1px solid #414751; border-radius: 5px; background: transparent; color: #c2c7cf; }
+.selectionToolbar .backButton { justify-self: start; border: 1px solid #414751; border-radius: 5px; background: transparent; color: #c2c7cf; }
 .selectionToolbar .backButton:hover { background: #20252c; color: white; }
 .selectionEmpty { min-height: 320px; display: grid; place-items: center; color: #aaa; font-size: 14px; }
 .chartWrap {
@@ -424,6 +446,13 @@ onUnmounted(() => resizeObserver?.disconnect());
   display: block;
   width: 100%;
   height: auto;
+}
+
+@media (max-width: 640px) {
+  .selectionToolbar--instrument { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .selectionToolbar--instrument .backButton { grid-column: 1; grid-row: 1; }
+  .selectionToolbar--instrument .selectionLabel { grid-column: 2; grid-row: 1; }
+  .selectionToolbar--instrument .detailToggle { grid-column: 1 / -1; grid-row: 2; }
 }
 
 @media (min-width: 960px) {

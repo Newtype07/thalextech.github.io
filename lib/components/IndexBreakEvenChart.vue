@@ -9,6 +9,7 @@ const props = defineProps({
   breakEvenLow: { type: Number, default: null },
   breakEvenHigh: { type: Number, default: null },
   breakEvenLevels: { type: Array, default: () => [] },
+  referenceLevels: { type: Array, default: () => [] },
   breakEvenLowLabel: { type: String, default: "BE Low" },
   breakEvenHighLabel: { type: String, default: "BE High" },
   breakEvenLabelColor: { type: String, default: null },
@@ -113,6 +114,7 @@ function render() {
   svg.on("click.priceLevels", null);
 
   const levels = props.breakEvenLevels.filter(level => Number.isFinite(level?.value));
+  const referenceLevels = props.referenceLevels.filter(level => Number.isFinite(level?.value));
   const bounds = props.fitContainer && window.matchMedia("(min-width: 960px)").matches
     ? svgEl.getBoundingClientRect() : null;
   const width = bounds?.width > 0 ? bounds.width : layout.width;
@@ -189,6 +191,7 @@ function render() {
   if (Number.isFinite(props.breakEvenLow)) yValues.push(props.breakEvenLow);
   if (Number.isFinite(props.breakEvenHigh)) yValues.push(props.breakEvenHigh);
   yValues.push(...levels.map(level => level.value));
+  yValues.push(...referenceLevels.map(level => level.value));
   if (Number.isFinite(props.currentIndex)) yValues.push(props.currentIndex);
 
   const minBase = d3.min(yValues) ?? 0;
@@ -311,16 +314,35 @@ function render() {
     .attr("stroke", "transparent").attr("stroke-width", 12);
   levelLines.append("title").text(level => level.tooltip ?? level.label);
 
+  const referenceLines = g.append("g")
+    .attr("class", "referencePriceLevels")
+    .selectAll("line")
+    .data(referenceLevels, level => level.id)
+    .join("line")
+    .attr("x1", 0).attr("x2", innerWidth)
+    .attr("y1", level => y(level.value)).attr("y2", level => y(level.value))
+    .attr("stroke", level => level.color)
+    .attr("stroke-width", 1);
+  referenceLines.append("title").text(level => level.tooltip ?? level.label);
+
   const formatPrice = d3.format(",.0f");
   const rightX = innerWidth - 8;
   const currentLabelX = innerWidth + 12;
   const hasCompactBreakEvenRange =
     !levels.length &&
+    !referenceLevels.length &&
     Number.isFinite(props.breakEvenLow) &&
     Number.isFinite(props.breakEvenHigh) &&
     Math.abs(y(props.breakEvenLow) - y(props.breakEvenHigh)) <
       COMPACT_BREAK_EVEN_RANGE;
   const priceLabels = [
+    ...referenceLevels.map(level => ({
+      id: level.id,
+      value: level.value,
+      color: level.color,
+      text: level.label,
+      tooltip: level.tooltip,
+    })),
     ...levels.map(level => ({
       id: level.id,
       value: level.value,
@@ -524,6 +546,7 @@ watch(
     props.breakEvenLow,
     props.breakEvenHigh,
     props.breakEvenLevels,
+    props.referenceLevels,
     props.breakEvenLowLabel,
     props.breakEvenHighLabel,
     props.breakEvenLabelColor,
