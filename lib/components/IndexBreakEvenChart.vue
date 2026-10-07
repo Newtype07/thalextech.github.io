@@ -1,6 +1,6 @@
 <script setup>
 import * as d3 from "d3";
-import { onMounted, ref, watch } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { exportChartToPng } from "../export-png.js";
 
 const props = defineProps({
@@ -22,10 +22,13 @@ const props = defineProps({
   subtitle: { type: String, default: "" },
   loading: { type: Boolean, default: false },
   enablePriceLevels: { type: Boolean, default: false },
+  backgroundColor: { type: String, default: "#0a0b0e" },
+  fitContainer: { type: Boolean, default: false },
 });
 
 const emit = defineEmits(["select-break-even"]);
 const svgRef = ref(null);
+let resizeObserver = null;
 const priceLevels = ref([]);
 const priceLevelHistory = ref([]);
 let nextPriceLevelId = 0;
@@ -110,7 +113,10 @@ function render() {
   svg.on("click.priceLevels", null);
 
   const levels = props.breakEvenLevels.filter(level => Number.isFinite(level?.value));
-  const { width, height } = layout;
+  const bounds = props.fitContainer && window.matchMedia("(min-width: 960px)").matches
+    ? svgEl.getBoundingClientRect() : null;
+  const width = bounds?.width > 0 ? bounds.width : layout.width;
+  const height = bounds?.height > 0 ? bounds.height : layout.height;
   const margin = levels.length ? { ...layout.margin, right: 420 } : layout.margin;
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = height - margin.top - margin.bottom;
@@ -122,7 +128,7 @@ function render() {
     .append("rect")
     .attr("width", width)
     .attr("height", height)
-    .attr("fill", "#0a0b0e");
+    .attr("fill", props.backgroundColor);
 
   svg
     .append("text")
@@ -431,7 +437,7 @@ function render() {
     .style("font-size", "14px")
     .style("font-family", CHART_FONT_FAMILY)
     .attr("paint-order", "stroke")
-    .attr("stroke", "#0a0b0e")
+    .attr("stroke", props.backgroundColor)
     .attr("stroke-width", 3)
     .text((label) => label.text)
     .attr("role", label => label.selectable ? "button" : null)
@@ -454,7 +460,7 @@ function render() {
         .attr("x", innerWidth + 12).attr("y", breakEvenLabel.y)
         .attr("text-anchor", "start").attr("fill", "#f5f5f7")
         .style("font-size", "14px").style("font-family", CHART_FONT_FAMILY)
-        .attr("paint-order", "stroke").attr("stroke", "#0a0b0e").attr("stroke-width", 3)
+        .attr("paint-order", "stroke").attr("stroke", props.backgroundColor).attr("stroke-width", 3)
         .text(`P(win) = ${d3.format(".1%")(props.breakEvenWinProbability)}`)
         .append("title")
         .text("Model probability of expiring beyond the break-even price: above for calls, below for puts.");
@@ -485,7 +491,7 @@ function render() {
       const label = annotation.append("text")
         .attr("x", 8).attr("y", Math.max(14, levelY - 8))
         .attr("fill", "#f5f5f7").style("font-size", "14px").style("font-family", CHART_FONT_FAMILY)
-        .attr("paint-order", "stroke").attr("stroke", "#0a0b0e").attr("stroke-width", 3)
+        .attr("paint-order", "stroke").attr("stroke", props.backgroundColor).attr("stroke-width", 3)
         .text(`Price = ${formatPrice(level.price)}`);
       let draggedPrice = level.price;
       annotation.call(d3.drag()
@@ -531,17 +537,26 @@ watch(
     props.subtitle,
     props.loading,
     props.enablePriceLevels,
+    props.backgroundColor,
+    props.fitContainer,
     priceLevels.value,
   ],
   () => render(),
   { deep: false },
 );
 
-onMounted(() => render());
+onMounted(() => {
+  render();
+  if (props.fitContainer) {
+    resizeObserver = new ResizeObserver(render);
+    resizeObserver.observe(svgRef.value);
+  }
+});
+onUnmounted(() => resizeObserver?.disconnect());
 </script>
 
 <template>
-  <div class="chartWrap">
+  <div class="chartWrap" :class="{ 'chartWrap--fit': fitContainer }" :style="{ background: backgroundColor }">
     <div v-if="enablePriceLevels" class="priceLevelControls">
       <span>Click to add a price level. Drag a line or label to move it; click it to remove.</span>
       <button type="button" :disabled="!priceLevelHistory.length" @click="undoPriceLevels">Undo</button>
@@ -561,13 +576,29 @@ onMounted(() => render());
   position: relative;
   border-radius: 7px;
   overflow: hidden;
-  background: #0a0b0e;
 }
 
 .chartSvg {
   display: block;
   width: 100%;
   height: auto;
+}
+
+@media (min-width: 960px) {
+  .chartWrap--fit {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .chartWrap--fit .priceLevelControls { flex-shrink: 0; }
+
+  .chartWrap--fit .chartSvg {
+    flex: 1;
+    height: 0;
+    min-height: 0;
+  }
 }
 
 .overlay {

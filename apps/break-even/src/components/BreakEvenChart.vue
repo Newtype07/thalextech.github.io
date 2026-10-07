@@ -1,6 +1,6 @@
 <script setup>
 import * as d3 from "d3";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { exportChartToPng } from "../../../../lib/export-png.js";
 import { calcOptionNd2 } from "../lib/breakEvenSnapshot.js";
 import IndexBreakEvenChart from "../../../../lib/components/IndexBreakEvenChart.vue";
@@ -25,6 +25,7 @@ const props = defineProps({
 
 const emit = defineEmits(["update:selectedInstrument", "update:detailView"]);
 const svgRef = ref(null);
+let resizeObserver = null;
 const selectedInstrument = computed({
   get: () => props.selectedInstrument,
   set: value => emit("update:selectedInstrument", value),
@@ -130,7 +131,11 @@ function render() {
   const selected = selectedTrack.value;
   if (!selected || detailView.value !== "probability") return;
 
-  const { width, height, margin } = layout;
+  const bounds = window.matchMedia("(min-width: 960px)").matches
+    ? svgEl.getBoundingClientRect() : null;
+  const width = bounds?.width > 0 ? bounds.width : layout.width;
+  const height = bounds?.height > 0 ? bounds.height : layout.height;
+  const { margin } = layout;
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = height - margin.top - margin.bottom;
 
@@ -330,7 +335,12 @@ watch(
   { deep: true },
 );
 
-onMounted(() => render());
+onMounted(() => {
+  render();
+  resizeObserver = new ResizeObserver(render);
+  resizeObserver.observe(svgRef.value);
+});
+onUnmounted(() => resizeObserver?.disconnect());
 </script>
 
 <template>
@@ -345,6 +355,9 @@ onMounted(() => render());
     </div>
     <IndexBreakEvenChart
       v-if="!selectedInstrument"
+      class="priceChart"
+      fit-container
+      background-color="#000"
       ref="overviewPriceChartRef"
       :actual-data="indexData"
       :projected-data="indexProjectedData"
@@ -360,6 +373,9 @@ onMounted(() => render());
     />
     <IndexBreakEvenChart
       v-if="selectedTrack && detailView === 'break-even'"
+      class="priceChart"
+      fit-container
+      background-color="#000"
       :key="selectedInstrument"
       enable-price-levels
       ref="priceChartRef"
@@ -408,6 +424,19 @@ onMounted(() => render());
   display: block;
   width: 100%;
   height: auto;
+}
+
+@media (min-width: 960px) {
+  .chartWrap {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .selectionToolbar { flex-shrink: 0; }
+  .priceChart { flex: 1; min-height: 0; }
+  .chartSvg { flex: 1; height: 0; min-height: 0; }
 }
 
 .overlay {

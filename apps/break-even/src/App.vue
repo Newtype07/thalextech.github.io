@@ -942,6 +942,28 @@ watch(
 </template>
 
 <style scoped>
+@media (min-width: 960px) {
+  .app {
+    max-width: none;
+    height: 100dvh;
+    min-height: 680px;
+    display: flex;
+    flex-direction: column;
+    padding: 18px;
+  }
+
+  .header { flex-shrink: 0; }
+
+  .app > .chartWrap {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .chartTopBar { flex-shrink: 0; }
+}
+
 .chartWrap {
   position: relative;
 }
