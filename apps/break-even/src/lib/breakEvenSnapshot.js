@@ -46,20 +46,22 @@ export const calcOptionNd2 = ({ optionType, spot, strike, iv, tauSeconds }) => {
   return normalCdf(optionType === "put" ? -d2 : d2);
 };
 
-// Same zero-rate, zero-carry lognormal model as P(win). Truncate at break-even,
-// rather than strike: a win means strictly positive option P&L at expiration.
-export const calcConditionalWinningPrice = ({ optionType, spot, breakEven, iv, tauSeconds }) => {
-  const probability = calcOptionNd2({ optionType, spot, strike: breakEven, iv, tauSeconds });
+// Same zero-rate, zero-carry lognormal model as P(win). Truncate at strike so
+// the partial-payoff region between strike and break-even is included; a mean
+// conditional on break-even is biased high for calls and low for puts because
+// it ignores finishes that pay out less than the premium.
+export const calcConditionalWinningPrice = ({ optionType, spot, strike, iv, tauSeconds }) => {
+  const probability = calcOptionNd2({ optionType, spot, strike, iv, tauSeconds });
   if (!(probability > 0)) return null;
   if (tauSeconds <= 0) {
-    const wins = optionType === "put" ? spot < breakEven : spot > breakEven;
-    return wins ? spot : null;
+    const itm = optionType === "put" ? spot < strike : spot > strike;
+    return itm ? spot : null;
   }
 
   const variance = iv * iv * tauSeconds / SECONDS_PER_BS_YEAR;
   const standardDeviation = Math.sqrt(variance);
-  const d1 = (Math.log(spot / breakEven) + 0.5 * variance) / standardDeviation;
-  const winningMoment = spot * normalCdf(optionType === "put" ? -d1 : d1);
-  const mean = winningMoment / probability;
+  const d1 = (Math.log(spot / strike) + 0.5 * variance) / standardDeviation;
+  const inTheMoneyMoment = spot * normalCdf(optionType === "put" ? -d1 : d1);
+  const mean = inTheMoneyMoment / probability;
   return Number.isFinite(mean) && mean > 0 ? mean : null;
 };

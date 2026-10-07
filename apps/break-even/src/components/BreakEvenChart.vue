@@ -21,6 +21,7 @@ const props = defineProps({
   selectedInstrument: { type: String, default: null },
   selectedOption: { type: Object, default: null },
   detailView: { type: String, default: "break-even" },
+  overviewMetric: { type: String, default: "break-even" },
 });
 
 const emit = defineEmits(["update:selectedInstrument", "update:detailView"]);
@@ -93,40 +94,50 @@ const getWinProbabilityTooltip = track => {
 };
 const selectedBreakEvenTooltip = computed(() => getBreakEvenTooltip(selectedTrack.value));
 const selectedWinProbabilityTooltip = computed(() => getWinProbabilityTooltip(selectedTrack.value));
-const selectedWinningPriceLevels = computed(() => {
-  const track = selectedTrack.value;
-  if (!track) return [];
-  const value = calcConditionalWinningPrice({
+const getWinningPrice = track => {
+  if (!track) return null;
+  return calcConditionalWinningPrice({
     optionType: track.optionType,
     spot: props.spotPrice,
-    breakEven: track.currentBreakEven,
+    strike: track.strike,
     iv: track.referenceIv,
     tauSeconds: timeToExpiry.value,
   });
+};
+const getWinningPriceTooltip = track => {
+  if (!track) return "";
+  const isPut = track.optionType === "put";
+  return `AWP — average terminal index price conditional on the option expiring in-the-money: finishing ${isPut ? "below" : "above"} the strike.\n` +
+    `Includes partial payoffs below premium; conditioning on break-even instead would bias AWP ${isPut ? "low" : "high"} by discarding those finishes.\n` +
+    `q = IV × √T; d1 = [ln(Current / Strike) + q² / 2] / q; d2 = d1 − q.\n` +
+    `AWP = Current × Φ(${isPut ? "−d1" : "d1"}) / Φ(${isPut ? "−d2" : "d2"}), where Φ is the standard normal cumulative probability.\n` +
+    `Uses the same lognormal model, IV and time remaining as P(win), with zero interest rates and carry.`;
+};
+const selectedWinningPriceLevels = computed(() => {
+  const track = selectedTrack.value;
+  const value = getWinningPrice(track);
   return Number.isFinite(value) ? [{
     id: "average-winning-price",
     value,
     label: `AWP = ${formatPrice(value)}`,
     color: "#ffffff",
-    tooltip: `AWP — average terminal index price conditional on a win: finishing ${track.optionType === "put" ? "below" : "above"} BE.\n` +
-      `Calculated by averaging terminal prices weighted by their model probabilities over winning outcomes, then dividing by P(win).\n` +
-      `q = IV × √T; d1 = [ln(Current / BE) + q² / 2] / q.\n` +
-      `AWP = Current × Φ(${track.optionType === "put" ? "−d1" : "d1"}) / P(win), where Φ is the standard normal cumulative probability.\n` +
-      `Uses the same lognormal model, IV and time remaining as P(win), with zero interest rates and carry.`,
+    tooltip: getWinningPriceTooltip(track),
   }] : [];
 });
 const overviewLevels = computed(() => props.tracks.map(track => {
   const probability = getWinProbability(track);
   const probabilityText = Number.isFinite(probability) ? formatProb(probability) : "n/a";
+  const showAwp = props.overviewMetric === "awp";
+  const value = showAwp ? getWinningPrice(track) : track.currentBreakEven;
   return {
     id: track.instrumentName,
-    value: track.currentBreakEven,
-    label: `${track.optionType === "put" ? "P" : "C"} ${formatPrice(track.strike)} · BE ${formatPrice(track.currentBreakEven)} · P(win)=${probabilityText}`,
-    tooltip: `${getBreakEvenTooltip(track)}\n\n${getWinProbabilityTooltip(track)}`,
+    value,
+    label: `${track.optionType === "put" ? "P" : "C"} ${formatPrice(track.strike)} · ${showAwp ? "AWP" : "BE"} ${Number.isFinite(value) ? formatPrice(value) : "n/a"} · P(win)=${probabilityText}`,
+    tooltip: `${showAwp ? getWinningPriceTooltip(track) : getBreakEvenTooltip(track)}\n\n${getWinProbabilityTooltip(track)}`,
     color: track.optionType === "put" ? "#f87171" : "#4ade80",
     labelColor: track.optionType === "put" ? "#ff3030" : "#00e05a",
   };
-}));
+}).filter(level => Number.isFinite(level.value)));
 const selectedSubtitle = computed(() => {
   const track = selectedTrack.value;
   if (!track) return props.subtitle;

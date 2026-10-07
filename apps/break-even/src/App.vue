@@ -68,6 +68,7 @@ const defaultPriceResolution = computed(() => {
 const underlying = ref("BTCUSD");
 const selectedInstrument = ref(null);
 const detailView = ref("break-even");
+const overviewMetric = ref("break-even");
 const overviewPriceActive = computed(() => !selectedInstrument.value);
 const lastIntradayResolution = ref(ui.resolutionKey);
 const priceViewActive = computed(() =>
@@ -513,7 +514,7 @@ const breakEvenTracks = computed(() => {
 });
 
 const priceHistoryLabel = computed(() => ({ 900: "15-Minute", 3600: "Hourly", 86400: "Daily" })[ui.resolutionKey]);
-const breakEvenTitle = computed(() => `${underlying.value.slice(0, 3)} Latest Break-Evens and ${priceHistoryLabel.value} Price History`);
+const breakEvenTitle = computed(() => `${underlying.value.slice(0, 3)} Latest ${overviewMetric.value === "awp" ? "AWPs" : "Break-Evens"} and ${priceHistoryLabel.value} Price History`);
 const breakEvenSubtitle = computed(() => {
   const expiryTs = selectedMaturityTs.value;
   if (!Number.isFinite(expiryTs)) return "";
@@ -893,7 +894,7 @@ watch(
       </div>
 
       <p v-if="overviewPriceActive" class="overviewHint">
-        Latest break-even prices · Calls in green, puts in red · Click a line or label to explore.
+        {{ overviewMetric === 'awp' ? 'Average win prices' : 'Latest break-even prices' }} · Calls in green, puts in red · Click a line or label to explore.
       </p>
 
       <div v-if="ui.error" class="error">{{ ui.error }}</div>
@@ -901,6 +902,10 @@ watch(
 
     <div class="chartWrap">
       <div class="chartTopBar">
+        <div v-if="overviewPriceActive" class="overviewToggle" role="group" aria-label="Main chart price levels">
+          <button type="button" :aria-pressed="overviewMetric === 'break-even'" @click="overviewMetric = 'break-even'">Break-even prices</button>
+          <button type="button" :aria-pressed="overviewMetric === 'awp'" @click="overviewMetric = 'awp'">Average win prices</button>
+        </div>
         <div class="settingsWrap" ref="settingsMenuRef">
           <button
             ref="settingsButtonRef"
@@ -939,6 +944,7 @@ watch(
         v-model:selected-instrument="selectedInstrument"
         v-model:detail-view="detailView"
         :selected-option="selectedOption"
+        :overview-metric="overviewMetric"
         :tracks="breakEvenTracks"
         :index-data="chartIndexData"
         :index-projected-data="chartIndexProjectedData"
@@ -990,15 +996,44 @@ watch(
 }
 
 .chartTopBar {
-  display: flex;
-  justify-content: flex-end;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   min-height: 30px;
   margin-bottom: 10px;
   padding-right: 6px;
 }
 
+.overviewToggle {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #414751;
+  border-radius: 8px;
+  background: #15181d;
+}
+
+.overviewToggle button {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #a9b0ba;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.overviewToggle button:hover { color: white; }
+.overviewToggle button[aria-pressed="true"] { background: #edf0f4; color: #15181d; font-weight: 600; }
+.overviewToggle button:focus-visible { outline: 2px solid #aab8cc; outline-offset: 3px; }
+
 .settingsWrap {
+  grid-column: 3;
+  grid-row: 1;
+  justify-self: end;
   position: relative;
   display: flex;
   align-items: center;
