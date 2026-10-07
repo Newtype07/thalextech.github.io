@@ -69,6 +69,25 @@ const getWinProbability = track => {
   });
 };
 const selectedWinProbability = computed(() => getWinProbability(selectedTrack.value));
+const getBreakEvenTooltip = track => {
+  if (!track) return "";
+  const isPut = track.optionType === "put";
+  const premium = Math.abs(track.currentBreakEven - track.strike);
+  return `BE — break-even terminal index price for this ${isPut ? "put" : "call"}.\n` +
+    `BE = strike ${isPut ? "−" : "+"} premium = ${formatPrice(track.strike)} ${isPut ? "−" : "+"} ${formatPrice(premium)} = ${formatPrice(track.currentBreakEven)}.\n` +
+    `At expiry, prices ${isPut ? "below" : "above"} BE yield a profit; at BE the option payoff equals the premium paid. Fees are excluded.`;
+};
+const getWinProbabilityTooltip = track => {
+  if (!track) return "";
+  const isPut = track.optionType === "put";
+  return `P(win) — model probability of positive profit at expiry: terminal index price ${isPut ? "below" : "above"} BE.\n` +
+    `Uses the current index price, the option's latest implied volatility (IV), and time remaining (T, in years).\n` +
+    `q = IV × √T; d2 = [ln(Current / BE) − q² / 2] / q.\n` +
+    `P(win) = Φ(${isPut ? "−d2" : "d2"}), where Φ is the standard normal cumulative probability.\n` +
+    `Assumes lognormal prices with zero interest rates and carry.`;
+};
+const selectedBreakEvenTooltip = computed(() => getBreakEvenTooltip(selectedTrack.value));
+const selectedWinProbabilityTooltip = computed(() => getWinProbabilityTooltip(selectedTrack.value));
 const selectedWinningPriceLevels = computed(() => {
   const track = selectedTrack.value;
   if (!track) return [];
@@ -84,7 +103,11 @@ const selectedWinningPriceLevels = computed(() => {
     value,
     label: `AWP = ${formatPrice(value)}`,
     color: "#ffffff",
-    tooltip: `Expected terminal index price conditional on expiring ${track.optionType === "put" ? "below" : "above"} break-even, using the same zero-rate, zero-carry lognormal IV model as P(win).`,
+    tooltip: `AWP — average terminal index price conditional on a win: finishing ${track.optionType === "put" ? "below" : "above"} BE.\n` +
+      `Calculated by averaging terminal prices weighted by their model probabilities over winning outcomes, then dividing by P(win).\n` +
+      `q = IV × √T; d1 = [ln(Current / BE) + q² / 2] / q.\n` +
+      `AWP = Current × Φ(${track.optionType === "put" ? "−d1" : "d1"}) / P(win), where Φ is the standard normal cumulative probability.\n` +
+      `Uses the same lognormal model, IV and time remaining as P(win), with zero interest rates and carry.`,
   }] : [];
 });
 const overviewLevels = computed(() => props.tracks.map(track => {
@@ -94,7 +117,7 @@ const overviewLevels = computed(() => props.tracks.map(track => {
     id: track.instrumentName,
     value: track.currentBreakEven,
     label: `${track.optionType === "put" ? "P" : "C"} ${formatPrice(track.strike)} · BE ${formatPrice(track.currentBreakEven)} · P(win)=${probabilityText}`,
-    tooltip: `Model probability of expiring ${track.optionType === "put" ? "below" : "above"} the break-even price, using the latest implied volatility.`,
+    tooltip: `${getBreakEvenTooltip(track)}\n\n${getWinProbabilityTooltip(track)}`,
     color: track.optionType === "put" ? "#f87171" : "#4ade80",
   };
 }));
@@ -403,9 +426,13 @@ onUnmounted(() => resizeObserver?.disconnect());
       :break-even-high="selectedTrack.optionType === 'call' ? selectedTrack.currentBreakEven : null"
       break-even-low-label="BE"
       break-even-high-label="BE"
+      :break-even-low-tooltip="selectedBreakEvenTooltip"
+      :break-even-high-tooltip="selectedBreakEvenTooltip"
       :break-even-label-color="selectedTrack.optionType === 'put' ? '#f87171' : '#4ade80'"
       :break-even-win-probability="selectedWinProbability"
+      :break-even-win-probability-tooltip="selectedWinProbabilityTooltip"
       :reference-levels="selectedWinningPriceLevels"
+      anchor-break-even-label
       :break-even-stroke-width="4"
       :index-stroke-width="2"
       :index-curve="d3.curveNatural"

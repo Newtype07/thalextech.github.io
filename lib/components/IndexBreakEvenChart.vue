@@ -1,6 +1,6 @@
 <script setup>
 import * as d3 from "d3";
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue";
 import { exportChartToPng } from "../export-png.js";
 
 const props = defineProps({
@@ -10,14 +10,19 @@ const props = defineProps({
   breakEvenHigh: { type: Number, default: null },
   breakEvenLevels: { type: Array, default: () => [] },
   referenceLevels: { type: Array, default: () => [] },
+  anchorBreakEvenLabel: { type: Boolean, default: false },
   breakEvenLowLabel: { type: String, default: "BE Low" },
   breakEvenHighLabel: { type: String, default: "BE High" },
+  breakEvenLowTooltip: { type: String, default: "Lower terminal index price at which expiry profit is zero, before fees." },
+  breakEvenHighTooltip: { type: String, default: "Upper terminal index price at which expiry profit is zero, before fees." },
   breakEvenLabelColor: { type: String, default: null },
   breakEvenWinProbability: { type: Number, default: null },
+  breakEvenWinProbabilityTooltip: { type: String, default: "Model probability of expiring beyond the break-even price: above for calls, below for puts." },
   breakEvenStrokeWidth: { type: Number, default: 2 },
   indexStrokeWidth: { type: Number, default: 1.75 },
   indexCurve: { type: Function, default: d3.curveBasis },
   currentIndex: { type: Number, default: null },
+  currentIndexTooltip: { type: String, default: "Current — latest available closing price of the underlying index in the loaded history. This is the spot-price input to the chart." },
   expiryTs: { type: Number, default: null },
   title: { type: String, default: "BTC Straddle Break-Evens" },
   subtitle: { type: String, default: "" },
@@ -29,6 +34,36 @@ const props = defineProps({
 
 const emit = defineEmits(["select-break-even"]);
 const svgRef = ref(null);
+const tooltipRef = ref(null);
+const tooltip = ref(null);
+const tooltipId = `price-tooltip-${useId()}`;
+let tooltipRequestId = 0;
+const hideTooltip = () => {
+  tooltipRequestId += 1;
+  tooltip.value = null;
+};
+const showTooltip = async (event, text) => {
+  if (!text) return;
+  const requestId = ++tooltipRequestId;
+  const anchor = event.currentTarget.getBoundingClientRect();
+  const x = Number.isFinite(event.clientX) ? event.clientX : anchor.right;
+  const y = Number.isFinite(event.clientY) ? event.clientY : anchor.bottom;
+  tooltip.value = { text, x: x + 12, y: y + 12 };
+  await nextTick();
+  if (requestId !== tooltipRequestId || !tooltipRef.value) return;
+  const bounds = tooltipRef.value.getBoundingClientRect();
+  tooltip.value = {
+    text,
+    x: Math.max(12, Math.min(x + 12, window.innerWidth - bounds.width - 12)),
+    y: Math.max(12, Math.min(y + 12, window.innerHeight - bounds.height - 12)),
+  };
+};
+const dismissTooltipOnEscape = event => {
+  if (event.key === "Escape" && tooltip.value) {
+    event.stopPropagation();
+    hideTooltip();
+  }
+};
 let resizeObserver = null;
 const priceLevels = ref([]);
 const priceLevelHistory = ref([]);
@@ -107,6 +142,7 @@ function exportPng({ filename = "straddle-break-even.png", scale = 4, padding = 
 defineExpose({ exportPng });
 
 function render() {
+  hideTooltip();
   const svgEl = svgRef.value;
   if (!svgEl) return;
   const svg = d3.select(svgEl);
@@ -119,7 +155,10 @@ function render() {
     ? svgEl.getBoundingClientRect() : null;
   const width = bounds?.width > 0 ? bounds.width : layout.width;
   const height = bounds?.height > 0 ? bounds.height : layout.height;
-  const margin = levels.length ? { ...layout.margin, right: 420 } : layout.margin;
+  const margin = {
+    ...layout.margin,
+    right: levels.length ? 420 : props.anchorBreakEvenLabel ? 200 : layout.margin.right,
+  };
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = height - margin.top - margin.bottom;
 
@@ -271,7 +310,8 @@ function render() {
       .attr("y2", y(props.breakEvenLow))
       .attr("stroke", "firebrick")
       .attr("stroke-width", props.breakEvenStrokeWidth)
-      .attr("stroke-linecap", "round");
+      .attr("stroke-linecap", "round")
+      .append("title").text(props.breakEvenLowTooltip);
   }
   if (Number.isFinite(props.breakEvenHigh)) {
     g.append("line")
@@ -281,7 +321,8 @@ function render() {
       .attr("y2", y(props.breakEvenHigh))
       .attr("stroke", "forestgreen")
       .attr("stroke-width", props.breakEvenStrokeWidth)
-      .attr("stroke-linecap", "round");
+      .attr("stroke-linecap", "round")
+      .append("title").text(props.breakEvenHighTooltip);
   }
 
   const selectLevel = (event, level) => {
@@ -327,14 +368,17 @@ function render() {
 
   const formatPrice = d3.format(",.0f");
   const rightX = innerWidth - 8;
-  const currentLabelX = innerWidth + 12;
+  const currentLabelX = innerWidth + (props.anchorBreakEvenLabel ? 28 : 12);
   const hasCompactBreakEvenRange =
     !levels.length &&
     !referenceLevels.length &&
+    !props.anchorBreakEvenLabel &&
     Number.isFinite(props.breakEvenLow) &&
     Number.isFinite(props.breakEvenHigh) &&
     Math.abs(y(props.breakEvenLow) - y(props.breakEvenHigh)) <
       COMPACT_BREAK_EVEN_RANGE;
+  const winProbabilityValue = Number.isFinite(props.breakEvenLow) ? props.breakEvenLow : props.breakEvenHigh;
+  const hasWinProbability = Number.isFinite(props.breakEvenWinProbability) && Number.isFinite(winProbabilityValue);
   const priceLabels = [
     ...referenceLevels.map(level => ({
       id: level.id,
@@ -353,6 +397,7 @@ function render() {
     })),
     {
       id: "break-even-low",
+      tooltip: props.breakEvenLowTooltip,
       value: props.breakEvenLow,
       color: props.breakEvenLabelColor ?? "firebrick",
       text: Number.isFinite(props.breakEvenLow)
@@ -361,6 +406,7 @@ function render() {
     },
     {
       id: "break-even-high",
+      tooltip: props.breakEvenHighTooltip,
       value: props.breakEvenHigh,
       color: props.breakEvenLabelColor ?? "forestgreen",
       text: Number.isFinite(props.breakEvenHigh)
@@ -369,21 +415,36 @@ function render() {
     },
     {
       id: "current-index",
+      tooltip: props.currentIndexTooltip,
       value: props.currentIndex,
       color: "#f5f5f7",
       text: Number.isFinite(props.currentIndex)
         ? `Current = ${formatPrice(props.currentIndex)}`
         : "",
     },
+    ...(hasWinProbability ? [{
+      id: "win-probability",
+      value: winProbabilityValue,
+      color: "#f5f5f7",
+      text: `P(win) = ${d3.format(".1%")(props.breakEvenWinProbability)}`,
+      tooltip: props.breakEvenWinProbabilityTooltip,
+    }] : []),
   ]
     .filter((label) => Number.isFinite(label.value))
-    .map((label) => ({
-      ...label,
-      anchorY: y(label.value),
-      targetY: y(label.value) - (levels.length ? 0 : PRICE_LABEL_BASELINE_OFFSET),
-      x: levels.length ? currentLabelX : rightX,
-      textAnchor: levels.length ? "start" : "end",
-    }));
+    .map((label) => {
+      const outside = !!levels.length || label.id === "win-probability";
+      return {
+        ...label,
+        outside,
+        anchorY: y(label.value),
+        targetY: y(label.value) - (levels.length ? 0 : PRICE_LABEL_BASELINE_OFFSET),
+        x: outside ? currentLabelX : rightX,
+        textAnchor: outside ? "start" : "end",
+      };
+    });
+
+  const probabilityLabel = priceLabels.find(label => label.id === "win-probability");
+  const breakEvenLabel = priceLabels.find(label => label.id.startsWith("break-even-") && label.value === winProbabilityValue);
 
   if (hasCompactBreakEvenRange) {
     for (const label of priceLabels) {
@@ -406,11 +467,31 @@ function render() {
         label.textAnchor = "start";
       }
     }
+  } else if (props.anchorBreakEvenLabel && breakEvenLabel) {
+    // Keep BE fixed and move only annotations that crowd it or one another.
+    breakEvenLabel.y = breakEvenLabel.targetY;
+    const neighbors = priceLabels
+      .filter(label => label !== breakEvenLabel && !label.outside)
+      .sort((a, b) => a.targetY - b.targetY);
+    let previousY = breakEvenLabel.y;
+    for (const label of neighbors.filter(label => label.targetY < breakEvenLabel.y).reverse()) {
+      label.y = Math.min(label.targetY, previousY - PRICE_LABEL_MIN_SPACING);
+      previousY = label.y;
+    }
+    previousY = breakEvenLabel.y;
+    for (const label of neighbors.filter(label => label.targetY >= breakEvenLabel.y)) {
+      label.y = Math.max(label.targetY, previousY + PRICE_LABEL_MIN_SPACING);
+      previousY = label.y;
+    }
   } else {
-    deCollidePriceLabels(priceLabels, 14, innerHeight - 6);
+    deCollidePriceLabels(priceLabels.filter(label => label.id !== "win-probability"), 14, innerHeight - 6);
   }
 
-  const leaderLines = hasCompactBreakEvenRange
+  if (probabilityLabel && breakEvenLabel) {
+    probabilityLabel.y = breakEvenLabel.y;
+  }
+
+  const leaderLines = props.anchorBreakEvenLabel ? [] : hasCompactBreakEvenRange
     ? priceLabels
         .filter((label) => label.id === "current-index")
         .map((label) => ({
@@ -423,13 +504,13 @@ function render() {
     : priceLabels
         .filter(
           (label) =>
-            levels.length || Math.abs(label.y - label.targetY) >
+            label.outside || Math.abs(label.y - label.targetY) >
             PRICE_LABEL_LEADER_THRESHOLD,
         )
         .map((label) => ({
           ...label,
           x1: innerWidth,
-          x2: levels.length ? currentLabelX - 4 : rightX + 2,
+          x2: label.outside ? currentLabelX - 4 : rightX + 2,
           y1: label.anchorY,
           y2: label.y + (levels.length ? 0 : PRICE_LABEL_BASELINE_OFFSET),
         }));
@@ -452,6 +533,7 @@ function render() {
     .selectAll("text")
     .data(priceLabels, (label) => label.id)
     .join("text")
+    .attr("class", label => label.id === "win-probability" ? "breakEvenWinProbability" : null)
     .attr("x", (label) => label.x)
     .attr("y", (label) => label.y)
     .attr("text-anchor", (label) => label.textAnchor)
@@ -463,31 +545,22 @@ function render() {
     .attr("stroke-width", 3)
     .text((label) => label.text)
     .attr("role", label => label.selectable ? "button" : null)
-    .attr("tabindex", label => label.selectable ? 0 : null)
-    .style("cursor", label => label.selectable ? "pointer" : null)
+    .attr("tabindex", label => label.selectable || label.tooltip ? 0 : null)
+    .attr("aria-label", label => label.tooltip ? `${label.text}. ${label.tooltip}` : label.text)
+    .attr("aria-describedby", label => label.tooltip ? tooltipId : null)
+    .style("cursor", label => label.selectable || label.tooltip ? "pointer" : null)
+    .on("pointerenter", (event, label) => showTooltip(event, label.tooltip))
+    .on("pointerleave", hideTooltip)
+    .on("focus", (event, label) => showTooltip(event, label.tooltip))
+    .on("blur", hideTooltip)
     .on("click", (event, label) => { if (label.selectable) selectLevel(event, label); })
     .on("keydown", (event, label) => {
+      dismissTooltipOnEscape(event);
       if (label.selectable && (event.key === "Enter" || event.key === " ")) {
         event.preventDefault();
         selectLevel(event, label);
       }
-    })
-    .append("title").text(label => label.tooltip ?? label.text);
-
-  if (Number.isFinite(props.breakEvenWinProbability)) {
-    const breakEvenLabel = priceLabels.find(label => label.id.startsWith("break-even-"));
-    if (breakEvenLabel) {
-      g.append("text")
-        .attr("class", "breakEvenWinProbability")
-        .attr("x", innerWidth + 12).attr("y", breakEvenLabel.y)
-        .attr("text-anchor", "start").attr("fill", "#f5f5f7")
-        .style("font-size", "14px").style("font-family", CHART_FONT_FAMILY)
-        .attr("paint-order", "stroke").attr("stroke", props.backgroundColor).attr("stroke-width", 3)
-        .text(`P(win) = ${d3.format(".1%")(props.breakEvenWinProbability)}`)
-        .append("title")
-        .text("Model probability of expiring beyond the break-even price: above for calls, below for puts.");
-    }
-  }
+    });
 
   if (props.enablePriceLevels) {
     const levels = g.append("g").attr("class", "userPriceLevels");
@@ -547,14 +620,19 @@ watch(
     props.breakEvenHigh,
     props.breakEvenLevels,
     props.referenceLevels,
+    props.anchorBreakEvenLabel,
     props.breakEvenLowLabel,
     props.breakEvenHighLabel,
+    props.breakEvenLowTooltip,
+    props.breakEvenHighTooltip,
     props.breakEvenLabelColor,
     props.breakEvenWinProbability,
+    props.breakEvenWinProbabilityTooltip,
     props.breakEvenStrokeWidth,
     props.indexStrokeWidth,
     props.indexCurve,
     props.currentIndex,
+    props.currentIndexTooltip,
     props.expiryTs,
     props.title,
     props.subtitle,
@@ -575,7 +653,10 @@ onMounted(() => {
     resizeObserver.observe(svgRef.value);
   }
 });
-onUnmounted(() => resizeObserver?.disconnect());
+onUnmounted(() => {
+  hideTooltip();
+  resizeObserver?.disconnect();
+});
 </script>
 
 <template>
@@ -587,10 +668,38 @@ onUnmounted(() => resizeObserver?.disconnect());
     </div>
     <svg ref="svgRef" class="chartSvg" />
     <div v-if="loading" class="overlay">Loading...</div>
+    <Teleport to="body">
+      <div
+        v-if="tooltip"
+        ref="tooltipRef"
+        :id="tooltipId"
+        role="tooltip"
+        class="labelTooltip"
+        :style="{ left: `${tooltip.x}px`, top: `${tooltip.y}px` }"
+      >{{ tooltip.text }}</div>
+    </Teleport>
   </div>
 </template>
 
 <style scoped>
+.labelTooltip {
+  position: fixed;
+  z-index: 1000;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid #414751;
+  border-radius: 8px;
+  background: #15181d;
+  color: #e8e8ea;
+  box-shadow: 0 8px 28px #0009;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-line;
+  pointer-events: none;
+}
 .priceLevelControls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 6px 16px; color: #a9abb6; font-size: 12px; }
 .priceLevelControls button { border: 1px solid #414751; border-radius: 5px; padding: 4px 8px; background: transparent; color: #e8e8ea; font: inherit; cursor: pointer; }
 .priceLevelControls button:focus-visible { outline: 2px solid #aab8cc; outline-offset: 2px; }
