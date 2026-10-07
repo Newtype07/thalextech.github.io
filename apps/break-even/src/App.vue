@@ -892,7 +892,10 @@ watch(
         </button>
       </div>
 
-      <div v-if="ui.loading" role="status">Loading complete history; temporary failures will be retried automatically.</div>
+      <p v-if="overviewPriceActive" class="overviewHint">
+        Latest break-even prices · Calls in green, puts in red · Click a line or label to explore.
+      </p>
+
       <div v-if="ui.error" class="error">{{ ui.error }}</div>
     </header>
 
@@ -952,6 +955,14 @@ watch(
 </template>
 
 <style scoped>
+.overviewHint {
+  margin: 0;
+  padding-bottom: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 @media (min-width: 960px) {
   .app {
     max-width: none;

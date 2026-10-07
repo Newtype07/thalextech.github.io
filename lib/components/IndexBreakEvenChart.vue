@@ -210,6 +210,7 @@ function render() {
   );
 
   if (!actual.length) {
+    if (props.loading) return;
     svg
       .append("text")
       .attr("x", width / 2)
@@ -218,7 +219,7 @@ function render() {
       .attr("fill", "#70767d")
       .style("font-size", "12px")
       .style("font-family", CHART_FONT_FAMILY)
-      .text(props.loading ? "Loading..." : "No data available.");
+      .text("No data available.");
     return;
   }
 
@@ -668,7 +669,7 @@ onUnmounted(() => {
       <button v-if="priceLevels.length" type="button" @click="clearPriceLevels">Clear levels</button>
     </div>
     <svg ref="svgRef" class="chartSvg" />
-    <div v-if="loading" class="overlay">Loading...</div>
+    <div v-if="loading" class="overlay" role="status">Loading...</div>
     <Teleport to="body">
       <div
         v-if="tooltip"

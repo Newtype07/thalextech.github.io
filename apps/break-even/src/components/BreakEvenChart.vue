@@ -397,13 +397,13 @@ onUnmounted(() => resizeObserver?.disconnect());
 
 <template>
   <div class="chartWrap" @keydown.esc="clearSelection">
-    <div class="selectionToolbar" :class="{ 'selectionToolbar--instrument': selectedInstrument }">
-      <button v-if="selectedInstrument" class="backButton" type="button" @click="clearSelection">← Back to price context</button>
-      <div v-if="selectedInstrument" class="detailToggle" role="group" aria-label="Instrument chart view">
+    <div v-if="selectedInstrument" class="selectionToolbar selectionToolbar--instrument">
+      <button class="backButton" type="button" @click="clearSelection">← Back to price context</button>
+      <div class="detailToggle" role="group" aria-label="Instrument chart view">
         <button type="button" :aria-pressed="detailView === 'break-even'" @click="detailView = 'break-even'">Break-even price</button>
         <button type="button" :aria-pressed="detailView === 'probability'" @click="detailView = 'probability'">Probability</button>
       </div>
-      <span class="selectionLabel">{{ selectedInstrument ? `${selectedLabel} selected` : 'Latest break-even prices · Calls in green, puts in red · Click a line or label to explore.' }}</span>
+      <span class="selectionLabel">{{ selectedLabel }} selected</span>
     </div>
     <IndexBreakEvenChart
       v-if="!selectedInstrument"
@@ -453,7 +453,7 @@ onUnmounted(() => resizeObserver?.disconnect());
     />
     <div v-if="selectedInstrument && !selectedTrack" class="selectionEmpty" role="status">{{ loading ? 'Loading selected instrument history…' : 'No history available for this strike and maturity.' }}</div>
     <svg v-show="selectedTrack && detailView === 'probability'" ref="svgRef" class="chartSvg" />
-    <div v-if="loading" class="overlay">Loading...</div>
+    <div v-if="loading && selectedTrack && detailView === 'probability'" class="overlay" role="status">Loading...</div>
   </div>
 </template>
 
