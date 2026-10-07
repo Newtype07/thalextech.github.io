@@ -42,6 +42,11 @@ const selectedLabel = computed(() => {
   const type = selectedTrack.value?.optionType ?? props.selectedOption?.option_type_normalized;
   return Number.isFinite(strike) ? `${type === "put" ? "Put" : "Call"} ${formatPrice(strike)}` : "";
 });
+const selectedTitle = computed(() => {
+  const expiry = Number.isFinite(props.expiryTs)
+    ? new Date(props.expiryTs * 1000).toISOString().slice(0, 10) : "n/a";
+  return `${selectedLabel.value} · Expiry ${expiry}`;
+});
 const clearSelection = () => { selectedInstrument.value = null; };
 
 const layout = {
@@ -119,6 +124,7 @@ const overviewLevels = computed(() => props.tracks.map(track => {
     label: `${track.optionType === "put" ? "P" : "C"} ${formatPrice(track.strike)} · BE ${formatPrice(track.currentBreakEven)} · P(win)=${probabilityText}`,
     tooltip: `${getBreakEvenTooltip(track)}\n\n${getWinProbabilityTooltip(track)}`,
     color: track.optionType === "put" ? "#f87171" : "#4ade80",
+    labelColor: track.optionType === "put" ? "#ff3030" : "#00e05a",
   };
 }));
 const selectedSubtitle = computed(() => {
@@ -129,13 +135,17 @@ const selectedSubtitle = computed(() => {
     spot: props.spotPrice,
     strike: track.strike,
     iv: track.referenceIv,
-    tauSeconds: props.expiryTs - props.spotTs,
+    tauSeconds: timeToExpiry.value,
   });
-  const expiry = Number.isFinite(props.expiryTs)
-    ? new Date(props.expiryTs * 1000).toISOString().slice(0, 10) : "n/a";
   const probability = Number.isFinite(probabilityAboveStrike) ? formatProb(probabilityAboveStrike) : "n/a";
-  return `Expiry ${expiry} · Current probability of expiring above the strike N(d2): ${probability}`;
+  const winProbability = Number.isFinite(selectedWinProbability.value) ? formatProb(selectedWinProbability.value) : "n/a";
+  return `P(win) = ${winProbability} · N(d2) = ${probability}`;
 });
+const selectedSubtitleTooltip = computed(() => `${selectedWinProbabilityTooltip.value}\n\n` +
+  `N(d2) — model probability of expiring above the strike, for both calls and puts.\n` +
+  `Uses the same current index price, IV, and time remaining as P(win), with the strike as the threshold instead of BE.\n` +
+  `q = IV × √T; d2 = [ln(Current / strike) − q² / 2] / q; N(d2) = Φ(d2).`,
+);
 const Y_AXIS_LABEL_PADDING = 72;
 
 const axisStyle = (axisG) => {
@@ -202,9 +212,9 @@ function render() {
     .style("font-size", "18px")
     .style("font-weight", 650)
     .style("font-family", CHART_FONT_FAMILY)
-    .text(`${selectedLabel.value} · Probability and Index History`);
+    .text(selectedTitle.value);
 
-  if (props.subtitle) {
+  if (selectedSubtitle.value) {
     svg
       .append("text")
       .attr("x", width / 2)
@@ -429,17 +439,16 @@ onUnmounted(() => resizeObserver?.disconnect());
       :break-even-low-tooltip="selectedBreakEvenTooltip"
       :break-even-high-tooltip="selectedBreakEvenTooltip"
       :break-even-label-color="selectedTrack.optionType === 'put' ? '#f87171' : '#4ade80'"
-      :break-even-win-probability="selectedWinProbability"
-      :break-even-win-probability-tooltip="selectedWinProbabilityTooltip"
       :reference-levels="selectedWinningPriceLevels"
-      anchor-break-even-label
+      price-labels-on-right
       :break-even-stroke-width="4"
       :index-stroke-width="2"
       :index-curve="d3.curveNatural"
       :current-index="spotPrice"
       :expiry-ts="expiryTs"
-      :title="`${selectedLabel} · Break-Even and Index History`"
+      :title="selectedTitle"
       :subtitle="selectedSubtitle"
+      :subtitle-tooltip="selectedSubtitleTooltip"
       :loading="loading"
     />
     <div v-if="selectedInstrument && !selectedTrack" class="selectionEmpty" role="status">{{ loading ? 'Loading selected instrument history…' : 'No history available for this strike and maturity.' }}</div>

@@ -2,6 +2,7 @@
 import * as d3 from "d3";
 import { nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue";
 import { exportChartToPng } from "../export-png.js";
+import { priceLabelPositions } from "../price-label-positions.js";
 
 const props = defineProps({
   actualData: { type: Array, default: () => [] },
@@ -10,7 +11,7 @@ const props = defineProps({
   breakEvenHigh: { type: Number, default: null },
   breakEvenLevels: { type: Array, default: () => [] },
   referenceLevels: { type: Array, default: () => [] },
-  anchorBreakEvenLabel: { type: Boolean, default: false },
+  priceLabelsOnRight: { type: Boolean, default: false },
   breakEvenLowLabel: { type: String, default: "BE Low" },
   breakEvenHighLabel: { type: String, default: "BE High" },
   breakEvenLowTooltip: { type: String, default: "Lower terminal index price at which expiry profit is zero, before fees." },
@@ -26,6 +27,7 @@ const props = defineProps({
   expiryTs: { type: Number, default: null },
   title: { type: String, default: "BTC Straddle Break-Evens" },
   subtitle: { type: String, default: "" },
+  subtitleTooltip: { type: String, default: "" },
   loading: { type: Boolean, default: false },
   enablePriceLevels: { type: Boolean, default: false },
   backgroundColor: { type: String, default: "#0a0b0e" },
@@ -157,7 +159,7 @@ function render() {
   const height = bounds?.height > 0 ? bounds.height : layout.height;
   const margin = {
     ...layout.margin,
-    right: levels.length ? 420 : props.anchorBreakEvenLabel ? 200 : layout.margin.right,
+    right: levels.length ? 420 : props.priceLabelsOnRight ? 200 : layout.margin.right,
   };
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = height - margin.top - margin.bottom;
@@ -191,7 +193,16 @@ function render() {
       .attr("fill", "#70767d")
       .style("font-size", "14px")
       .style("font-family", CHART_FONT_FAMILY)
-      .text(props.subtitle);
+      .text(props.subtitle)
+      .attr("tabindex", props.subtitleTooltip ? 0 : null)
+      .attr("aria-label", props.subtitleTooltip ? `${props.subtitle}. ${props.subtitleTooltip}` : null)
+      .attr("aria-describedby", props.subtitleTooltip ? tooltipId : null)
+      .style("cursor", props.subtitleTooltip ? "pointer" : null)
+      .on("pointerenter", event => showTooltip(event, props.subtitleTooltip))
+      .on("pointerleave", hideTooltip)
+      .on("focus", event => showTooltip(event, props.subtitleTooltip))
+      .on("blur", hideTooltip)
+      .on("keydown", dismissTooltipOnEscape);
   }
 
   const actual = (props.actualData || []).filter(
@@ -368,11 +379,11 @@ function render() {
 
   const formatPrice = d3.format(",.0f");
   const rightX = innerWidth - 8;
-  const currentLabelX = innerWidth + (props.anchorBreakEvenLabel ? 28 : 12);
+  const currentLabelX = innerWidth + 12;
   const hasCompactBreakEvenRange =
     !levels.length &&
     !referenceLevels.length &&
-    !props.anchorBreakEvenLabel &&
+    !props.priceLabelsOnRight &&
     Number.isFinite(props.breakEvenLow) &&
     Number.isFinite(props.breakEvenHigh) &&
     Math.abs(y(props.breakEvenLow) - y(props.breakEvenHigh)) <
@@ -390,7 +401,7 @@ function render() {
     ...levels.map(level => ({
       id: level.id,
       value: level.value,
-      color: level.color,
+      color: level.labelColor ?? level.color,
       text: level.label,
       tooltip: level.tooltip,
       selectable: true,
@@ -432,12 +443,12 @@ function render() {
   ]
     .filter((label) => Number.isFinite(label.value))
     .map((label) => {
-      const outside = !!levels.length || label.id === "win-probability";
+      const outside = !!levels.length || props.priceLabelsOnRight || label.id === "win-probability";
       return {
         ...label,
         outside,
         anchorY: y(label.value),
-        targetY: y(label.value) - (levels.length ? 0 : PRICE_LABEL_BASELINE_OFFSET),
+        targetY: y(label.value) - (props.priceLabelsOnRight || levels.length ? 0 : PRICE_LABEL_BASELINE_OFFSET),
         x: outside ? currentLabelX : rightX,
         textAnchor: outside ? "start" : "end",
       };
@@ -467,22 +478,10 @@ function render() {
         label.textAnchor = "start";
       }
     }
-  } else if (props.anchorBreakEvenLabel && breakEvenLabel) {
-    // Keep BE fixed and move only annotations that crowd it or one another.
-    breakEvenLabel.y = breakEvenLabel.targetY;
-    const neighbors = priceLabels
-      .filter(label => label !== breakEvenLabel && !label.outside)
-      .sort((a, b) => a.targetY - b.targetY);
-    let previousY = breakEvenLabel.y;
-    for (const label of neighbors.filter(label => label.targetY < breakEvenLabel.y).reverse()) {
-      label.y = Math.min(label.targetY, previousY - PRICE_LABEL_MIN_SPACING);
-      previousY = label.y;
-    }
-    previousY = breakEvenLabel.y;
-    for (const label of neighbors.filter(label => label.targetY >= breakEvenLabel.y)) {
-      label.y = Math.max(label.targetY, previousY + PRICE_LABEL_MIN_SPACING);
-      previousY = label.y;
-    }
+  } else if (props.priceLabelsOnRight) {
+    const labels = priceLabels.filter(label => label.id !== "win-probability");
+    const positions = priceLabelPositions(labels.map(label => label.targetY), 14, innerHeight - 6);
+    labels.forEach((label, index) => { label.y = positions[index]; });
   } else {
     deCollidePriceLabels(priceLabels.filter(label => label.id !== "win-probability"), 14, innerHeight - 6);
   }
@@ -491,7 +490,7 @@ function render() {
     probabilityLabel.y = breakEvenLabel.y;
   }
 
-  const leaderLines = props.anchorBreakEvenLabel ? [] : hasCompactBreakEvenRange
+  const leaderLines = props.priceLabelsOnRight ? [] : hasCompactBreakEvenRange
     ? priceLabels
         .filter((label) => label.id === "current-index")
         .map((label) => ({
@@ -537,6 +536,7 @@ function render() {
     .attr("x", (label) => label.x)
     .attr("y", (label) => label.y)
     .attr("text-anchor", (label) => label.textAnchor)
+    .attr("dominant-baseline", props.priceLabelsOnRight ? "middle" : null)
     .attr("fill", (label) => label.color)
     .style("font-size", "14px")
     .style("font-family", CHART_FONT_FAMILY)
@@ -620,7 +620,7 @@ watch(
     props.breakEvenHigh,
     props.breakEvenLevels,
     props.referenceLevels,
-    props.anchorBreakEvenLabel,
+    props.priceLabelsOnRight,
     props.breakEvenLowLabel,
     props.breakEvenHighLabel,
     props.breakEvenLowTooltip,
@@ -636,6 +636,7 @@ watch(
     props.expiryTs,
     props.title,
     props.subtitle,
+    props.subtitleTooltip,
     props.loading,
     props.enablePriceLevels,
     props.backgroundColor,
