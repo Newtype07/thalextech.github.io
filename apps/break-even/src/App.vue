@@ -18,12 +18,16 @@ import {
 } from "../../../lib/thalex.js";
 
 import { createHistoryRequester } from "./lib/historyRequests.js";
+import { fetchIndexHistoryInChunks } from "./lib/indexHistory.js";
 import { findSameStrikeInstrument } from "./lib/trackSelection.js";
 
 const requestHistory = createHistoryRequester();
 const fetchIndexHistory = (params) => {
   const requestId = loadRequestId;
-  return requestHistory(() => fetchIndexHistoryRaw({ ...params, requestOptions: { maxRetries: 0, timeoutMs: 45000 } }), { isCanceled: () => requestId !== loadRequestId, cacheKey: JSON.stringify(["index", params]) });
+  return fetchIndexHistoryInChunks(params, chunk => requestHistory(
+    () => fetchIndexHistoryRaw({ ...chunk, requestOptions: { maxRetries: 0, timeoutMs: 45000 } }),
+    { isCanceled: () => requestId !== loadRequestId, cacheKey: JSON.stringify(["index", chunk]) },
+  ));
 };
 const fetchInstruments = () => requestHistory(() => fetchInstrumentsRaw());
 
@@ -36,6 +40,7 @@ const DEFAULT_LOOKBACK_POINT_LIMIT = 360;
 const DEFAULT_PRICE_LOOKBACK_POINT_LIMIT = 800;
 const MIN_LOOKBACK_POINT_LIMIT = 120;
 const MAX_LOOKBACK_POINT_LIMIT = 1440;
+const MAX_HOURLY_LOOKBACK_POINT_LIMIT = 10000;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const MARK_HISTORY_REQUEST_POINT_LIMIT = 360;
 const MAX_ABS_DELTA = 0.55;
@@ -81,10 +86,14 @@ watch([priceViewActive, overviewPriceActive, () => ui.optionMaturity, defaultPri
     ui.resolutionKey = lastIntradayResolution.value;
   }
 }, { flush: "sync" });
+const maxLookbackPointLimit = computed(() => ui.resolutionKey === "3600"
+  ? MAX_HOURLY_LOOKBACK_POINT_LIMIT
+  : MAX_LOOKBACK_POINT_LIMIT,
+);
 const historyPointLimit = computed({
-  get: () => priceViewActive.value
+  get: () => Math.min(maxLookbackPointLimit.value, priceViewActive.value
     ? ui.priceMaxPoints
-    : ui.instrumentMaxPoints,
+    : ui.instrumentMaxPoints),
   set: value => {
     if (priceViewActive.value) ui.priceMaxPoints = value;
     else ui.instrumentMaxPoints = value;
@@ -150,7 +159,7 @@ const maxPointsToFetch = computed(() => {
   if (!Number.isFinite(value)) return DEFAULT_LOOKBACK_POINT_LIMIT;
   return Math.max(
     MIN_LOOKBACK_POINT_LIMIT,
-    Math.min(MAX_LOOKBACK_POINT_LIMIT, value),
+    Math.min(maxLookbackPointLimit.value, value),
   );
 });
 
@@ -909,13 +918,14 @@ watch(
               v-model.number="historyPointLimit"
               class="settingsSlider"
               type="range"
+              aria-label="Historic data points"
               :min="MIN_LOOKBACK_POINT_LIMIT"
-              :max="MAX_LOOKBACK_POINT_LIMIT"
+              :max="maxLookbackPointLimit"
               step="10"
             />
             <div class="settingsRange">
               <span>{{ MIN_LOOKBACK_POINT_LIMIT }}</span>
-              <span>{{ MAX_LOOKBACK_POINT_LIMIT }}</span>
+              <span>{{ maxLookbackPointLimit.toLocaleString('en-US') }}</span>
             </div>
           </div>
         </div>
