@@ -513,6 +513,22 @@ const breakEvenTracks = computed(() => {
   });
 });
 
+const maturitySnapshots = computed(() => {
+  const snapshots = [];
+  for (const instrument of optionInstrumentsForMaturity.value) {
+    const snapshot = getLatestMarkSnapshot(data.markByInstrument[instrument.instrument_name]);
+    if (!snapshot || !Number.isFinite(snapshot.mark)) continue;
+    snapshots.push({
+      instrumentName: instrument.instrument_name,
+      optionType: instrument.option_type_normalized,
+      strike: instrument.strike,
+      mark: snapshot.mark,
+      iv: Number.isFinite(snapshot.iv) ? snapshot.iv : null,
+    });
+  }
+  return snapshots;
+});
+
 const priceHistoryLabel = computed(() => ({ 900: "15-Minute", 3600: "Hourly", 86400: "Daily" })[ui.resolutionKey]);
 const breakEvenTitle = computed(() => `${underlying.value.slice(0, 3)} Latest ${overviewMetric.value === "awp" ? "AWPs" : "Break-Evens"} and ${priceHistoryLabel.value} Price History`);
 const breakEvenSubtitle = computed(() => {
@@ -883,6 +899,17 @@ watch(
           />
         </div>
 
+        <div v-if="overviewPriceActive" class="overviewToggle" role="group" aria-label="Main chart price levels">
+          <button type="button" :aria-pressed="overviewMetric === 'break-even'" @click="overviewMetric = 'break-even'">Break-even prices</button>
+          <button type="button" :aria-pressed="overviewMetric === 'awp'" @click="overviewMetric = 'awp'">Average win prices</button>
+        </div>
+
+        <span v-if="overviewPriceActive" class="overviewHint">
+          Click a line or label to explore.
+        </span>
+
+        <div class="controlsSpacer" />
+
         <button
           class="saveButton"
           type="button"
@@ -891,21 +918,7 @@ watch(
         >
           Save PNG
         </button>
-      </div>
 
-      <p v-if="overviewPriceActive" class="overviewHint">
-        {{ overviewMetric === 'awp' ? 'Average win prices' : 'Latest break-even prices' }} · Calls in green, puts in red · Click a line or label to explore.
-      </p>
-
-      <div v-if="ui.error" class="error">{{ ui.error }}</div>
-    </header>
-
-    <div class="chartWrap">
-      <div class="chartTopBar">
-        <div v-if="overviewPriceActive" class="overviewToggle" role="group" aria-label="Main chart price levels">
-          <button type="button" :aria-pressed="overviewMetric === 'break-even'" @click="overviewMetric = 'break-even'">Break-even prices</button>
-          <button type="button" :aria-pressed="overviewMetric === 'awp'" @click="overviewMetric = 'awp'">Average win prices</button>
-        </div>
         <div class="settingsWrap" ref="settingsMenuRef">
           <button
             ref="settingsButtonRef"
@@ -939,6 +952,10 @@ watch(
         </div>
       </div>
 
+      <div v-if="ui.error" class="error">{{ ui.error }}</div>
+    </header>
+
+    <div class="chartWrap">
       <BreakEvenChart
         ref="chartRef"
         v-model:selected-instrument="selectedInstrument"
@@ -946,6 +963,7 @@ watch(
         :selected-option="selectedOption"
         :overview-metric="overviewMetric"
         :tracks="breakEvenTracks"
+        :maturity-snapshots="maturitySnapshots"
         :index-data="chartIndexData"
         :index-projected-data="chartIndexProjectedData"
         :spot-price="latestSpot"
@@ -962,11 +980,11 @@ watch(
 
 <style scoped>
 .overviewHint {
-  margin: 0;
-  padding-bottom: 12px;
+  align-self: center;
   color: var(--muted);
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.4;
+  max-width: 260px;
 }
 
 @media (min-width: 960px) {
@@ -976,10 +994,10 @@ watch(
     min-height: 680px;
     display: flex;
     flex-direction: column;
-    padding: 18px;
+    padding: 12px 10px 14px;
   }
 
-  .header { flex-shrink: 0; }
+  .header { flex-shrink: 0; margin-bottom: 10px; }
 
   .app > .chartWrap {
     display: flex;
@@ -987,32 +1005,22 @@ watch(
     flex: 1;
     min-height: 0;
   }
-
-  .chartTopBar { flex-shrink: 0; }
 }
 
 .chartWrap {
   position: relative;
 }
 
-.chartTopBar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: center;
-  min-height: 30px;
-  margin-bottom: 10px;
-  padding-right: 6px;
-}
+.controlsSpacer { flex: 1; }
 
 .overviewToggle {
-  grid-column: 2;
-  grid-row: 1;
   display: flex;
   gap: 3px;
   padding: 3px;
   border: 1px solid #414751;
   border-radius: 8px;
   background: #15181d;
+  align-self: center;
 }
 
 .overviewToggle button {
@@ -1031,9 +1039,6 @@ watch(
 .overviewToggle button:focus-visible { outline: 2px solid #aab8cc; outline-offset: 3px; }
 
 .settingsWrap {
-  grid-column: 3;
-  grid-row: 1;
-  justify-self: end;
   position: relative;
   display: flex;
   align-items: center;

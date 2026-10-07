@@ -159,7 +159,7 @@ function render() {
   const height = bounds?.height > 0 ? bounds.height : layout.height;
   const margin = {
     ...layout.margin,
-    right: levels.length ? 420 : props.priceLabelsOnRight ? 200 : layout.margin.right,
+    right: levels.length ? 320 : props.priceLabelsOnRight ? 200 : layout.margin.right,
   };
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = height - margin.top - margin.bottom;
@@ -322,8 +322,7 @@ function render() {
       .attr("y2", y(props.breakEvenLow))
       .attr("stroke", "firebrick")
       .attr("stroke-width", props.breakEvenStrokeWidth)
-      .attr("stroke-linecap", "round")
-      .append("title").text(props.breakEvenLowTooltip);
+      .attr("stroke-linecap", "round");
   }
   if (Number.isFinite(props.breakEvenHigh)) {
     g.append("line")
@@ -333,8 +332,7 @@ function render() {
       .attr("y2", y(props.breakEvenHigh))
       .attr("stroke", "forestgreen")
       .attr("stroke-width", props.breakEvenStrokeWidth)
-      .attr("stroke-linecap", "round")
-      .append("title").text(props.breakEvenHighTooltip);
+      .attr("stroke-linecap", "round");
   }
 
   const selectLevel = (event, level) => {
@@ -365,9 +363,8 @@ function render() {
     .attr("x1", 0).attr("x2", innerWidth)
     .attr("y1", level => y(level.value)).attr("y2", level => y(level.value))
     .attr("stroke", "transparent").attr("stroke-width", 12);
-  levelLines.append("title").text(level => level.tooltip ?? level.label);
 
-  const referenceLines = g.append("g")
+  g.append("g")
     .attr("class", "referencePriceLevels")
     .selectAll("line")
     .data(referenceLevels, level => level.id)
@@ -376,7 +373,6 @@ function render() {
     .attr("y1", level => y(level.value)).attr("y2", level => y(level.value))
     .attr("stroke", level => level.color)
     .attr("stroke-width", 1);
-  referenceLines.append("title").text(level => level.tooltip ?? level.label);
 
   const formatPrice = d3.format(",.0f");
   const rightX = innerWidth - 8;

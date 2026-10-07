@@ -2,13 +2,14 @@
 import * as d3 from "d3";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { exportChartToPng } from "../../../../lib/export-png.js";
-import { calcConditionalWinningPrice, calcOptionNd2 } from "../lib/breakEvenSnapshot.js";
+import { calcConditionalWinningPrice, calcConditionalSpreadWinningPrice, calcOptionNd2 } from "../lib/breakEvenSnapshot.js";
 import IndexBreakEvenChart from "../../../../lib/components/IndexBreakEvenChart.vue";
 
 import { buildTrackProbabilityHistory } from "../lib/trackSelection.js";
 
 const props = defineProps({
   tracks: { type: Array, default: () => [] },
+  maturitySnapshots: { type: Array, default: () => [] },
   indexData: { type: Array, default: () => [] },
   indexProjectedData: { type: Array, default: () => [] },
   spotPrice: { type: Number, default: null },
@@ -23,6 +24,9 @@ const props = defineProps({
   detailView: { type: String, default: "break-even" },
   overviewMetric: { type: String, default: "break-even" },
 });
+
+const shortLegStrike = ref(null);
+watch(() => props.selectedInstrument, () => { shortLegStrike.value = null; });
 
 const emit = defineEmits(["update:selectedInstrument", "update:detailView"]);
 const svgRef = ref(null);
@@ -74,28 +78,70 @@ const getWinProbability = track => {
     tauSeconds: timeToExpiry.value,
   });
 };
-const selectedWinProbability = computed(() => getWinProbability(selectedTrack.value));
+const selectedWinProbability = computed(() => {
+  const track = selectedTrack.value;
+  if (!track) return null;
+  return calcOptionNd2({
+    optionType: track.optionType,
+    spot: props.spotPrice,
+    strike: effectiveBreakEven.value ?? track.currentBreakEven,
+    iv: track.referenceIv,
+    tauSeconds: timeToExpiry.value,
+  });
+});
 const getBreakEvenTooltip = track => {
   if (!track) return "";
   const isPut = track.optionType === "put";
-  const premium = Math.abs(track.currentBreakEven - track.strike);
-  return `BE — break-even terminal index price for this ${isPut ? "put" : "call"}.\n` +
-    `BE = strike ${isPut ? "−" : "+"} premium = ${formatPrice(track.strike)} ${isPut ? "−" : "+"} ${formatPrice(premium)} = ${formatPrice(track.currentBreakEven)}.\n` +
-    `At expiry, prices ${isPut ? "below" : "above"} BE yield a profit; at BE the option payoff equals the premium paid. Fees are excluded.`;
+  return `BE — terminal index price at which expiry profit is zero (strike ${isPut ? "−" : "+"} premium). Fees excluded.`;
 };
 const getWinProbabilityTooltip = track => {
   if (!track) return "";
   const isPut = track.optionType === "put";
-  return `P(win) — model probability of positive profit at expiry: terminal index price ${isPut ? "below" : "above"} BE.\n` +
-    `Uses the current index price, the option's latest implied volatility (IV), and time remaining (T, in years).\n` +
-    `q = IV × √T; d2 = [ln(Current / BE) − q² / 2] / q.\n` +
-    `P(win) = Φ(${isPut ? "−d2" : "d2"}), where Φ is the standard normal cumulative probability.\n` +
-    `Assumes lognormal prices with zero interest rates and carry.`;
+  return `P(win) — model probability of finishing ${isPut ? "below" : "above"} BE at expiry. Lognormal, zero rates/carry.`;
 };
-const selectedBreakEvenTooltip = computed(() => getBreakEvenTooltip(selectedTrack.value));
+const selectedBreakEvenTooltip = computed(() => getBreakEvenTooltipForSelection(selectedTrack.value));
 const selectedWinProbabilityTooltip = computed(() => getWinProbabilityTooltip(selectedTrack.value));
+const shortLegCandidates = computed(() => {
+  const track = selectedTrack.value;
+  if (!track) return [];
+  const isPut = track.optionType === "put";
+  return (props.maturitySnapshots || [])
+    .filter(snap => snap.optionType === track.optionType)
+    .filter(snap => Number.isFinite(snap.mark) && snap.mark >= 0)
+    .filter(snap => isPut ? snap.strike < track.strike : snap.strike > track.strike)
+    .sort((a, b) => isPut ? b.strike - a.strike : a.strike - b.strike);
+});
+const shortLegSnapshot = computed(() => {
+  const strike = Number(shortLegStrike.value);
+  if (!Number.isFinite(strike)) return null;
+  return shortLegCandidates.value.find(snap => snap.strike === strike) || null;
+});
+const spreadMetrics = computed(() => {
+  const track = selectedTrack.value;
+  const shortLeg = shortLegSnapshot.value;
+  if (!track || !shortLeg) return null;
+  const isPut = track.optionType === "put";
+  const longPremium = isPut
+    ? track.strike - track.currentBreakEven
+    : track.currentBreakEven - track.strike;
+  const netPremium = longPremium - shortLeg.mark;
+  const breakEven = isPut ? track.strike - netPremium : track.strike + netPremium;
+  const awp = calcConditionalSpreadWinningPrice({
+    optionType: track.optionType,
+    spot: props.spotPrice,
+    longStrike: track.strike,
+    shortStrike: shortLeg.strike,
+    iv: track.referenceIv,
+    tauSeconds: timeToExpiry.value,
+  });
+  const maxProfit = Math.abs(shortLeg.strike - track.strike) - netPremium;
+  return { breakEven, awp, netPremium, longPremium, maxProfit, shortLeg };
+});
+const effectiveBreakEven = computed(() => spreadMetrics.value?.breakEven ?? selectedTrack.value?.currentBreakEven ?? null);
 const getWinningPrice = track => {
   if (!track) return null;
+  const spread = spreadMetrics.value;
+  if (spread && spread.shortLeg && Number.isFinite(spread.awp)) return spread.awp;
   return calcConditionalWinningPrice({
     optionType: track.optionType,
     spot: props.spotPrice,
@@ -107,22 +153,45 @@ const getWinningPrice = track => {
 const getWinningPriceTooltip = track => {
   if (!track) return "";
   const isPut = track.optionType === "put";
-  return `AWP — average terminal index price conditional on the option expiring in-the-money: finishing ${isPut ? "below" : "above"} the strike.\n` +
-    `Includes partial payoffs below premium; conditioning on break-even instead would bias AWP ${isPut ? "low" : "high"} by discarding those finishes.\n` +
-    `q = IV × √T; d1 = [ln(Current / Strike) + q² / 2] / q; d2 = d1 − q.\n` +
-    `AWP = Current × Φ(${isPut ? "−d1" : "d1"}) / Φ(${isPut ? "−d2" : "d2"}), where Φ is the standard normal cumulative probability.\n` +
-    `Uses the same lognormal model, IV and time remaining as P(win), with zero interest rates and carry.`;
+  const spread = spreadMetrics.value;
+  if (spread) {
+    return `AWP — density-weighted average terminal index price given the spread finishes ITM, with the terminal price capped at the short strike.`;
+  }
+  return `AWP — density-weighted average terminal index price given the option finishes ${isPut ? "below" : "above"} the strike. Includes partial payoffs below premium.`;
 };
+const getBreakEvenTooltipForSelection = track => {
+  if (!track) return "";
+  const spread = spreadMetrics.value;
+  if (!spread) return getBreakEvenTooltip(track);
+  const isPut = track.optionType === "put";
+  return `Spread BE — long ${formatPrice(track.strike)} / short ${formatPrice(spread.shortLeg.strike)}. Net premium ${formatPrice(spread.netPremium)}, max profit ${formatPrice(spread.maxProfit)} ${isPut ? "below" : "above"} ${formatPrice(spread.shortLeg.strike)}.`;
+};
+const clearShortLeg = () => { shortLegStrike.value = null; };
 const selectedWinningPriceLevels = computed(() => {
   const track = selectedTrack.value;
+  const levels = [];
   const value = getWinningPrice(track);
-  return Number.isFinite(value) ? [{
-    id: "average-winning-price",
-    value,
-    label: `AWP = ${formatPrice(value)}`,
-    color: "#ffffff",
-    tooltip: getWinningPriceTooltip(track),
-  }] : [];
+  if (Number.isFinite(value)) {
+    levels.push({
+      id: "average-winning-price",
+      value,
+      label: `AWP = ${formatPrice(value)}`,
+      color: "#ffffff",
+      tooltip: getWinningPriceTooltip(track),
+    });
+  }
+  const spread = spreadMetrics.value;
+  if (spread && Number.isFinite(spread.shortLeg.strike)) {
+    const isPut = track.optionType === "put";
+    levels.push({
+      id: "short-leg-strike",
+      value: spread.shortLeg.strike,
+      label: `Short ${isPut ? "P" : "C"} ${formatPrice(spread.shortLeg.strike)} · max profit ${formatPrice(spread.maxProfit)}`,
+      color: track.optionType === "put" ? "#fbbf24" : "#fbbf24",
+      tooltip: `Short strike — payoff caps here. ${isPut ? "Below" : "Above"} it, the spread pays its max of ${formatPrice(spread.maxProfit)}.`,
+    });
+  }
+  return levels;
 });
 const overviewLevels = computed(() => props.tracks.map(track => {
   const probability = getWinProbability(track);
@@ -152,10 +221,8 @@ const selectedSubtitle = computed(() => {
   const winProbability = Number.isFinite(selectedWinProbability.value) ? formatProb(selectedWinProbability.value) : "n/a";
   return `P(win) = ${winProbability} · N(d2) = ${probability}`;
 });
-const selectedSubtitleTooltip = computed(() => `${selectedWinProbabilityTooltip.value}\n\n` +
-  `N(d2) — model probability of expiring above the strike, for both calls and puts.\n` +
-  `Uses the same current index price, IV, and time remaining as P(win), with the strike as the threshold instead of BE.\n` +
-  `q = IV × √T; d2 = [ln(Current / strike) − q² / 2] / q; N(d2) = Φ(d2).`,
+const selectedSubtitleTooltip = computed(() => `${selectedWinProbabilityTooltip.value}\n` +
+  `N(d2) — model probability of finishing above the strike. Same model, strike threshold instead of BE.`,
 );
 const Y_AXIS_LABEL_PADDING = 72;
 
@@ -416,6 +483,31 @@ onUnmounted(() => resizeObserver?.disconnect());
       </div>
       <span class="selectionLabel">{{ selectedLabel }} selected</span>
     </div>
+    <div v-if="selectedTrack && detailView === 'break-even' && shortLegCandidates.length" class="spreadControl">
+      <label class="spreadLabel" :for="`short-leg-${selectedInstrument}`">
+        Short leg:
+      </label>
+      <select
+        :id="`short-leg-${selectedInstrument}`"
+        class="spreadSelect"
+        :value="shortLegStrike ?? ''"
+        @change="shortLegStrike = $event.target.value === '' ? null : Number($event.target.value)"
+      >
+        <option value="">None (single leg)</option>
+        <option v-for="candidate in shortLegCandidates" :key="candidate.instrumentName" :value="candidate.strike">
+          {{ selectedTrack.optionType === 'put' ? 'P' : 'C' }} {{ formatPrice(candidate.strike) }} · premium {{ formatPrice(candidate.mark) }}
+        </option>
+      </select>
+      <button
+        v-if="shortLegStrike != null"
+        type="button"
+        class="spreadClear"
+        @click="clearShortLeg"
+      >Clear</button>
+      <span v-if="spreadMetrics" class="spreadSummary">
+        Net premium {{ formatPrice(spreadMetrics.netPremium) }} · Max profit {{ formatPrice(spreadMetrics.maxProfit) }}
+      </span>
+    </div>
     <IndexBreakEvenChart
       v-if="!selectedInstrument"
       class="priceChart"
@@ -443,10 +535,10 @@ onUnmounted(() => resizeObserver?.disconnect());
       ref="priceChartRef"
       :actual-data="indexData"
       :projected-data="indexProjectedData"
-      :break-even-low="selectedTrack.optionType === 'put' ? selectedTrack.currentBreakEven : null"
-      :break-even-high="selectedTrack.optionType === 'call' ? selectedTrack.currentBreakEven : null"
-      break-even-low-label="BE"
-      break-even-high-label="BE"
+      :break-even-low="selectedTrack.optionType === 'put' ? effectiveBreakEven : null"
+      :break-even-high="selectedTrack.optionType === 'call' ? effectiveBreakEven : null"
+      :break-even-low-label="spreadMetrics ? 'Spread BE' : 'BE'"
+      :break-even-high-label="spreadMetrics ? 'Spread BE' : 'BE'"
       :break-even-low-tooltip="selectedBreakEvenTooltip"
       :break-even-high-tooltip="selectedBreakEvenTooltip"
       :break-even-label-color="selectedTrack.optionType === 'put' ? '#f87171' : '#4ade80'"
@@ -482,6 +574,13 @@ onUnmounted(() => resizeObserver?.disconnect());
 .selectionToolbar .backButton { justify-self: start; border: 1px solid #414751; border-radius: 5px; background: transparent; color: #c2c7cf; }
 .selectionToolbar .backButton:hover { background: #20252c; color: white; }
 .selectionEmpty { min-height: 320px; display: grid; place-items: center; color: #aaa; font-size: 14px; }
+.spreadControl { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 4px 16px 10px; color: #a9b0ba; font-size: 12px; }
+.spreadLabel { color: #70767d; }
+.spreadSelect { padding: 5px 10px; border: 1px solid #414751; border-radius: 6px; background: #15181d; color: #e8eaed; font: inherit; cursor: pointer; }
+.spreadSelect:focus-visible { outline: 2px solid #aab8cc; outline-offset: 2px; }
+.spreadClear { padding: 5px 10px; border: 1px solid #414751; border-radius: 6px; background: transparent; color: #c2c7cf; cursor: pointer; }
+.spreadClear:hover { background: #20252c; color: white; }
+.spreadSummary { color: #c2c7cf; }
 .chartWrap {
   position: relative;
   border-radius: 14px;
@@ -510,7 +609,7 @@ onUnmounted(() => resizeObserver?.disconnect());
     min-height: 0;
   }
 
-  .selectionToolbar { flex-shrink: 0; }
+  .selectionToolbar, .spreadControl { flex-shrink: 0; }
   .priceChart { flex: 1; min-height: 0; }
   .chartSvg { flex: 1; height: 0; min-height: 0; }
 }

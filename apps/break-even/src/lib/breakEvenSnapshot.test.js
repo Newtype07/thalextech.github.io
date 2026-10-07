@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { calcConditionalWinningPrice, calcOptionNd2 } from './breakEvenSnapshot.js';
+import { calcConditionalWinningPrice, calcConditionalSpreadWinningPrice, calcOptionNd2 } from './breakEvenSnapshot.js';
 
 const year = 365.25 * 86400;
 
@@ -68,5 +68,64 @@ test('expiry and unavailable inputs do not fabricate an average winning price', 
   assert.equal(calcConditionalWinningPrice({ ...params, optionType: 'put' }), null);
   for (const invalid of [{ spot: 0 }, { strike: 0 }, { iv: null }, { iv: 0 }, { tauSeconds: null }]) {
     assert.equal(calcConditionalWinningPrice({ ...params, ...invalid }), null);
+  }
+});
+
+function integrateSpreadPrices({ optionType, spot, longStrike, shortStrike, iv, tauSeconds }) {
+  const variance = iv * iv * tauSeconds / year;
+  const sd = Math.sqrt(variance);
+  const kLong = (Math.log(longStrike / spot) + variance / 2) / sd;
+  const isPut = optionType === 'put';
+  const from = isPut ? -10 : kLong;
+  const to = isPut ? kLong : 10;
+  const steps = 12000;
+  const dz = (to - from) / steps;
+  let probability = 0;
+  let moment = 0;
+  for (let i = 0; i <= steps; i++) {
+    const z = from + i * dz;
+    const weight = i === 0 || i === steps ? 1 : i % 2 ? 4 : 2;
+    const density = Math.exp(-z * z / 2) / Math.sqrt(2 * Math.PI);
+    const price = spot * Math.exp(-variance / 2 + sd * z);
+    const effective = isPut ? Math.max(price, shortStrike) : Math.min(price, shortStrike);
+    probability += weight * density;
+    moment += weight * density * effective;
+  }
+  return moment / probability;
+}
+
+test('spread winning prices cap at the short leg and match numerical integration', () => {
+  for (const optionType of ['call', 'put']) {
+    const params = { optionType, spot: 100, iv: 0.6, tauSeconds: 30 * 86400,
+      longStrike: optionType === 'call' ? 105 : 95,
+      shortStrike: optionType === 'call' ? 120 : 80 };
+    const expected = integrateSpreadPrices(params);
+    const actual = calcConditionalSpreadWinningPrice(params);
+    assert.ok(Math.abs(actual - expected) < 0.00002);
+    assert.ok(optionType === 'call' ? actual < params.shortStrike : actual > params.shortStrike);
+    assert.ok(optionType === 'call' ? actual > params.longStrike : actual < params.longStrike);
+  }
+});
+
+test('spread AWP collapses to single-leg AWP as the short strike moves out of reach', () => {
+  for (const optionType of ['call', 'put']) {
+    const base = { optionType, spot: 100, iv: 0.6, tauSeconds: 60 * 86400,
+      strike: optionType === 'call' ? 105 : 95 };
+    const singleLeg = calcConditionalWinningPrice(base);
+    const spread = calcConditionalSpreadWinningPrice({ ...base,
+      longStrike: base.strike,
+      shortStrike: optionType === 'call' ? 10000 : 0.01 });
+    assert.ok(Math.abs(singleLeg - spread) < 1e-6);
+  }
+});
+
+test('spread AWP rejects inverted strikes and invalid inputs', () => {
+  const callParams = { optionType: 'call', spot: 100, longStrike: 105, shortStrike: 100, iv: 0.6, tauSeconds: 30 * 86400 };
+  assert.equal(calcConditionalSpreadWinningPrice(callParams), null);
+  assert.equal(calcConditionalSpreadWinningPrice({ ...callParams, shortStrike: 105 }), null);
+  const putParams = { ...callParams, optionType: 'put', longStrike: 95, shortStrike: 100 };
+  assert.equal(calcConditionalSpreadWinningPrice(putParams), null);
+  for (const invalid of [{ spot: 0 }, { longStrike: 0 }, { shortStrike: 0 }, { iv: 0 }, { iv: null }, { tauSeconds: null }]) {
+    assert.equal(calcConditionalSpreadWinningPrice({ ...callParams, shortStrike: 120, ...invalid }), null);
   }
 });
