@@ -256,6 +256,40 @@ test("normalizeBacktestConfig applies defaults and coerces external input once",
   );
 });
 
+test("annualized return and volatility reconcile with Sharpe across sizing modes", () => {
+  const fixture = buildMultiExpiryEntryHourFixture();
+  for (const sizingMode of ["notional", "btc"]) {
+    const result = runWeeklyStraddleBacktest({
+      ...fixture,
+      config: { ...fixture.config, sizingMode },
+    });
+    const returns = result.cycleSummary
+      .filter((cycle) => cycle.closed)
+      .map((cycle) => cycle.cycleReturnOnNotional);
+    assert.ok(returns.length > 1);
+    const average = returns.reduce((sum, value) => sum + value, 0) / returns.length;
+    const variance = returns.reduce((sum, value) => sum + (value - average) ** 2, 0)
+      / (returns.length - 1);
+    const { summary } = result;
+    assert.ok(Math.abs(summary.annualizedMeanReturn
+      - average * summary.annualizedCyclesPerYear) < 1e-12);
+    assert.ok(Math.abs(summary.annualizedReturnVolatility
+      - Math.sqrt(variance * summary.annualizedCyclesPerYear)) < 1e-12);
+    assert.ok(Math.abs(summary.annualizedMeanReturn / summary.annualizedReturnVolatility
+      - summary.sharpeRatio) < 1e-12);
+  }
+});
+
+test("annualized metrics handle single-cycle and empty runs", () => {
+  const fixture = buildParityFixture();
+  const single = runWeeklyStraddleBacktest(fixture);
+  assert.ok(Number.isFinite(single.summary.annualizedMeanReturn));
+  assert.ok(Number.isNaN(single.summary.annualizedReturnVolatility));
+  const empty = runWeeklyStraddleBacktest({ ...fixture, quoteSnapshots: [] });
+  assert.ok(Number.isNaN(empty.summary.annualizedMeanReturn));
+  assert.ok(Number.isNaN(empty.summary.annualizedReturnVolatility));
+});
+
 test("notional sizing uses entry spot instead of option strike", () => {
   const fixture = buildParityFixture();
   const result = runWeeklyStraddleBacktest(fixture);

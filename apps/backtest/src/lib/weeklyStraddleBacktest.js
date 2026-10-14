@@ -1378,6 +1378,10 @@ export const runWeeklyStraddleBacktest = ({
     Number.isFinite(observedYears) && observedYears > 0
       ? cycleReturns.length / observedYears
       : Number.NaN;
+  const annualizedMeanReturn = cycleMeanReturn * annualizedCyclesPerYear;
+  const annualizedReturnVolatility = cycleReturns.length > 1
+    ? cycleReturnVol * Math.sqrt(annualizedCyclesPerYear)
+    : Number.NaN;
   const finalEquityUsd = closedCycles.at(-1)?.endingEquityUsd ?? Number.NaN;
   const initialInvestmentUsd = config.sizingMode === "btc"
     ? closedCycles[0]?.investmentUsd ?? Number.NaN
@@ -1391,6 +1395,8 @@ export const runWeeklyStraddleBacktest = ({
       finalEquityUsd,
       initialInvestmentUsd,
       cumulativeReturnOnNotional: finalEquityUsd / initialInvestmentUsd,
+      annualizedMeanReturn,
+      annualizedReturnVolatility,
       sharpeRatio:
         cycleReturns.length > 1 &&
         cycleReturnVol > 0 &&

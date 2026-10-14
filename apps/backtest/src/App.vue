@@ -986,7 +986,7 @@ const strategyLabels = computed(() => {
   };
 });
 
-// Metrics for new design (only 3)
+// Single-run performance metrics
 const finalPnlValue = computed(() => {
   if (!result.value?.summary) return "—";
   return formatUsd.format(result.value.summary.finalEquityUsd);
@@ -996,6 +996,15 @@ const sharpeValue = computed(() => {
   const s = result.value?.summary?.sharpeRatio;
   return Number.isFinite(s) ? formatNumber.format(s) : "—";
 });
+
+const formatReturnPercent = (value) =>
+  Number.isFinite(value) ? `${formatNumber.format(value * 100)}%` : "—";
+const annualizedReturnValue = computed(() =>
+  formatReturnPercent(result.value?.summary?.annualizedMeanReturn),
+);
+const annualizedVolatilityValue = computed(() =>
+  formatReturnPercent(result.value?.summary?.annualizedReturnVolatility),
+);
 
 const maxDdValue = computed(() => {
   if (!result.value) return "—";
@@ -1822,6 +1831,8 @@ function handleSavePng() {
         ? []
         : [
             { label: "FINAL PNL", value: finalPnlValue.value },
+            { label: "ANN. RETURN", value: annualizedReturnValue.value },
+            { label: "ANN. VOLATILITY", value: annualizedVolatilityValue.value },
             { label: "SHARPE", value: sharpeValue.value },
             { label: "MAX DRAWDOWN", value: maxDdValue.value, muted: true },
           ],
@@ -2508,27 +2519,42 @@ onMounted(loadBacktest);
       <!-- Left metrics column -->
       <div class="metricsColumn">
         <template v-if="mode === 'single'">
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-1">
+            <span id="metric-tooltip-1" class="metricTooltip" role="tooltip">Total cumulative strategy PnL in USD, including option and hedge PnL. This is profit or loss, not the account balance.</span>
             <div class="metricValue">{{ finalPnlValue }}</div>
             <div class="metricLabel">FINAL PNL</div>
           </div>
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-2">
+            <span id="metric-tooltip-2" class="metricTooltip" role="tooltip">Arithmetic mean cycle return on entry notional, annualized using observed cycles per year. Not compounded CAGR.</span>
+            <div class="metricValue">{{ annualizedReturnValue }}</div>
+            <div class="metricLabel">ANN. RETURN</div>
+          </div>
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-3">
+            <span id="metric-tooltip-3" class="metricTooltip" role="tooltip">Sample standard deviation of cycle returns on entry notional, scaled by the square root of observed cycles per year. Assumes uncorrelated cycle returns; variable holding periods make this approximate.</span>
+            <div class="metricValue">{{ annualizedVolatilityValue }}</div>
+            <div class="metricLabel">ANN. VOLATILITY</div>
+          </div>
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-4">
+            <span id="metric-tooltip-4" class="metricTooltip" role="tooltip">Annualized mean cycle return on entry notional divided by annualized cycle return volatility. Assumes a zero risk-free rate.</span>
             <div class="metricValue">{{ sharpeValue }}</div>
             <div class="metricLabel">SHARPE</div>
           </div>
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-5">
+            <span id="metric-tooltip-5" class="metricTooltip" role="tooltip">Largest peak-to-trough decline in cumulative PnL in USD, measured at cycle ends from an initial PnL of zero. Does not capture intra-cycle drawdowns.</span>
             <div class="metricValue maxdd">{{ maxDdValue }}</div>
             <div class="metricLabel">MAX DRAWDOWN</div>
           </div>
         </template>
         <template v-else-if="mode === 'sweep' && sweepInsights">
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-6">
+            <span id="metric-tooltip-6" class="metricTooltip" role="tooltip">Parameter setting with the highest cumulative strategy PnL among the completed sweep runs. The label below shows its PnL in USD.</span>
             <div class="metricValue">{{ sweepInsights.bestPnl.label }}</div>
             <div class="metricLabel">
               BEST PNL · {{ formatUsd.format(sweepInsights.bestPnl.pnl) }}
             </div>
           </div>
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-7">
+            <span id="metric-tooltip-7" class="metricTooltip" role="tooltip">Parameter setting with the highest finite annualized Sharpe ratio among the completed sweep runs. Sharpe uses cycle returns on entry notional and a zero risk-free rate.</span>
             <div class="metricValue">
               {{ sweepInsights.bestSharpe?.label || "—" }}
             </div>
@@ -2541,7 +2567,8 @@ onMounted(loadBacktest);
               }}
             </div>
           </div>
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-8">
+            <span id="metric-tooltip-8" class="metricTooltip" role="tooltip">Number of sweep runs with positive PnL out of all runs with valid PnL. The USD value below is the median PnL across those valid runs.</span>
             <div class="metricValue">
               {{ sweepInsights.profitable }}/{{ sweepInsights.total }}
             </div>
@@ -2551,33 +2578,39 @@ onMounted(loadBacktest);
           </div>
         </template>
         <template v-else-if="mode === 'iv-rv' && ivRvStats">
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-9">
+            <span id="metric-tooltip-9" class="metricTooltip" role="tooltip">Mean annualized at-the-money implied volatility for the selected tenor over the displayed observations.</span>
             <div class="metricValue">{{ formatVol(ivRvStats.averageIv) }}</div>
             <div class="metricLabel">AVERAGE ATM IV</div>
           </div>
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-10">
+            <span id="metric-tooltip-10" class="metricTooltip" role="tooltip">Mean annualized Parkinson realized volatility, estimated from high-low price ranges, over the displayed observations.</span>
             <div class="metricValue">{{ formatVol(ivRvStats.averageRv) }}</div>
             <div class="metricLabel">AVERAGE PARKINSON RV</div>
           </div>
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-11">
+            <span id="metric-tooltip-11" class="metricTooltip" role="tooltip">Mean implied volatility minus mean Parkinson realized volatility over the displayed observations. The difference is in percentage points.</span>
             <div class="metricValue">{{ formatVol(ivRvStats.difference) }}</div>
             <div class="metricLabel">AVERAGE IV MINUS RV</div>
           </div>
         </template>
         <template v-else-if="mode === 'rv' && rvWeekdayInsights">
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-12">
+            <span id="metric-tooltip-12" class="metricTooltip" role="tooltip">Mean annualized hourly Parkinson realized volatility across the observations included in the weekday analysis.</span>
             <div class="metricValue">
               {{ formatVol(rvWeekdayInsights.average) }}
             </div>
             <div class="metricLabel">AVERAGE HOURLY RV</div>
           </div>
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-13">
+            <span id="metric-tooltip-13" class="metricTooltip" role="tooltip">Weekday with the lowest median annualized hourly Parkinson realized volatility. The label below shows that median.</span>
             <div class="metricValue">{{ rvWeekdayInsights.lowest.label }}</div>
             <div class="metricLabel">
               LOWEST MEDIAN · {{ formatVol(rvWeekdayInsights.lowest.median) }}
             </div>
           </div>
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-14">
+            <span id="metric-tooltip-14" class="metricTooltip" role="tooltip">Weekday with the highest median annualized hourly Parkinson realized volatility. The label below shows that median.</span>
             <div class="metricValue">{{ rvWeekdayInsights.highest.label }}</div>
             <div class="metricLabel">
               HIGHEST MEDIAN · {{ formatVol(rvWeekdayInsights.highest.median) }}
@@ -2585,7 +2618,8 @@ onMounted(loadBacktest);
           </div>
         </template>
         <template v-else-if="mode === 'iv' && ivHeatmapInsights">
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-15">
+            <span id="metric-tooltip-15" class="metricTooltip" role="tooltip">{{ `${ivHeatmapMetric === 'median' ? 'Median' : 'Mean'} annualized ${ivMeasureLabel} across the filtered observations.` }}</span>
             <div class="metricValue">
               {{ formatVol(ivHeatmapInsights.average) }}
             </div>
@@ -2594,7 +2628,8 @@ onMounted(loadBacktest);
               {{ ivMeasureLabel }}
             </div>
           </div>
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-16">
+            <span id="metric-tooltip-16" class="metricTooltip" role="tooltip">UTC weekday and hour bucket with the lowest selected mean or median constant-maturity implied volatility over the filtered observations.</span>
             <div class="metricValue">
               {{ ivHeatmapInsights.lowest.weekdayLabel }}
               {{ String(ivHeatmapInsights.lowest.hour).padStart(2, "0") }}:00
@@ -2603,7 +2638,8 @@ onMounted(loadBacktest);
               LOWEST BUCKET · {{ formatVol(ivHeatmapInsights.lowest.average) }}
             </div>
           </div>
-          <div class="metric">
+          <div class="metric" tabindex="0" aria-describedby="metric-tooltip-17">
+            <span id="metric-tooltip-17" class="metricTooltip" role="tooltip">UTC weekday and hour bucket with the highest selected mean or median constant-maturity implied volatility over the filtered observations.</span>
             <div class="metricValue">
               {{ ivHeatmapInsights.highest.weekdayLabel }}
               {{ String(ivHeatmapInsights.highest.hour).padStart(2, "0") }}:00
@@ -4868,6 +4904,8 @@ onMounted(loadBacktest);
 }
 
 .metric {
+  position: relative;
+  cursor: default;
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -4876,6 +4914,38 @@ onMounted(loadBacktest);
   border: none;
   padding: 0;
   min-height: auto;
+}
+
+.metricTooltip {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 8px);
+  z-index: 100;
+  width: 280px;
+  max-width: calc(100vw - 220px);
+  padding: 10px 12px;
+  border: 1px solid #343941;
+  border-radius: 6px;
+  background: #181c22;
+  box-shadow: 0 4px 16px #0006;
+  color: #e8eaed;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: normal;
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+}
+
+.metric:hover .metricTooltip,
+.metric:focus-visible .metricTooltip {
+  visibility: visible;
+  opacity: 1;
+}
+
+.metric:focus-visible {
+  outline: 1px solid #70767d;
+  outline-offset: 4px;
 }
 
 .metricValue {

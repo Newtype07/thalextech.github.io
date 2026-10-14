@@ -38,14 +38,15 @@ export function exportTitledChart({
   const [minX, minY, width, height] = viewBox;
   const headerHeight = 76;
   const metricsWidth = metrics.length ? 170 : 0;
+  const contentHeight = Math.max(height, metrics.length ? 47 + (metrics.length - 1) * 67 + 16 : 0);
   const exportSvg = svgEl.cloneNode(true);
   const chartGroup = document.createElementNS(SVG_NS, "g");
   while (exportSvg.firstChild) chartGroup.appendChild(exportSvg.firstChild);
   chartGroup.setAttribute("transform", `translate(${metricsWidth},${headerHeight})`);
   exportSvg.appendChild(chartGroup);
-  exportSvg.setAttribute("viewBox", `${minX} ${minY} ${width + metricsWidth} ${height + headerHeight}`);
+  exportSvg.setAttribute("viewBox", `${minX} ${minY} ${width + metricsWidth} ${contentHeight + headerHeight}`);
   exportSvg.setAttribute("width", String(width + metricsWidth));
-  exportSvg.setAttribute("height", String(height + headerHeight));
+  exportSvg.setAttribute("height", String(contentHeight + headerHeight));
 
   const centerX = minX + metricsWidth + width / 2;
   addText(exportSvg, {
