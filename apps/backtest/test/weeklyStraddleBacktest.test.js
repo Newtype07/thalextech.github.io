@@ -422,6 +422,40 @@ test("1D maturity selects daily options instead of rolling a 7D option after one
   ));
 });
 
+test("2D maturity selects a two-day expiry and skips unavailable maturities", () => {
+  const fixture = buildOneDayMaturityFixture();
+  const twoDayExpirationTs = fixture.oneDayExpirationTs + DAY_SECONDS;
+  const config = {
+    ...fixture.config,
+    targetDteDays: 2,
+    minWeeklyDteDays: 1.5,
+    maxWeeklyDteDays: 2.5,
+    exitHoldDays: 2,
+  };
+  const unavailable = runWeeklyStraddleBacktest({ ...fixture, config });
+  assert.equal(unavailable.counts.closedCycles, 0);
+
+  const result = runWeeklyStraddleBacktest({
+    ...fixture,
+    config,
+    instruments: fixture.instruments.map((instrument) =>
+      instrument.expirationTs === fixture.oneDayExpirationTs
+        ? { ...instrument, expirationTs: twoDayExpirationTs, name: instrument.name.replace("07JUN25", "08JUN25") }
+        : instrument),
+    indexRows: fixture.indexRows.map((row) =>
+      row.ts === fixture.oneDayExpirationTs ? { ...row, ts: twoDayExpirationTs } : row),
+    quoteSnapshots: fixture.quoteSnapshots.map(([ts, quotes]) =>
+      [ts === fixture.oneDayExpirationTs ? twoDayExpirationTs : ts, quotes]),
+  });
+  assert.equal(result.counts.closedCycles, 1);
+  const cycle = result.cycleSummary[0];
+  assert.equal(cycle.dteDays, 2);
+  assert.equal(cycle.holdingPeriodDays, 2);
+  assert.equal(cycle.exitAtExpiry, true);
+  assert.equal(cycle.exitTs, twoDayExpirationTs);
+  assert.ok(cycle.legs.every((leg) => leg.expirationTs === twoDayExpirationTs));
+});
+
 test("every-day entry rolls a 1D straddle across consecutive days at the same hour", () => {
   const startDay = Date.UTC(2025, 5, 6, 8) / 1000; // Friday 08:00 UTC
   const instruments = [];

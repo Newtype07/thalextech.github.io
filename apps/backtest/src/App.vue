@@ -63,6 +63,7 @@ const currentUnderlying = computed(() => getUnderlying(underlying.value));
 
 const MATURITY_OPTIONS = [
   { value: 1, label: "1D", minDteDays: 0.25, maxDteDays: 1.5 },
+  { value: 2, label: "2D", minDteDays: 1.5, maxDteDays: 2.5 },
   { value: 7, label: "7D", minDteDays: 4, maxDteDays: 10 },
   { value: 14, label: "14D", minDteDays: 7, maxDteDays: 28 },
   { value: 30, label: "30D", minDteDays: 14, maxDteDays: 60 },
@@ -739,6 +740,7 @@ const SWEEP_DIMENSIONS = [
 const availableSweepDimensions = computed(() =>
   SWEEP_DIMENSIONS.filter(
     (dimension) => (dimension.value !== "delta_band" || showDelta.value)
+      && (dimension.value !== "entry_weekday" || Number(ui.maturityDays) !== 1)
       && (dimension.value !== "hedge_frequency" || ui.structure !== "covered_call"),
   ),
 );
@@ -1699,6 +1701,9 @@ watch(
       ui.exitHoldDays = maxExitHoldDays.value;
     }
     if (!showDelta.value && sweepDimension.value === "delta_band") {
+      sweepDimension.value = "entry_hour";
+    }
+    if (Number(ui.maturityDays) === 1 && sweepDimension.value === "entry_weekday") {
       sweepDimension.value = "entry_hour";
     }
     if (!ui.hedgeEnabled && chartMode.value === "hedge") {
