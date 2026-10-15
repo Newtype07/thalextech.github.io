@@ -45,7 +45,7 @@ test("compact quote snapshots are filtered without per-quote expansion", () => {
     schema: "thalex-option-backtest",
     version: THALEX_ARTIFACT_VERSION,
     hourlyOffset: 8,
-    index: [[100, 99_000], [200, 100_000]],
+    index: [[100, 99_000, 100_000, 98_000, 99_500], [200, 100_000, 102_000, 99_000, 101_000]],
     quotes: [
       [100, [[0, 4_000, 0.55, 0.51 * PRECOMPUTED_DELTA_SCALE]]],
       [200, [[1, 3_900, 0.56, -0.48 * PRECOMPUTED_DELTA_SCALE]]],
@@ -57,7 +57,7 @@ test("compact quote snapshots are filtered without per-quote expansion", () => {
     endTs: 250,
   });
 
-  assert.deepEqual(decoded.indexRows, [{ ts: 200, indexPrice: 100_000 }]);
+  assert.deepEqual(decoded.indexRows, [{ ts: 200, indexPrice: 100_000, high: 102_000, low: 99_000, close: 101_000 }]);
   assert.deepEqual(decoded.quoteSnapshots, [payload.quotes[1]]);
 });
 

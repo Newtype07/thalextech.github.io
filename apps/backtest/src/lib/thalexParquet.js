@@ -3,7 +3,7 @@ import {
   PRECOMPUTED_DELTA_SCALE,
 } from "./optionRisk.js";
 
-export const THALEX_ARTIFACT_VERSION = 3;
+export const THALEX_ARTIFACT_VERSION = 4;
 
 const ARTIFACT_SCHEMA = "thalex-option-backtest";
 const DEFAULT_DATA_ROOT = "runtime-data/thalex";
@@ -108,10 +108,13 @@ export const decodePreparedShard = ({
   assertArtifactContract(payload, `hour ${payload?.hourlyOffset ?? "?"}`);
   const indexRows = [];
   const quoteSnapshots = [];
-  for (const [ts, price] of payload.index || []) {
+  for (const [ts, price, high, low, close] of payload.index || []) {
     const timestamp = asNumber(ts);
     if (timestamp >= startTs && timestamp <= endTs) {
-      indexRows.push({ ts: timestamp, indexPrice: asNumber(price) });
+      indexRows.push({
+        ts: timestamp, indexPrice: asNumber(price),
+        high: asNumber(high), low: asNumber(low), close: asNumber(close),
+      });
     }
   }
   for (const [ts, entries] of payload.quotes || []) {

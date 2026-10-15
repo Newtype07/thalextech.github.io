@@ -106,7 +106,25 @@ export const buildWeeklyPnlExportRows = (
       entry_dte_days: finiteOrBlank(cycle.dteDays),
       exit_at_expiry: cycle.exitAtExpiry === true,
       hedge_enabled: cycle.hedgeEnabled === true,
-      hedge_interval_hours: cycle.hedgeEnabled
+      hedge_mode: cycle.hedgeEnabled ? cycle.hedgeMode || "time" : "off",
+      hedge_delta_tolerance: cycle.hedgeEnabled && cycle.hedgeMode === "tolerance"
+        ? finiteOrBlank(cycle.hedgeDeltaTolerance) : "",
+      hedge_trade_count: finiteOrBlank(cycle.hedgeTradeCount),
+      hedge_model: cycle.hedgeModel || "",
+      intrahour_high_first_total_pnl_usd: cycle.hedgePathScenarios
+        ? finiteOrBlank(cycle.shortOptionPnlUsd + cycle.hedgePathScenarios.high_first.hedgePnlUsd) : "",
+      intrahour_low_first_total_pnl_usd: cycle.hedgePathScenarios
+        ? finiteOrBlank(cycle.shortOptionPnlUsd + cycle.hedgePathScenarios.low_first.hedgePnlUsd) : "",
+      intrahour_high_first_ambiguous_hours: finiteOrBlank(cycle.hedgePathScenarios?.high_first.ambiguousBars),
+      intrahour_low_first_ambiguous_hours: finiteOrBlank(cycle.hedgePathScenarios?.low_first.ambiguousBars),
+      intrahour_high_first_missing_range_hours: finiteOrBlank(cycle.hedgePathScenarios?.high_first.missingRangeBars),
+      intrahour_low_first_missing_range_hours: finiteOrBlank(cycle.hedgePathScenarios?.low_first.missingRangeBars),
+      intrahour_high_first_missing_risk_hours: finiteOrBlank(cycle.hedgePathScenarios?.high_first.missingRiskBars),
+      intrahour_low_first_missing_risk_hours: finiteOrBlank(cycle.hedgePathScenarios?.low_first.missingRiskBars),
+      missing_hedge_range_hours: finiteOrBlank(cycle.missingHedgeRangeBars),
+      missing_hedge_risk_hours: finiteOrBlank(cycle.missingHedgeRiskBars),
+      hedge_data_gaps: finiteOrBlank(cycle.hedgeDataGapCount),
+      hedge_interval_hours: cycle.hedgeEnabled && cycle.hedgeMode !== "tolerance"
         ? finiteOrBlank(cycle.hedgeIntervalHours)
         : "",
       sizing_mode:

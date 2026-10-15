@@ -53,12 +53,13 @@ const displayedGroups = computed(() => {
     },
   ];
 });
+const toleranceMode = computed(() => props.rows.some(row => row.hedgeEnabled && row.hedgeMode === "tolerance"));
 const hedgeModeLabel = computed(() => {
   if (props.rows.some(row => row.structure === "covered_call")) return "Covered call during call periods only; excludes uncovered holding gaps";
   const mode = modeResult.value?.hedgeMode
     || modeResult.value?.defaultHedgeMode
     || (props.hedgeEnabled ? "dynamic" : "unhedged");
-  return mode === "dynamic" ? "Dynamic hedge" : "Unhedged option PnL";
+  return mode === "dynamic" ? (toleranceMode.value ? "Spot-trigger delta tolerance hedge" : "Time-based hedge") : "Unhedged option PnL";
 });
 const scenarioStatus = computed(() => {
   const completed = Number(modeResult.value?.simulations) || 0;
@@ -612,7 +613,9 @@ defineExpose({ exportPng });
                     <strong>The null uses a Bates stochastic-volatility jump process calibrated to the hourly {{ underlying }} history.</strong>
                     A rolling robust local-volatility filter detects jumps, jump rates are estimated separately for low,
                     medium, and high volatility regimes, and κ, θ, σᵥ, and ρ are fitted from the jump-filtered 7-day realized
-                    variance series. Paths are generated hourly and hedges occur only on the strategy's configured schedule.
+                    variance series. Paths are generated hourly.
+                    <template v-if="toleranceMode">Opening delta and gamma set spot-price triggers. The nearer touched trigger fills first; after flattening, the opposite trigger is recalculated, with a maximum of two hedge trades per hour. Historical execution uses hourly high/low ranges. Simulated ranges use hourly endpoints only and can miss intrahour excursions, so this comparison is approximate.</template>
+                    <template v-else>Hedges occur on the strategy's configured schedule.</template>
                   </p>
                   <p>
                     <strong>Entry ATM IV is the total variance budget, not an extra diffusion input.</strong>

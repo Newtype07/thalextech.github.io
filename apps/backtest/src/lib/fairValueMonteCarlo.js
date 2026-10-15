@@ -1,5 +1,6 @@
 import { blackScholesPrice } from "./optionPricing.js";
-import { blackScholesDelta, normalizeVol } from "./optionRisk.js";
+import { blackScholesDelta, blackScholesGreeks, normalizeVol } from "./optionRisk.js";
+import { createHedgeReplay } from "./hedgeLifecycle.js";
 import { mean } from "./statistics.js";
 import { calibrateBatesModel } from "../../../../lib/batesCalibration.js";
 import {
@@ -200,7 +201,10 @@ export const buildFairValueCycleState = (cycle) => {
     underlyingQuantity: Number(cycle.underlyingQuantity) || 0,
     hedgeEnabled: cycle.hedgeEnabled !== false,
     hedgeIntervalHours: Math.max(1, Number(cycle.hedgeIntervalHours) || 24),
-    hedgeDeltaTolerance: Math.max(0, Number(cycle.hedgeDeltaTolerance) || 0),
+    hedgeMode: cycle.hedgeMode === "tolerance" ? "tolerance" : "time",
+    hedgeDeltaTolerance: Number(cycle.hedgeDeltaTolerance) > 0 ? Number(cycle.hedgeDeltaTolerance) : 0.05,
+    optionQuantityBtc: Number(cycle.optionQuantityBtc) > 0
+      ? Number(cycle.optionQuantityBtc) : Math.abs(legs[0]?.quantity || 1),
     hedgeCostBps: Math.max(0, Number(cycle.hedgeCostBps) || 0),
     entryPortfolioDelta,
     actualPnlByMode: {
@@ -221,7 +225,7 @@ const portfolioDeltaAt = (cycle, spot, ts) => cycle.legs.reduce((total, leg) =>
 
 const buildSimulationTimes = (cycle) => {
   const holdingSeconds = cycle.exitTs - cycle.entryTs;
-  const intervalSeconds = cycle.hedgeIntervalHours * 3_600;
+  const intervalSeconds = (cycle.hedgeMode === "tolerance" ? 1 : cycle.hedgeIntervalHours) * 3_600;
   const times = new Set([holdingSeconds]);
   for (let elapsed = intervalSeconds; elapsed < holdingSeconds; elapsed += intervalSeconds) {
     times.add(elapsed);
@@ -250,7 +254,39 @@ export const generateGbmPath = ({
   });
 };
 
+// Simulated paths provide hourly endpoints only. Use their endpoint ranges
+// with the same trigger policy; they omit historical intrahour excursions.
+const toleranceHedgePnl = ({ cycle, path }) => {
+  const replay = createHedgeReplay({
+    plan: { ...cycle, entryTime: new Date(cycle.entryTs * 1000), exitTime: new Date(cycle.exitTs * 1000) },
+    config: { hedgeEnabled: true, hedgeMode: "tolerance", hedgeDeltaTolerance: cycle.hedgeDeltaTolerance },
+  });
+  const points = [{ ts: cycle.entryTs, spot: cycle.entrySpot }, ...path];
+  let pnl = 0;
+  let costs = 0;
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index];
+    const next = points[index + 1];
+    const gamma = point.ts < cycle.exitTs ? cycle.legs.reduce((sum, leg) => sum + leg.quantity * blackScholesGreeks({
+      spot: point.spot, strike: leg.strike,
+      yearsToExpiry: (leg.expirationTs - point.ts) / SECONDS_PER_YEAR,
+      impliedVol: cycle.sigma, optionType: leg.optionType,
+    }).gamma, 0) : 0;
+    const step = replay({ ts: point.ts, indexPrice: point.spot,
+      high: Math.max(point.spot, next?.spot ?? point.spot),
+      low: Math.min(point.spot, next?.spot ?? point.spot),
+    }, {
+      delta: index === 0 ? cycle.entryPortfolioDelta : portfolioDeltaAt(cycle, point.spot, point.ts),
+      gamma,
+    });
+    pnl = step.hedgePnlUsd;
+    costs += step.hedgeTrades.reduce((sum, trade) => sum + trade.quantity * trade.price * cycle.hedgeCostBps / 10_000, 0);
+  }
+  return pnl - costs;
+};
+
 const dynamicHedgePnl = ({ cycle, path }) => {
+  if (cycle.hedgeMode === "tolerance") return toleranceHedgePnl({ cycle, path });
   const intervalSeconds = cycle.hedgeIntervalHours * 3_600;
   let hedgeQuantity = -cycle.entryPortfolioDelta;
   let previousSpot = cycle.entrySpot;
@@ -265,7 +301,6 @@ const dynamicHedgePnl = ({ cycle, path }) => {
     if (!isExit && !isScheduled) continue;
     const targetQuantity = isExit ? 0 : -portfolioDeltaAt(cycle, point.spot, point.ts);
     const tradeQuantity = targetQuantity - hedgeQuantity;
-    if (!isExit && Math.abs(tradeQuantity) < cycle.hedgeDeltaTolerance) continue;
     costs += Math.abs(tradeQuantity) * point.spot * cycle.hedgeCostBps / 10_000;
     hedgeQuantity = targetQuantity;
   }
@@ -734,12 +769,16 @@ export const runFairValueMonteCarlo = async ({
   // Follow the strategy run settings: only simulate the hedge mode used in the backtest.
   const defaultHedgeMode = states.some((cycle) => cycle.hedgeEnabled) ? "dynamic" : "unhedged";
   const hedgeModes = [defaultHedgeMode];
+  const toleranceMode = states.some(cycle => cycle.hedgeEnabled && cycle.hedgeMode === "tolerance");
+  const pathGrid = toleranceMode
+    ? "hourly endpoint ranges with nearest-trigger-first delta/gamma fills, at most two hedges per hour; no simulated intrahour extrema"
+    : null;
   const returnNull = calibration
     ? {
         type: "calibrated-bates-drift-mixture",
         conditionalCycles: states.length,
         volatility: "Heston variance dynamics scaled to each cycle's entry ATM IV budget",
-        pathGrid: "hourly path with the configured hedge schedule",
+        pathGrid: pathGrid || "hourly path with the configured hedge schedule",
         realizedVariance: "expected diffusion plus jump QV equals entry ATM IV squared times T",
         annualDriftVariants: [...ANNUAL_DRIFT_VARIANTS],
         entryCashflow: "observed strategy premium",
@@ -755,7 +794,7 @@ export const runFairValueMonteCarlo = async ({
         type: "conditional-gbm-drift-mixture",
         conditionalCycles: states.length,
         volatility: "each cycle's entry IV",
-        pathGrid: "scheduled hedge times and exit",
+        pathGrid: pathGrid || "scheduled hedge times and exit",
         realizedVariance: "unconstrained finite-sample GBM realization",
         annualDriftVariants: [...ANNUAL_DRIFT_VARIANTS],
         entryCashflow: "observed strategy premium",

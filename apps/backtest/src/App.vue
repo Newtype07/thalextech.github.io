@@ -221,6 +221,8 @@ const HEDGE_FREQUENCY_OPTIONS = [
   { value: 24, label: "24h" },
 ];
 
+const HEDGE_TOLERANCE_OPTIONS = [0.01, ...Array.from({ length: 10 }, (_, index) => (index + 1) / 20)];
+
 const ui = reactive({
   structure: "straddle",
   maturityDays: DEFAULT_MATURITY_DAYS,
@@ -230,12 +232,21 @@ const ui = reactive({
   entryHourUtc: 8,
   hedgeEnabled: true,
   hedgeIntervalHours: 24,
+  hedgeMode: "time",
+  hedgeDeltaTolerance: 0.05,
   exitMode: "after_days",
   exitHoldDays: 7,
   exitWeekday: 0,
   exitHourUtc: 20,
   longOption: false,
   investmentMode: "notional",
+});
+
+const hedgeToleranceIndex = computed({
+  get: () => HEDGE_TOLERANCE_OPTIONS.reduce((nearest, tolerance, index) =>
+    Math.abs(tolerance - ui.hedgeDeltaTolerance)
+      < Math.abs(HEDGE_TOLERANCE_OPTIONS[nearest] - ui.hedgeDeltaTolerance) ? index : nearest, 0),
+  set: (index) => { ui.hedgeDeltaTolerance = HEDGE_TOLERANCE_OPTIONS[Number(index)]; },
 });
 
 const maxExitHoldDays = computed(() => {
@@ -734,6 +745,7 @@ const SWEEP_DIMENSIONS = [
   { value: "entry_weekday", label: "Day of week" },
   { value: "maturity", label: "Maturity" },
   { value: "hedge_frequency", label: "Hedge frequency" },
+  { value: "hedge_tolerance", label: "Hedge tolerance" },
   { value: "delta_band", label: "Strike delta" },
 ];
 
@@ -741,7 +753,7 @@ const availableSweepDimensions = computed(() =>
   SWEEP_DIMENSIONS.filter(
     (dimension) => (dimension.value !== "delta_band" || showDelta.value)
       && (dimension.value !== "entry_weekday" || Number(ui.maturityDays) !== 1)
-      && (dimension.value !== "hedge_frequency" || ui.structure !== "covered_call"),
+      && (!["hedge_frequency", "hedge_tolerance"].includes(dimension.value) || ui.structure !== "covered_call"),
   ),
 );
 const sweepDimensionLabel = computed(
@@ -789,7 +801,7 @@ const requiredHours = computed(() =>
   ui.structure === "covered_call" ? Array.from({ length: 24 }, (_, hour) => hour) : hoursFor(
     ui.entryHourUtc,
     ui.hedgeEnabled,
-    ui.hedgeIntervalHours,
+    ui.hedgeMode === "tolerance" ? 1 : ui.hedgeIntervalHours,
     ui.exitMode === "weekly_schedule" ? ui.exitHourUtc : null,
     ui.exitMode === "after_days",
   ),
@@ -843,7 +855,14 @@ const sweepConfigs = computed(() => {
     return HEDGE_FREQUENCY_OPTIONS.map((frequency) => ({
       key: `hedge-${frequency.value}`,
       label: frequency.label,
-      overrides: { hedgeEnabled: true, hedgeIntervalHours: frequency.value },
+      overrides: { hedgeEnabled: true, hedgeMode: "time", hedgeIntervalHours: frequency.value },
+    }));
+  }
+  if (sweepDimension.value === "hedge_tolerance") {
+    return HEDGE_TOLERANCE_OPTIONS.map(tolerance => ({
+      key: `tolerance-${tolerance}`,
+      label: `±${tolerance}`,
+      overrides: { hedgeEnabled: true, hedgeMode: "tolerance", hedgeDeltaTolerance: tolerance },
     }));
   }
   if (!showDelta.value) return [];
@@ -973,7 +992,9 @@ const strategyLabels = computed(() => {
     weekday: weekday.label,
     hedge: ui.structure === "covered_call" ? "Fixed underlying" : !ui.hedgeEnabled
       ? "Off"
-      : ui.hedgeIntervalHours === 24
+      : ui.hedgeMode === "tolerance"
+        ? `Delta ±${ui.hedgeDeltaTolerance}`
+        : ui.hedgeIntervalHours === 24
         ? `Daily ${hour}:00`
         : `Every ${ui.hedgeIntervalHours}h`,
     exit:
@@ -984,8 +1005,19 @@ const strategyLabels = computed(() => {
           : `Roll every ${ui.exitHoldDays}D`,
     chart: ui.structure === "covered_call"
       ? chartStrategy
-      : `${chartStrategy}, ${ui.hedgeEnabled ? `hedged every ${ui.hedgeIntervalHours}h` : "unhedged"}`,
+      : `${chartStrategy}, ${ui.hedgeEnabled ? (ui.hedgeMode === "tolerance" ? `delta tolerance ±${ui.hedgeDeltaTolerance}` : `hedged every ${ui.hedgeIntervalHours}h`) : "unhedged"}`,
   };
+});
+
+const hedgeDiagnostics = computed(() => {
+  if (result.value?.cycleSummary?.[0]?.hedgeMode !== "tolerance") return "";
+  const cycles = result.value?.cycleSummary || [];
+  const total = key => cycles.reduce((sum, cycle) => sum + (Number(cycle[key]) || 0), 0);
+  const messages = [];
+  if (total("missingHedgeRangeBars")) messages.push(`${total("missingHedgeRangeBars")} hours without usable high/low for trigger execution.`);
+  if (total("missingHedgeRiskBars")) messages.push(`${total("missingHedgeRiskBars")} hours without usable opening delta/gamma.`);
+  if (total("hedgeDataGapCount")) messages.push(`${total("hedgeDataGapCount")} gaps in hourly observations.`);
+  return messages.join(" ");
 });
 
 // Single-run performance metrics
@@ -1169,6 +1201,8 @@ const buildConfig = (overrides = {}) => {
     hourlyOffset: Number(ui.entryHourUtc),
     hedgeEnabled: ui.hedgeEnabled,
     hedgeIntervalHours: Number(ui.hedgeIntervalHours),
+    hedgeMode: ui.hedgeMode,
+    hedgeDeltaTolerance: Number(ui.hedgeDeltaTolerance),
     exitMode: ui.exitMode,
     exitHoldDays: Number(ui.exitHoldDays),
     exitWeekday: Number(ui.exitWeekday),
@@ -1211,7 +1245,7 @@ const runSweep = async () => {
         config.structure === "covered_call" ? Array.from({ length: 24 }, (_, hour) => hour) : hoursFor(
           config.entryHourUtc,
           config.hedgeEnabled,
-          config.hedgeIntervalHours,
+          config.hedgeMode === "tolerance" ? 1 : config.hedgeIntervalHours,
           config.exitMode === "weekly_schedule" ? config.exitHourUtc : null,
           config.exitMode === "after_days",
         ),
@@ -1244,6 +1278,9 @@ const runSweep = async () => {
       return {
         ...cell,
         config: thisConfig,
+        hedgePathScenarios: run.summary.hedgePathScenarios,
+        missingHedgeRiskBars: run.cycleSummary.reduce((sum, cycle) => sum + cycle.missingHedgeRiskBars, 0),
+        hedgeDataGapCount: run.cycleSummary.reduce((sum, cycle) => sum + cycle.hedgeDataGapCount, 0),
         sharpe: run.summary.sharpeRatio,
         pnl: run.summary.finalEquityUsd,
         optionPnl: run.summary.cumulativeOptionPnlUsd,
@@ -1330,7 +1367,12 @@ const applySweepResult = (cell) => {
     ui.maturityDays = cell.maturityValue;
   } else if (sweepDimension.value === "hedge_frequency") {
     ui.hedgeEnabled = true;
+    ui.hedgeMode = "time";
     ui.hedgeIntervalHours = cell.config.hedgeIntervalHours;
+  } else if (sweepDimension.value === "hedge_tolerance") {
+    ui.hedgeEnabled = true;
+    ui.hedgeMode = "tolerance";
+    ui.hedgeDeltaTolerance = cell.config.hedgeDeltaTolerance;
   } else if (sweepDimension.value === "delta_band") {
     ui.targetDelta = cell.config.targetDelta;
   }
@@ -1529,10 +1571,13 @@ const handleCycleSelect = async (cycle) => {
   cycleDetailError.value = "";
   const detailSequence = ++currentCycleDetailSequence;
   const cacheKey = [
+    underlying.value,
     cycle.entryTs,
     cycle.exitTs,
     cycle.hedgeEnabled,
     cycle.hedgeIntervalHours,
+    cycle.hedgeMode,
+    cycle.hedgeDeltaTolerance,
   ].join("|");
   if (cycleDetailCache.has(cacheKey)) {
     const cached = cycleDetailCache.get(cacheKey);
@@ -1545,6 +1590,10 @@ const handleCycleSelect = async (cycle) => {
   cycleDetailRows.value = [];
   try {
     const config = buildConfig({
+      hedgeEnabled: cycle.hedgeEnabled,
+      hedgeMode: cycle.hedgeMode,
+      hedgeIntervalHours: cycle.hedgeIntervalHours,
+      hedgeDeltaTolerance: cycle.hedgeDeltaTolerance,
       start: new Date((cycle.holdingStartTs ?? cycle.entryTs) * 1000),
       end: new Date((cycle.holdingEndTs ?? cycle.exitTs) * 1000),
     });
@@ -1671,6 +1720,8 @@ watch(
     ui.entryHourUtc,
     ui.hedgeEnabled,
     ui.hedgeIntervalHours,
+    ui.hedgeMode,
+    ui.hedgeDeltaTolerance,
     ui.exitMode,
     ui.exitHoldDays,
     ui.exitWeekday,
@@ -1683,7 +1734,7 @@ watch(
       ui.longOption = false;
       ui.hedgeEnabled = false;
       ui.investmentMode = "btc";
-      if (sweepDimension.value === "hedge_frequency") sweepDimension.value = "entry_hour";
+      if (["hedge_frequency", "hedge_tolerance"].includes(sweepDimension.value)) sweepDimension.value = "entry_hour";
     }
     if (isVerticalSpread.value) {
       if (Number(ui.targetDelta) <= 0.05) ui.targetDelta = 0.1;
@@ -1718,6 +1769,8 @@ watch(
       ui.entryHourUtc,
       ui.hedgeEnabled,
       ui.hedgeIntervalHours,
+      ui.hedgeMode,
+      ui.hedgeDeltaTolerance,
       ui.exitMode,
       ui.exitHoldDays,
       ui.exitWeekday,
@@ -2130,27 +2183,47 @@ onMounted(loadBacktest);
                 <span class="toggle-slider"></span>
               </label>
             </div>
-            <label class="freq-row__label" for="freq">Frequency</label>
-            <input
-              id="freq"
-              class="freq-slider"
-              type="range"
-              min="1"
-              max="24"
-              step="1"
-              :value="ui.hedgeIntervalHours"
-              @input="updateHedgeInterval(Number($event.target.value))"
-              :style="{ '--pct': hedgePct }"
-              :disabled="!ui.hedgeEnabled"
-              @change="openMenu = null"
-            />
-            <div class="freq-footer">
-              <span class="freq-footer__edge">1h</span>
-              <span class="freq-footer__value"
-                >Every {{ ui.hedgeIntervalHours }}h</span
-              >
-              <span class="freq-footer__edge">24h</span>
+            <div v-if="ui.structure !== 'covered_call'" class="hedge-mode-choices">
+              <button type="button" :class="{ active: ui.hedgeMode === 'time' }" :disabled="!ui.hedgeEnabled" @click="ui.hedgeMode = 'time'">Time-based</button>
+              <button type="button" :class="{ active: ui.hedgeMode === 'tolerance' }" :disabled="!ui.hedgeEnabled" @click="ui.hedgeMode = 'tolerance'">Delta tolerance</button>
             </div>
+            <template v-if="ui.hedgeMode === 'time' || ui.structure === 'covered_call'">
+              <label class="freq-row__label" for="freq">Frequency</label>
+              <input
+                id="freq"
+                class="freq-slider"
+                type="range"
+                min="1"
+                max="24"
+                step="1"
+                :value="ui.hedgeIntervalHours"
+                @input="updateHedgeInterval(Number($event.target.value))"
+                :style="{ '--pct': hedgePct }"
+                :disabled="!ui.hedgeEnabled"
+                @change="openMenu = null"
+              />
+              <div class="freq-footer">
+                <span class="freq-footer__edge">1h</span>
+                <span class="freq-footer__value"
+                  >Every {{ ui.hedgeIntervalHours }}h</span
+                >
+                <span class="freq-footer__edge">24h</span>
+              </div>
+            </template>
+            <template v-else>
+              <label class="freq-row__label" for="hedge-tolerance">Delta tolerance</label>
+              <input id="hedge-tolerance" class="freq-slider" type="range" min="0" :max="HEDGE_TOLERANCE_OPTIONS.length - 1" step="1"
+                v-model.number="hedgeToleranceIndex" :disabled="!ui.hedgeEnabled"
+                :aria-valuetext="`Delta tolerance ±${ui.hedgeDeltaTolerance}`"
+                :style="{ '--pct': `${hedgeToleranceIndex / (HEDGE_TOLERANCE_OPTIONS.length - 1) * 100}%` }" />
+              <div class="freq-footer">
+                <span class="freq-footer__edge">0.01</span>
+                <span class="freq-footer__value">±{{ ui.hedgeDeltaTolerance }}</span>
+                <span class="freq-footer__edge">0.5</span>
+              </div>
+              <p class="hedge-model-note">Opening delta, gamma, and the existing hedge set spot-price limits. Assume the nearer touched limit fills first, flatten delta there, then recalculate the opposite limit and check the other extreme. Each hedge — at open or intrabar — flattens net delta to zero rather than returning to the band edge. Equal distances use the lower-price limit first. Maximum two hedge trades per hour, including any opening hedge.</p>
+              <p v-if="hedgeDiagnostics" class="hedge-model-note">{{ hedgeDiagnostics }}</p>
+            </template>
           </div>
         </div>
 
@@ -4198,6 +4271,12 @@ onMounted(loadBacktest);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
+
+.hedge-mode-choices { display: flex; gap: 6px; margin-bottom: 14px; }
+.hedge-mode-choices button { flex: 1; border: 1px solid #444; border-radius: 5px; background: #222; color: #bbb; padding: 7px; cursor: pointer; font: inherit; }
+.hedge-mode-choices button.active { border-color: #7dd3fc; color: #7dd3fc; }
+.hedge-mode-choices button:disabled { opacity: 0.5; cursor: not-allowed; }
+.hedge-model-note { max-width: 250px; color: #aaa; font-size: 11px; line-height: 1.5; margin: 12px 0 0; }
 
 /* More padding below toggle and slider */
 .freq-toggle-row {

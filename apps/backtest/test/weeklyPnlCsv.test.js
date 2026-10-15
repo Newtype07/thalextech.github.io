@@ -128,3 +128,27 @@ test("ETH exports name underlying-unit columns without BTC leakage", () => {
   assert.equal(row.sizing_mode, "eth");
   assert.equal("configured_btc_quantity" in row, false);
 });
+
+
+test("tolerance exports distinguish primary execution from intrahour scenarios", () => {
+  const [row] = buildWeeklyPnlExportRows([{ ...cycle, hedgeEnabled: true,
+    hedgeMode: "tolerance", hedgeDeltaTolerance: 0.025, hedgeIntervalHours: 24,
+    hedgeModel: "nearest_trigger_two_trade",
+    hedgePathScenarios: {
+      high_first: { hedgePnlUsd: 20, ambiguousBars: 3, missingRangeBars: 2, missingRiskBars: 1 },
+      low_first: { hedgePnlUsd: -10, ambiguousBars: 4, missingRangeBars: 2, missingRiskBars: 1 },
+    },
+    hedgeTradeCount: 12, ambiguousHedgeBars: 0, missingHedgeRangeBars: 0,
+    missingHedgeRiskBars: 1, hedgeDataGapCount: 1,
+  }]);
+  assert.equal(row.hedge_mode, "tolerance");
+  assert.equal(row.hedge_delta_tolerance, 0.025);
+  assert.equal(row.hedge_interval_hours, "");
+  assert.equal(row.hedge_trade_count, 12);
+  assert.equal(row.hedge_model, "nearest_trigger_two_trade");
+  assert.equal(row.intrahour_high_first_ambiguous_hours, 3);
+  assert.equal(row.intrahour_low_first_ambiguous_hours, 4);
+  assert.equal(row.intrahour_high_first_total_pnl_usd, cycle.shortOptionPnlUsd + 20);
+  assert.equal(row.intrahour_low_first_total_pnl_usd, cycle.shortOptionPnlUsd - 10);
+  assert.equal("ambiguous_hedge_hours_skipped" in row, false);
+});

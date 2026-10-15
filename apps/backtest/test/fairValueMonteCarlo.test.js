@@ -1,4 +1,5 @@
 import test from "node:test";
+import { blackScholesDelta } from "../src/lib/optionRisk.js";
 import assert from "node:assert/strict";
 import {
   buildFairValueCycleState,
@@ -361,4 +362,58 @@ test('covered call conditional benchmark excludes uncovered gains from observed 
   cycle.cyclePnlUsd = 20_625;
   const state = buildFairValueCycleState(cycle);
   assert.equal(state.actualPnlByMode.unhedged, 625);
+});
+
+
+test("tolerance simulations use hourly triggers independently of the configured time interval", () => {
+  const raw = { ...buildCycle(), hedgeMode: "tolerance", hedgeDeltaTolerance: 0.05,
+    exitTime: new Date((entryTs + 3 * 3_600) * 1000) };
+  raw.legs = raw.legs.map(leg => ({ ...leg, expirationTs: entryTs + 3 * 3_600 }));
+  const hourly = buildFairValueCycleState({ ...raw, hedgeIntervalHours: 1 });
+  const daily = buildFairValueCycleState({ ...raw, hedgeIntervalHours: 24 });
+  assert.deepEqual(daily.simulationTimes, [3_600, 7_200, 10_800]);
+  assert.equal(daily.hedgeDeltaTolerance, 0.05);
+  assert.equal(daily.optionQuantityBtc, 0.5);
+  const first = simulateWeeklyCycleModes(hourly, () => 0.8);
+  const second = simulateWeeklyCycleModes(daily, () => 0.8);
+  assert.deepEqual(first, second);
+  const timed = simulateWeeklyCycleModes(buildFairValueCycleState({ ...raw, hedgeMode: "time" }), () => 0.8);
+  assert.notEqual(second.dynamic, timed.dynamic);
+  const wider = simulateWeeklyCycleModes(buildFairValueCycleState({ ...raw, hedgeDeltaTolerance: 0.4 }), () => 0.8);
+  assert.notEqual(second.dynamic, wider.dynamic);
+});
+
+test("long and short tolerance outcomes remain opposites before costs", () => {
+  const makeState = quantitySign => buildFairValueCycleState({
+    ...buildCycle({ quantitySign }), hedgeMode: "tolerance", hedgeDeltaTolerance: 0.05,
+  });
+  const short = simulateWeeklyCycleModes(makeState(-1), () => 0.2);
+  const long = simulateWeeklyCycleModes(makeState(1), () => 0.2);
+  assert.ok(Math.abs(short.dynamic + long.dynamic) < 1e-8);
+});
+
+
+test("Monte Carlo tolerance executes threshold fills rather than reverting to hourly-open fills", () => {
+  const state = buildFairValueCycleState({ ...buildCycle(), hedgeMode: "tolerance",
+    hedgeDeltaTolerance: 0.05 });
+  const path = generateGbmPath({ cycle: state, normalRandom: () => 0.8, annualDrift: 0 });
+  let quantity = -state.entryPortfolioDelta;
+  let previousSpot = state.entrySpot;
+  let hedgePnl = 0;
+  let trades = 0;
+  for (const point of path) {
+    hedgePnl += quantity * (point.spot - previousSpot);
+    const delta = point.ts === state.exitTs ? 0 : state.legs.reduce((sum, leg) => sum
+      + leg.quantity * blackScholesDelta({ spot: point.spot, strike: leg.strike,
+        yearsToExpiry: (leg.expirationTs - point.ts) / (365 * 86_400),
+        impliedVol: state.sigma, optionType: leg.optionType }), 0);
+    if (point.ts === state.exitTs || Math.abs(delta + quantity) >= state.hedgeDeltaTolerance * state.optionQuantityBtc) {
+      quantity = -delta;
+      trades += 1;
+    }
+    previousSpot = point.spot;
+  }
+  assert.ok(trades > 1);
+  const result = simulateWeeklyCycleModes(state, () => 0.8);
+  assert.ok(Math.abs(result.dynamic - result.unhedged - hedgePnl) > 1e-5);
 });

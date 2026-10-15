@@ -50,7 +50,7 @@ function loadShard(hour, bucketKey) {
  * Compute the set of hourly offsets needed for a given config (entry + hedge steps).
  */
 export function hoursForConfig(config) {
-  if (config.structure === "covered_call") return Array.from({ length: 24 }, (_, hour) => hour);
+  if (config.structure === "covered_call" || (config.hedgeEnabled !== false && config.hedgeMode === "tolerance")) return Array.from({ length: 24 }, (_, hour) => hour);
   const entry = Number(config.entryHourUtc ?? config.hourlyOffset ?? 8);
   const enabled = config.hedgeEnabled !== false;
   const interval = Math.max(1, Math.min(24, Math.round(Number(config.hedgeIntervalHours) || 24)));
@@ -227,6 +227,8 @@ Options (examples):
   --target-delta 0.25
   --wing-delta 0.10           (call/put spread outer strike)
   --hedge 24                  (hours, or 0/false to disable)
+  --hedge-mode tolerance      (time or tolerance; default time)
+  --hedge-delta-tolerance 0.05 (delta per unit of option position)
   --hold-to-expiry true
   --exit-hold-days 7
   --exit-mode weekly_schedule (after_days|weekly_schedule|expiry)
@@ -238,7 +240,7 @@ Options (examples):
   --btc-quantity 1
 
 Sweep mode:
-  --sweep entry_hour          (or entry_weekday, maturity, hedge_frequency, delta_band)
+  --sweep entry_hour          (or entry_weekday, maturity, hedge_frequency, hedge_tolerance, delta_band)
 
 Other:
   node scripts/run-backtest.mjs --sweep entry_hour --start 2025-07-01 --end 2025-10-01
@@ -265,6 +267,8 @@ async function main() {
     wingDelta: args.wingDelta,
     hedgeEnabled: args.hedge != null ? Number(args.hedge) > 0 : undefined,
     hedgeIntervalHours: args.hedge != null && Number(args.hedge) > 0 ? Number(args.hedge) : undefined,
+    hedgeMode: args.hedgeMode,
+    hedgeDeltaTolerance: args.hedgeDeltaTolerance,
     holdToExpiry: args.holdToExpiry,
     exitMode: args.exitMode,
     exitHoldDays: args.exitHoldDays,
@@ -290,7 +294,11 @@ async function main() {
         configs = Array.from({ length: 7 }, (_, w) => ({ ...overrides, entryWeekday: w }));
       } else if (args.sweep === "hedge_frequency") {
         const freqs = [1,2,3,4,6,8,12,24];
-        configs = freqs.map(f => ({ ...overrides, hedgeEnabled: true, hedgeIntervalHours: f }));
+        configs = freqs.map(f => ({ ...overrides, hedgeEnabled: true, hedgeMode: "time", hedgeIntervalHours: f }));
+      } else if (args.sweep === "hedge_tolerance") {
+        configs = [0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2].map(tolerance => ({
+          ...overrides, hedgeEnabled: true, hedgeMode: "tolerance", hedgeDeltaTolerance: tolerance,
+        }));
       } else {
         console.error("Sweep dimension not yet supported in CLI helper:", args.sweep);
         process.exit(1);
@@ -310,7 +318,7 @@ async function main() {
         const maxDD = computeMaxDrawdown(cycleRows);
         const label = args.sweep === "entry_hour" ? `${String(c.entryHourUtc).padStart(2,"0")}:00` :
                       args.sweep === "entry_weekday" ? ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][c.entryWeekday] :
-                      `hedge ${c.hedgeIntervalHours}h`;
+                      c.hedgeMode === "tolerance" ? `±${c.hedgeDeltaTolerance}` : `hedge ${c.hedgeIntervalHours}h`;
         const line = `${label.padEnd(10)} | ${s.finalEquityUsd.toFixed(0).padStart(7)} | ${(s.sharpeRatio||0).toFixed(2).padStart(6)} | ${maxDD.toFixed(0).padStart(7)} | ${String(r.result.counts.closedCycles).padStart(6)} | ${s.cumulativeOptionPnlUsd.toFixed(0).padStart(8)} | ${s.cumulativeHedgePnlUsd.toFixed(0).padStart(9)}`;
         console.log(line);
         const sharpe = s.sharpeRatio || 0;
@@ -332,7 +340,7 @@ async function main() {
       structure: config.structure,
       dte: config.targetDteDays,
       delta: config.targetDelta,
-      hedge: config.hedgeEnabled ? `${config.hedgeIntervalHours}h` : "off",
+      hedge: config.hedgeEnabled ? (config.hedgeMode === "tolerance" ? `delta ±${config.hedgeDeltaTolerance}` : `${config.hedgeIntervalHours}h`) : "off",
       exit: config.exitMode === "expiry"
         ? "to expiry"
         : config.exitMode === "weekly_schedule"

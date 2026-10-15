@@ -14,7 +14,7 @@ import {
   runWeeklyStraddleBacktest,
   runWeeklyStraddleBacktestBatch,
 } from "../src/lib/weeklyStraddleBacktest.js";
-import { PRECOMPUTED_DELTA_SCALE } from "../src/lib/optionRisk.js";
+import { blackScholesGreeks, PRECOMPUTED_DELTA_SCALE } from "../src/lib/optionRisk.js";
 
 const DAY_SECONDS = 86_400;
 
@@ -1088,4 +1088,111 @@ test('fixed-unit aggregate return uses the initial cycle investment', () => {
     config: { ...fixture.config, sizingMode: 'btc', btcQuantity: 1 } });
   assert.equal(result.summary.cumulativeReturnOnNotional,
     result.summary.finalEquityUsd / result.cycleSummary[0].investmentUsd);
+});
+
+
+const buildToleranceFixture = () => {
+  const { instruments, config: base } = buildParityFixture();
+  const entryTs = base.start.getTime() / 1000 + 8 * 3_600;
+  const exitTs = instruments[0].expirationTs;
+  const indexRows = [];
+  const quoteSnapshots = [];
+  for (let ts = entryTs; ts <= exitTs; ts += 3_600) {
+    const hour = (ts - entryTs) / 3_600;
+    const indexPrice = 100_000 + 400 * Math.sin(hour / 4);
+    indexRows.push({ ts, indexPrice, high: indexPrice + 1_000, low: indexPrice - 1, close: indexPrice });
+    if (ts === exitTs) continue;
+    quoteSnapshots.push([ts, instruments.map(instrument => {
+      const risk = blackScholesGreeks({
+        spot: indexPrice, strike: instrument.strike,
+        yearsToExpiry: (exitTs - ts) / (365 * DAY_SECONDS), impliedVol: 0.55,
+        optionType: instrument.optionType,
+      });
+      return [instrument.instrumentId, 4_000 - hour * 10, 0.55, Math.round(risk.delta * PRECOMPUTED_DELTA_SCALE)];
+    })]);
+  }
+  // Deliberately ambiguous, missing-range, and missing-risk hours.
+  indexRows[1].high += 10_000;
+  indexRows[1].low -= 10_000;
+  delete indexRows[2].high;
+  quoteSnapshots[3][1].pop();
+  return { instruments, indexRows, quoteSnapshots,
+    config: { ...base, hedgeMode: "tolerance", hedgeDeltaTolerance: 0.05 } };
+};
+
+test("tolerance summary, detail, execution ledger and attribution agree on hourly OHLC", () => {
+  const fixture = buildToleranceFixture();
+  const preparedData = prepareBacktestData(fixture);
+  const result = runWeeklyStraddleBacktest({ preparedData, config: fixture.config });
+  const cycle = result.cycleSummary[0];
+  const detailPrepared = prepareCycleDetailData({ ...fixture, plan: cycle });
+  const detail = buildCycleDetail({ plan: cycle, preparedData: detailPrepared, config: fixture.config });
+  const trades = detail.flatMap(row => row.hedgeTrades);
+  assert.ok(trades.some(trade => trade.intrabar));
+  assert.ok(detail.every(row => row.hedgeTrades.length <= 2));
+  assert.equal(cycle.hedgeTradeCount, trades.length);
+  assert.equal(cycle.ambiguousHedgeBars, detail.filter(row => row.ambiguousHedgeBar).length);
+  assert.ok(cycle.ambiguousHedgeBars > 0);
+  assert.equal(cycle.missingHedgeRangeBars, 1);
+  assert.ok(cycle.hedgePathScenarios.high_first.ambiguousBars > 0);
+  assert.equal(cycle.hedgePathScenarios.high_first.missingRangeBars, 1);
+  assert.equal(cycle.hedgePathScenarios.low_first.missingRangeBars, 1);
+  assert.equal(cycle.hedgePathScenarios.high_first.missingRiskBars, 1);
+  for (const path of ["high_first", "low_first"]) {
+    assert.ok(Math.abs(result.summary.hedgePathScenarios[path].pnlUsd
+      - cycle.shortOptionPnlUsd - cycle.hedgePathScenarios[path].hedgePnlUsd) < 1e-8);
+  }
+  assert.equal(cycle.missingHedgeRiskBars, 1);
+  assert.equal(cycle.sampledPathIntervalHours, 1);
+  assert.equal(cycle.hedgeAmbiguousBarPolicy, "nearest_first");
+  assert.equal(cycle.hedgeModel, "nearest_trigger_two_trade");
+  assert.ok(Math.abs(detail.at(-1).hedgePnlUsd - cycle.hedgePnlUsd) < 1e-9);
+  assert.ok(Math.abs(detail.at(-1).totalPnlUsd - cycle.cyclePnlUsd) < 1e-9);
+  const ledgerPnl = trades.reduce((sum, trade) => sum
+    + (trade.side === "buy" ? 1 : -1) * trade.quantity * (cycle.exitIndexPrice - trade.price), 0);
+  assert.ok(Math.abs(ledgerPnl - cycle.hedgePnlUsd) < 1e-8);
+  const attributed = runWeeklyStraddleBacktest({ preparedData,
+    config: { ...fixture.config, includeGreekAttribution: true } }).cycleSummary[0];
+  assert.ok(Math.abs(attributed.hedgePnlUsd - cycle.hedgePnlUsd) < 1e-9);
+  assert.ok(Math.abs(Object.values(attributed.greekPnl).reduce((sum, value) => sum + value, 0)
+    - cycle.cyclePnlUsd) < 1e-8);
+});
+
+test("tolerance runs ignore the time interval and a cached dataset respects the selected mode", () => {
+  const fixture = buildToleranceFixture();
+  const preparedData = prepareBacktestData(fixture);
+  const run = config => runWeeklyStraddleBacktest({ preparedData, config });
+  const first = run({ ...fixture.config, hedgeIntervalHours: 1 });
+  const second = run({ ...fixture.config, hedgeIntervalHours: 24 });
+  assert.equal(first.summary.cumulativeHedgePnlUsd, second.summary.cumulativeHedgePnlUsd);
+  const timed = run({ ...fixture.config, hedgeMode: "time" });
+  assert.notEqual(timed.summary.cumulativeHedgePnlUsd, second.summary.cumulativeHedgePnlUsd);
+  assert.deepEqual(run(fixture.config), second);
+});
+
+test("normalization defaults to scheduled hedging and a positive 0.05 tolerance", () => {
+  const defaults = normalizeBacktestConfig();
+  assert.equal(defaults.hedgeMode, "time");
+  assert.equal(defaults.hedgeDeltaTolerance, 0.05);
+  assert.equal(normalizeBacktestConfig({ hedgeMode: "tolerance", hedgeDeltaTolerance: "0.025" }).hedgeDeltaTolerance, 0.025);
+  for (const value of [0, -1, null, "", "invalid", Infinity]) {
+    assert.equal(normalizeBacktestConfig({ hedgeDeltaTolerance: value }).hedgeDeltaTolerance, 0.05);
+  }
+  assert.equal(normalizeBacktestConfig({ hedgeMode: "unknown" }).hedgeMode, "time");
+});
+
+
+test("tolerance primary uses OHLC trigger fills and reports missing ranges", () => {
+  const fixture = buildToleranceFixture();
+  const observed = runWeeklyStraddleBacktest(fixture);
+  const openingOnly = runWeeklyStraddleBacktest({ ...fixture,
+    indexRows: fixture.indexRows.map(({ ts, indexPrice }) => ({ ts, indexPrice })),
+  });
+  assert.notEqual(openingOnly.summary.cumulativeHedgePnlUsd, observed.summary.cumulativeHedgePnlUsd);
+  assert.ok(openingOnly.cycleSummary[0].missingHedgeRangeBars > 0);
+  for (const path of ["high_first", "low_first"]) {
+    const scenario = openingOnly.summary.hedgePathScenarios[path];
+    assert.ok(scenario.missingRangeBars > 0);
+    assert.equal(scenario.pnlUsd, openingOnly.summary.finalEquityUsd);
+  }
 });

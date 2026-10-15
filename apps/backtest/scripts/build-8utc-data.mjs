@@ -11,7 +11,7 @@ import {
   interpolateAtmIvWithDiagnostics,
 } from "../src/lib/atmIv.js";
 
-const ARTIFACT_VERSION = 3;
+const ARTIFACT_VERSION = 4;
 const ARTIFACT_SCHEMA = "thalex-option-backtest";
 const UNDERLYING = String(process.argv[2] || "BTC").toUpperCase();
 if (!["BTC", "ETH"].includes(UNDERLYING)) {
@@ -134,7 +134,7 @@ for (const filename of indexFiles) {
     const low = asNumber(row.index_price_low);
     const close = asNumber(row.index_price_close);
     if ([ts, open, high, low, close].every(Number.isFinite)) {
-      indexByHour.get(new Date(ts * 1000).getUTCHours())?.push([ts, open]);
+      indexByHour.get(new Date(ts * 1000).getUTCHours())?.push([ts, open, high, low, close]);
       indexOhlcByTs.set(ts, { ts, open, high, low, close });
     }
   }
@@ -389,7 +389,7 @@ for (const hour of hours) {
         minExclusive: bucket.minExclusive,
         maxInclusive: Number.isFinite(bucket.maxInclusive) ? bucket.maxInclusive : null,
       },
-      indexFields: ["ts", "indexPrice"],
+      indexFields: ["ts", "indexPrice", "high", "low", "close"],
       quoteFields: ["ts", "entries"],
       quoteEntryFields: ["instrumentId", "markPrice", "iv", "deltaScaled"],
       index,

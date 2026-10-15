@@ -4,7 +4,7 @@ import {
   OPTION_PRICING_DAYS_PER_YEAR,
   PRECOMPUTED_DELTA_SCALE,
 } from "./optionRisk.js";
-import { advanceHedgePosition, buildDecisionTimes } from "./hedgeLifecycle.js";
+import { createHedgeReplay, buildDecisionTimes } from "./hedgeLifecycle.js";
 import { assignCoveredCallHolding, extendCoveredCallDetail } from "./coveredCallHolding.js";
 import { mean, sampleStdDev } from "./statistics.js";
 
@@ -19,6 +19,8 @@ export const DEFAULT_BACKTEST_CONFIG = {
   entryWeekday: 5,
   hedgeEnabled: true,
   hedgeIntervalHours: 24,
+  hedgeMode: "time",
+  hedgeDeltaTolerance: 0.05,
   exitMode: "after_days",
   holdToExpiry: false,
   exitHoldDays: 7,
@@ -74,6 +76,10 @@ export const normalizeBacktestConfig = (input = {}) => {
     1,
     Math.min(24, Math.round(Number(config.hedgeIntervalHours) || 24)),
   );
+  config.hedgeMode = config.hedgeMode === "tolerance" ? "tolerance" : "time";
+  const tolerance = Number(config.hedgeDeltaTolerance);
+  config.hedgeDeltaTolerance = Number.isFinite(tolerance) && tolerance > 0
+    ? tolerance : DEFAULT_BACKTEST_CONFIG.hedgeDeltaTolerance;
   const requestedExitMode = input.exitMode;
   config.exitMode = ["after_days", "weekly_schedule", "expiry"].includes(requestedExitMode)
     ? requestedExitMode
@@ -440,6 +446,24 @@ const buildQuoteLookup = (quotes) => {
 const quoteAt = (quoteByTsInstrumentId, ts, instrumentId) =>
   quoteByTsInstrumentId.get(ts)?.get(instrumentId);
 
+const openingPortfolioRisk = (legQuotes, indexRow, includeGamma) => {
+  if (!legQuotes.every(({ quote }) => Number.isFinite(quote?.delta))) {
+    return { delta: Number.NaN, gamma: Number.NaN };
+  }
+  const delta = legQuotes.reduce((total, { leg, quote }) => total + leg.quantity * quote.delta, 0);
+  const gamma = includeGamma ? legQuotes.reduce((total, { leg, quote }) => {
+    const legGamma = Number.isFinite(quote.gamma) ? quote.gamma : blackScholesGreeks({
+      spot: indexRow.indexPrice,
+      strike: leg.strike,
+      yearsToExpiry: (leg.expirationTs - indexRow.ts) / (OPTION_PRICING_DAYS_PER_YEAR * 86_400),
+      impliedVol: quote.impliedVol,
+      optionType: leg.optionType,
+    }).gamma;
+    return total + leg.quantity * legGamma;
+  }, 0) : Number.NaN;
+  return { delta, gamma };
+};
+
 const buildQuoteGroups = (quotes) => {
   const quoteGroupsByEntry = new Map();
   const expiryGroupsByEntry = new Map();
@@ -580,6 +604,10 @@ const buildEntryPlan = ({
         entryWeekday: config.entryWeekday,
         hedgeEnabled: config.hedgeEnabled,
         hedgeIntervalHours: config.hedgeIntervalHours,
+        hedgeMode: config.hedgeMode,
+        hedgeDeltaTolerance: config.hedgeDeltaTolerance,
+        hedgeAmbiguousBarPolicy: "nearest_first",
+        hedgeModel: config.hedgeMode === "tolerance" ? "nearest_trigger_two_trade" : "scheduled",
         exitMode: config.exitMode,
         holdToExpiry: config.holdToExpiry,
         exitHoldDays: config.exitHoldDays,
@@ -637,16 +665,13 @@ const buildOptionCycleDetail = ({ plan, preparedData, config: inc = {} }) => {
     .filter((row) => row.ts >= plan.entryTs && row.ts <= plan.exitTs)
     .sort((a, b) => a.ts - b.ts);
   const quoteByTsInstrumentId = buildQuoteLookup(preparedData.quotes || []);
-  const decisionTimes = new Set(
-    buildDecisionTimes(plan, config).map((date) => date.getTime() / 1000),
-  );
+  const replayHedge = createHedgeReplay({ plan, config });
 
-  let hedgeQuantity = 0;
   let previousIndexPrice = null;
   let previousTs = null;
   let previousLegQuotes = null;
   let previousTotalPnlUsd = null;
-  let hedgePnlUsd = 0;
+  let previousHedgePnlUsd = 0;
   let cumulativeThetaPnlUsd = 0;
   let cumulativeGammaPnlUsd = 0;
   let cumulativeVegaPnlUsd = 0;
@@ -656,7 +681,6 @@ const buildOptionCycleDetail = ({ plan, preparedData, config: inc = {} }) => {
   let cumulativeResidualPnlUsd = 0;
 
   return indexRows.map((indexRow) => {
-    const isExit = indexRow.ts === plan.exitTs;
     const legQuotes = plan.legs.map((leg) => {
       const quote = quoteAt(quoteByTsInstrumentId, indexRow.ts, leg.instrumentId);
       if (!quote || Number.isFinite(quote.gamma) && Number.isFinite(quote.vanna)) {
@@ -673,35 +697,10 @@ const buildOptionCycleDetail = ({ plan, preparedData, config: inc = {} }) => {
       });
       return { leg, quote: { ...risk, ...quote } };
     });
-    const intervalHedgeQuantity = hedgeQuantity;
-
-    const optionDeltaBtc = isExit
-      ? 0
-      : legQuotes.every(({ quote }) => Number.isFinite(quote?.delta))
-        ? legQuotes.reduce(
-            (delta, { leg, quote }) => delta + leg.quantity * quote.delta,
-            0,
-          )
-        : Number.NaN;
-    let targetHedgeQuantity = hedgeQuantity;
-    if (plan.underlyingQuantity > 0) {
-      targetHedgeQuantity = isExit ? 0 : plan.underlyingQuantity;
-    } else if (config.hedgeEnabled && decisionTimes.has(indexRow.ts)) {
-      const hasDeltas = isExit || Number.isFinite(optionDeltaBtc);
-      targetHedgeQuantity = hasDeltas
-        ? (isExit ? 0 : -optionDeltaBtc)
-        : hedgeQuantity;
-    }
-    const hedgeState = advanceHedgePosition({
-      quantity: hedgeQuantity,
-      previousPrice: previousIndexPrice,
-      pnlUsd: hedgePnlUsd,
-      indexPrice: indexRow.indexPrice,
-      targetQuantity: targetHedgeQuantity,
-    });
-    hedgeQuantity = hedgeState.quantity;
-    hedgePnlUsd = hedgeState.pnlUsd;
-    const hedgeTrade = hedgeState.trade;
+    const hedgeStep = replayHedge(indexRow, openingPortfolioRisk(
+      legQuotes, indexRow, config.hedgeMode === "tolerance",
+    ));
+    const { hedgePnlUsd } = hedgeStep;
 
     const legMarks = legQuotes.map(({ leg, quote }) => {
       const expiresNow = indexRow.ts === leg.expirationTs;
@@ -742,7 +741,8 @@ const buildOptionCycleDetail = ({ plan, preparedData, config: inc = {} }) => {
           (delta, leg, index) => delta + leg.quantity * previousLegQuotes[index].delta,
           0,
         );
-        deltaPnlIncrementUsd = (previousOptionDeltaBtc + intervalHedgeQuantity) * dS;
+        deltaPnlIncrementUsd = previousOptionDeltaBtc * dS
+          + hedgePnlUsd - previousHedgePnlUsd;
       }
       plan.legs.forEach((leg, index) => {
         const previousQuote = previousLegQuotes[index];
@@ -786,6 +786,7 @@ const buildOptionCycleDetail = ({ plan, preparedData, config: inc = {} }) => {
     previousTs = indexRow.ts;
     previousLegQuotes = legQuotes.map(({ quote }) => quote);
     previousTotalPnlUsd = totalPnlUsd;
+    previousHedgePnlUsd = hedgePnlUsd;
     return {
       ts: indexRow.ts,
       dateTime: new Date(indexRow.ts * 1000),
@@ -802,8 +803,7 @@ const buildOptionCycleDetail = ({ plan, preparedData, config: inc = {} }) => {
       cumulativeVolgaPnlUsd,
       cumulativeNetDeltaMtmUsd,
       cumulativeResidualPnlUsd,
-      hedgeQuantity,
-      hedgeTrade,
+      ...hedgeStep,
     };
   });
 };
@@ -1064,19 +1064,29 @@ const buildPathMetricsByCycle = ({
     // distribution benchmark only consumes the resulting cycle state, not the
     // historical path itself.
     const pathIntervalHours = config.hedgeEnabled
-      ? config.hedgeIntervalHours
+      ? (config.hedgeMode === "tolerance" ? 1 : config.hedgeIntervalHours)
       : 24;
     const decisions = buildDecisionTimes(plan, {
       ...config,
       hedgeIntervalHours: pathIntervalHours,
     });
-    let hedgeState = { quantity: 0, previousPrice: null, pnlUsd: 0 };
+    const replayHedge = createHedgeReplay({ plan, config });
+    const scenarioReplays = config.hedgeEnabled && config.hedgeMode === "tolerance"
+      ? ["high_first", "low_first"].map(intrabarPath => ({
+          path: intrabarPath, replay: createHedgeReplay({ plan, config, intrabarPath }),
+          hedgePnlUsd: 0, ambiguousBars: 0, missingRangeBars: 0, missingRiskBars: 0,
+        })) : [];
+    let hedgePnlUsd = 0;
+    let hedgeTradeCount = 0;
+    let ambiguousHedgeBars = 0;
+    let missingHedgeRangeBars = 0;
+    let missingHedgeRiskBars = 0;
+    let hedgeDataGapCount = 0;
     let previousSamplePrice = null;
     let sampledRealizedVariance = 0;
     let sampledReturnCount = 0;
     for (const ht of decisions) {
       const ts = ht.getTime() / 1000;
-      const isExit = ts === plan.exitTs;
       const idx = indexMap.get(ts);
       const indexPrice = idx?.indexPrice;
       if (Number.isFinite(indexPrice) && indexPrice > 0) {
@@ -1089,24 +1099,28 @@ const buildPathMetricsByCycle = ({
       } else {
         previousSamplePrice = null;
       }
-      if (!config.hedgeEnabled) continue;
-      const legQuotes = plan.legs.map((leg) => ({
-        leg,
-        quote: quoteAt(qmap, ts, leg.instrumentId),
-      }));
-      const has = isExit || legQuotes.every(({ quote }) => Number.isFinite(quote?.delta));
-      const od = has
-        ? (isExit ? 0 : legQuotes.reduce(
-            (delta, { leg, quote }) => delta + leg.quantity * quote.delta,
-            0,
-          ))
-        : null;
-      const targetQuantity = has ? -od : hedgeState.quantity;
-      hedgeState = advanceHedgePosition({
-        ...hedgeState,
-        indexPrice,
-        targetQuantity,
-      });
+    }
+    const hedgeRows = config.hedgeMode === "tolerance" && config.hedgeEnabled
+      ? indexRows.filter(row => row.ts >= plan.entryTs && row.ts <= plan.exitTs).sort((a, b) => a.ts - b.ts)
+      : decisions.map(date => indexMap.get(date.getTime() / 1000)).filter(Boolean);
+    for (const row of hedgeRows) {
+      if (!config.hedgeEnabled) break;
+      const legQuotes = plan.legs.map(leg => ({ leg, quote: quoteAt(qmap, row.ts, leg.instrumentId) }));
+      const risk = openingPortfolioRisk(legQuotes, row, config.hedgeMode === "tolerance");
+      const step = replayHedge(row, risk);
+      for (const scenario of scenarioReplays) {
+        const alternative = scenario.replay(row, risk);
+        scenario.hedgePnlUsd = alternative.hedgePnlUsd;
+        scenario.ambiguousBars += Number(Boolean(alternative.ambiguousHedgeBar));
+        scenario.missingRangeBars += Number(Boolean(alternative.missingHedgeRange));
+        scenario.missingRiskBars += Number(Boolean(alternative.missingHedgeRisk));
+      }
+      hedgePnlUsd = step.hedgePnlUsd;
+      hedgeTradeCount += step.hedgeTrades.length;
+      ambiguousHedgeBars += Number(Boolean(step.ambiguousHedgeBar));
+      missingHedgeRangeBars += Number(Boolean(step.missingHedgeRange));
+      missingHedgeRiskBars += Number(Boolean(step.missingHedgeRisk));
+      hedgeDataGapCount += Number(Boolean(step.dataGap));
     }
     const holdingYears = (plan.exitTime.getTime() - plan.entryTime.getTime()) /
       (365 * 86_400_000);
@@ -1118,6 +1132,16 @@ const buildPathMetricsByCycle = ({
           : Number.NaN,
       sampledReturnCount,
       sampledPathIntervalHours: pathIntervalHours,
+      hedgeTradeCount,
+      ambiguousHedgeBars,
+      missingHedgeRangeBars,
+      missingHedgeRiskBars,
+      hedgeDataGapCount,
+      hedgePathScenarios: scenarioReplays.length ? Object.fromEntries(scenarioReplays.map(scenario =>
+        [scenario.path, {
+          hedgePnlUsd: scenario.hedgePnlUsd, ambiguousBars: scenario.ambiguousBars,
+          missingRangeBars: scenario.missingRangeBars, missingRiskBars: scenario.missingRiskBars,
+        }])) : null,
     });
     // The fixed underlying is carried for the entire cycle, without rebalancing.
     const underlyingPnl = plan.underlyingQuantity > 0
@@ -1125,7 +1149,7 @@ const buildPathMetricsByCycle = ({
           (plan.holdingEndPrice ?? indexMap.get(plan.exitTs)?.indexPrice)
           - (plan.holdingStartPrice ?? plan.entryIndexPrice))
       : 0;
-    hedgePnlByCycle.set(plan.cycle, hedgeState.pnlUsd + underlyingPnl);
+    hedgePnlByCycle.set(plan.cycle, hedgePnlUsd + underlyingPnl);
   }
   return { hedgePnlByCycle, realizedMetricsByCycle };
 };
@@ -1395,6 +1419,14 @@ export const runWeeklyStraddleBacktest = ({
       finalEquityUsd,
       initialInvestmentUsd,
       cumulativeReturnOnNotional: finalEquityUsd / initialInvestmentUsd,
+      hedgePathScenarios: c.hedgeEnabled && c.hedgeMode === "tolerance" && closedCycles.length
+        ? Object.fromEntries(["high_first", "low_first"].map(path => [path, {
+            pnlUsd: closedCycles.reduce((sum, cycle) => sum + cycle.shortOptionPnlUsd
+              + cycle.hedgePathScenarios[path].hedgePnlUsd, 0),
+            ambiguousBars: closedCycles.reduce((sum, cycle) => sum + cycle.hedgePathScenarios[path].ambiguousBars, 0),
+            missingRangeBars: closedCycles.reduce((sum, cycle) => sum + cycle.hedgePathScenarios[path].missingRangeBars, 0),
+            missingRiskBars: closedCycles.reduce((sum, cycle) => sum + cycle.hedgePathScenarios[path].missingRiskBars, 0),
+          }])) : null,
       annualizedMeanReturn,
       annualizedReturnVolatility,
       sharpeRatio:

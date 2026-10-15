@@ -141,7 +141,9 @@ const draw = () => {
   const showContourOverlay = breakEvenMode.value === "cones" && baseContourRows.length > 0;
   // Include zero-MTM topology in the domain even when spot never reaches it.
   const be = props.breakEvens || null;
-  const indexValues = rows.map((row) => row.indexPrice).filter(Number.isFinite);
+  const indexValues = rows.flatMap(row => [row.indexPrice,
+    ...(row.hedgeTrades || (row.hedgeTrade ? [row.hedgeTrade] : [])).map(trade => trade.price),
+  ]).filter(Number.isFinite);
   if (showContourOverlay) {
     contourRows.forEach((row) => {
       indexValues.push(...row.roots);
@@ -266,7 +268,10 @@ const draw = () => {
   // Scale marker area with the absolute BTC delta traded. A square-root radius
   // makes visual area proportional to quantity while the floor keeps small
   // executions legible.
-  const hedgeTrades = rows.filter(
+  const hedgeTrades = rows.flatMap(row =>
+    (row.hedgeTrades || (row.hedgeTrade ? [row.hedgeTrade] : []))
+      .map(trade => ({ ...row, hedgeTrade: trade })),
+  ).filter(
     (row) => row.hedgeTrade && !isHidden(`hedge_${row.hedgeTrade.side}`),
   );
   const largestHedgeTrade = d3.max(
@@ -284,7 +289,7 @@ const draw = () => {
     .join("circle")
     .attr("class", "hedge-trade")
     .attr("cx", (row) => x(new Date(row.dateTime)))
-    .attr("cy", (row) => indexY(row.indexPrice))
+    .attr("cy", (row) => indexY(row.hedgeTrade.price))
     .attr("r", (row) => Math.max(3, hedgeTradeRadius(row.hedgeTrade.quantity)))
     .attr("fill", (row) => row.hedgeTrade.side === "buy" ? BUY : SELL)
     .attr("stroke", (row) => row.hedgeTrade.side === "buy" ? BUY : SELL)
@@ -292,7 +297,7 @@ const draw = () => {
     .append("title")
     .text((row) => {
       const trade = row.hedgeTrade
-        ? `\n${row.hedgeTrade.side.toUpperCase()} ${row.hedgeTrade.quantity.toFixed(4)} ${props.underlying} @ ${formatUsd(row.indexPrice)}`
+        ? `\n${row.hedgeTrade.side.toUpperCase()} ${row.hedgeTrade.quantity.toFixed(4)} ${props.underlying} @ ${formatUsd(row.hedgeTrade.price)}${row.hedgeTrade.intrabar ? " (estimated intrabar fill; time within hour unknown)" : ""}`
         : "";
       return `${formatTime(new Date(row.dateTime))}\nIndex ${formatUsd(row.indexPrice)}${trade}`;
     });
