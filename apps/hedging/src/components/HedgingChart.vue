@@ -8,12 +8,14 @@ const props = defineProps({
   trades: { type: Array, default: () => [] },
   subtitle: { type: String, default: "" },
   showOptionPrice: { type: Boolean, default: false },
+  showTradingCosts: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
 });
 
 const svgRef = ref(null);
 const pnlSeriesVisible = ref({
   cumulativePnl: true,
+  pnlAfterCosts: true,
   optionPnl: true,
   hedgePnl: true,
   vegaPnl: true,
@@ -303,6 +305,9 @@ function render() {
     { label: "Hedge PnL", key: "hedgePnl", color: hedgeGreen },
     { label: "Vega PnL", key: "vegaPnl", color: vegaLine },
   ];
+  if (props.showTradingCosts) {
+    pnlLegendItems.push({ label: "PnL after costs", key: "pnlAfterCosts", color: "#fbbf24" });
+  }
   const visiblePnlItems = pnlLegendItems.filter(
     (item) => pnlSeriesVisible.value[item.key],
   );
@@ -380,7 +385,7 @@ function render() {
 
   const pnlLegend = pnlG
     .append("g")
-    .attr("transform", `translate(${Math.max(0, innerWidth - 575)},${-28})`);
+    .attr("transform", `translate(${Math.max(0, innerWidth - (pnlLegendItems.length * 145 - 5))},${-28})`);
 
   pnlLegend
     .selectAll("g")
@@ -435,6 +440,7 @@ watch(
     props.trades,
     props.subtitle,
     props.showOptionPrice,
+    props.showTradingCosts,
     props.loading,
   ],
   () => render(),
