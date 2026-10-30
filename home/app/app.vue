@@ -12,6 +12,7 @@ const APP_ORDER = [
   "Roll PnL",
   "Basis",
   "Term Structure",
+  "Skew",
   "Subjective Valuation",
 ];
 
