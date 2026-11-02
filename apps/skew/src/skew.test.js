@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spotDelta, selectLiveQuotes } from "./volatility.js";
+import { spotDelta } from "./volatility.js";
 import { interpolateSkew, buildCurrentSkew, buildHistoricalSkew, rankCurrentSkew, DELTAS } from "./skew.js";
 
 const ts = 1_790_000_000, expiry = ts + 90 * 86400;
@@ -70,10 +70,9 @@ test("history retains the latest observations per maturity; ranking includes zer
   assert.equal(rankCurrentSkew([{ expiry, skew: 0 }], [])[0].rank, null);
 });
 
-test("book-mid selection retains marks for missing books and recomputes both wings", () => {
-  const rows = ladder().map(q => ({ ...q, bookIv: q.side === "C" ? q.iv + 0.1 : null }));
-  const book = selectLiveQuotes(rows, "book");
-  assert.equal(book[2].iv, rows[2].iv);
-  assert.equal(book[0].iv, rows[0].iv + 0.1);
-  assert.notEqual(interpolateSkew(book).skew, interpolateSkew(rows).skew);
+test("historical delta slices retain expiry contracts absent from today's chain", () => {
+  const rows = ladder();
+  const all = buildHistoricalSkew({ quotes: rows, delta: 0.25 });
+  assert.equal(all.length, 1);
+  assert.equal(all[0].expiry, expiry);
 });

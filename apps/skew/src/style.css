@@ -162,6 +162,23 @@ body {
   cursor: default;
 }
 
+.indexButton::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+
+.saveButton.indexButtonActive {
+  border-color: #68768c;
+  background: rgba(178, 186, 201, 0.1);
+  color: #e0e5ee;
+}
+
 .dataFootnotes .error {
   color: #e8eaed;
 }

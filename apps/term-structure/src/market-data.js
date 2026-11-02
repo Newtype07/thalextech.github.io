@@ -71,8 +71,9 @@ export async function fetchLiveQuotes(
         onProgress(rows.length, chain.length);
       },
     });
-  } catch {
+  } catch (error) {
     signal?.throwIfAborted();
+    if (error.isRateLimit) rateLimitWarning = error.message;
   }
   const streamed = new Set(quotes.map((q) => q.name));
   for (const name of streamed) unavailable.delete(name);

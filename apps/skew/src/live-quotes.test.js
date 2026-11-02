@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { normalizeTicker, fetchStreamSnapshot } from "./live-quotes.js";
 import { fetchLiveQuotes } from "./market-data.js";
+import { sharedBudgetStore } from "./thalex-rate-limit.js";
 const chain = ["C", "P"].map((side) => ({
   name: `BTC-TEST-${side}`,
   side,
@@ -60,7 +61,7 @@ test("bulk ticker chunks publish progressively; empty books preserve mark IV", a
     result.map((q) => q.iv),
     [0.5, 0.6],
   );
-  assert.equal(result[0].bookIv, null);
+  assert.equal(result[0].bookIv, undefined);
   assert.equal(FakeSocket.last.closed, true);
   assert.equal(FakeSocket.last.request.method, "public/subscribe");
   assert.deepEqual(
@@ -75,6 +76,17 @@ test("a complete bulk snapshot needs no per-option REST requests", async (t) => 
   assert.equal(result.transport, "websocket");
   assert.equal(result.quotes.length, chain.length);
   assert.deepEqual(result.failures, []);
+});
+test("WebSocket subscription dispatch consumes the same exchange budget as REST", async () => {
+  const budget = sharedBudgetStore("https://thalex.com/api/v2/public");
+  const prior = budget.load()?.starts || [];
+  FakeSocket.onSend = socket => {
+    socket.emit(Object.fromEntries(chain.map(i => [i.name, row()])));
+  };
+  const result = await fetchStreamSnapshot(chain, { WebSocketImpl: FakeSocket, url: "wss://example.test" });
+  const state = budget.load();
+  assert.equal(state.starts.length, prior.filter(ts => ts > state.updatedAt - 1000).length + 1);
+  assert.equal(result.length, chain.length);
 });
 test("stale and invalid streamed marks stay unavailable without REST fan-out", async (t) => {
   const stale = row();
@@ -151,7 +163,7 @@ test("a stalled stream times out so REST can take over", async () => {
   );
   assert.equal(FakeSocket.last.closed, true);
 });
-test("stale mark data is rejected independently of book availability", () => {
+test("stale mark data is rejected", () => {
   assert.throws(
     () =>
       normalizeTicker(chain[0], {

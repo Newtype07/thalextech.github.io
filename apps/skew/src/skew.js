@@ -42,10 +42,10 @@ export function buildCurrentSkew(quotes, delta) {
 }
 
 export function buildHistoricalSkew({ quotes, expiries, delta, limit = 2000 }) {
-  const listed = new Set(expiries);
+  const listed = expiries == null ? null : new Set(expiries);
   const groups = new Map();
   for (const quote of quotes) {
-    if (!listed.has(quote.expiry)) continue;
+    if (listed && !listed.has(quote.expiry)) continue;
     const key = `${quote.expiry}:${quote.ts}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(quote);
@@ -61,14 +61,14 @@ export function buildHistoricalSkew({ quotes, expiries, delta, limit = 2000 }) {
   return [...byExpiry.values()].flatMap(rows => rows.sort((a, b) => a.ts - b.ts).slice(-limit));
 }
 
-export function rankCurrentSkew(current, history) {
+export function rankCurrentSkew(current, history, key = "expiry") {
   const samples = new Map();
   for (const point of history) {
-    if (!samples.has(point.expiry)) samples.set(point.expiry, []);
-    samples.get(point.expiry).push(point.skew);
+    if (!samples.has(point[key])) samples.set(point[key], []);
+    samples.get(point[key]).push(point.skew);
   }
   return current.map(point => {
-    const sample = samples.get(point.expiry) || [];
+    const sample = samples.get(point[key]) || [];
     const rank = sample.length ? 100 * sample.reduce((n, skew) =>
       n + (skew < point.skew ? 1 : skew === point.skew ? 0.5 : 0), 0) / sample.length : null;
     return { ...point, count: sample.length, rank };

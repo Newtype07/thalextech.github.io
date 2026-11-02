@@ -452,7 +452,10 @@ test("empty ATM brackets expand to usable neighbours instead of silently clampin
     archive,
     asOf: end,
   });
-  assert.deepEqual(calls, ["90", "100", "80", "110"]);
+  // Requests within each bracket round may start in either order while they
+  // contend for the shared limiter. Expansion must still follow the first pair.
+  assert.deepEqual(calls.slice(0, 2).sort(), ["100", "90"]);
+  assert.deepEqual(calls.slice(2).sort(), ["110", "80"]);
   const [point] = buildTermStructure({
     live: [],
     history: result.quotes,
@@ -500,7 +503,7 @@ test("delta selection fetches only its side and reuses cached ATM inputs", async
     asOf: end,
     slice: "25p",
   });
-  assert.deepEqual(calls, ["80-P", "110-P"]);
+  assert.deepEqual(calls.toSorted(), ["110-P", "80-P"]);
   await fetchHistoricalQuotes(active, "BTC", {
     archive,
     asOf: end,

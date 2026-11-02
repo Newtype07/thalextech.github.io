@@ -1,6 +1,6 @@
-# Skew by maturity
+# Constant-maturity, constant-delta skew
 
-A fork of Term Structure focused on BTC / ETH call-minus-put implied volatility skew at **15Δ, 25Δ and 35Δ**. The white curve shows the current snapshot; historical skew curves compare the same currently listed expiries at earlier closes. Daily is the default resolution. Positive skew means calls are richer, negative means puts are richer. Units are volatility percentage points (50% call IV minus 55% put IV = −5 vol points).
+BTC / ETH call-minus-put IV skew at **15Δ, 25Δ and 35Δ**, on fixed **7D, 14D, 30D, 60D, 90D and 180D** tenors. The chart plots skew through time, with one red-to-blue line per tenor. Shorter tenors are red; longer tenors are blue. The default visible lines are 1w, 1m, 3m and 6m, with 2w and 2m available through the legend.
 
 ```sh
 npm ci
@@ -9,39 +9,71 @@ npm test
 VITE_BASE_PATH=/skew/ npm run build
 ```
 
-`dev` and `build` first regenerate ignored `public/history-cache/` shards from the canonical Parquet files in `../backtest/source-data/thalex`. The root `build_apps.sh` discovers this app automatically; `index.yml` registers its home catalogue entry. No API keys or backend are required. `VITE_THALEX_API_BASE` and `VITE_THALEX_WS_URL` have the same overrides as Term Structure. Local dev/preview use the existing same-origin Vite proxy.
+`dev` and `build` regenerate ignored `public/history-cache/` from the canonical Parquet files in `../backtest/source-data/thalex`. The root build discovers this app automatically and `index.yml` registers its home catalogue entry. No API keys or backend are needed. `VITE_THALEX_API_BASE` and `VITE_THALEX_WS_URL` override the public endpoints; local development/preview use the existing same-origin Vite proxy.
 
 ## Calculation
 
-- The delta selector defaults to 25Δ. For each listed maturity, interpolate **variance** separately in same-side Black–Scholes spot delta at +Δ for calls and −Δ for puts. Take the square root of each interpolated variance, then subtract **call IV − put IV**. Rates/carry are zero and the year is 365.25 days; this approximates exchange forward delta.
-- Both wings must bracket their target. Missing, invalid or expired inputs omit that expiry’s value; curves connect the available maturities at their original positions. No wing extrapolation, nearest-strike fallback, absolute value, or division by ATM IV is used. Zero and negative skew are valid.
-- Historical pairs require the **exact same expiry and completed UTC hour**. Each uses its own hour’s index close and remaining maturity. The window is the latest 2,000 completed hours; missing wings/hours and recent listings reduce coverage. Expiries are equally spaced. This is a listed-contract comparison, not a normalized/constant-tenor series.
-- Percentiles rank the current signed skew within that expiry’s paired historical sample, using half weight for ties. A higher percentile means more call-rich skew.
+1. At each timestamp and listed expiry, interpolate **variance** separately within the call and put strike ladders to the selected absolute delta (+Δ calls, −Δ puts). Delta uses Black–Scholes spot delta, zero rates/carry and a 365.25-day year, approximating exchange forward delta. Each wing must bracket its target delta.
+2. At a fixed tenor τ, find available expiries T₁ ≤ τ ≤ T₂ at **that timestamp**. Interpolate each wing's **total variance**, then recover its IV:
 
-## Data and presentation
+   `a = (τ − T₁) / (T₂ − T₁)`
 
-The app retains the compact controls, dark styling, current white curve, collapsed expiry details, source tooltips and PNG export from Term Structure. Historical lines replace the scatter. The resolution selector reuses already interpolated history without new requests:
+   `IV_side(τ) = sqrt(((1 − a) × IV_side(T₁)² × T₁ + a × IV_side(T₂)² × T₂) / τ)`
 
-- **Daily** (default): 72 hourly closes covering the last three days.
-- **Weekly**: 14 closes, one day apart.
-- **Monthly**: 12 closes, one week apart.
+3. Compute **skew = call IV(τ) − put IV(τ)** in volatility points. For example, 50% call IV minus 55% put IV is −5 vol points. An exact maturity node reproduces its input wing IVs.
 
-The newest target is the latest completed UTC hour at refresh time. Every older target steps backwards from that hour (71 hours, 13 days, or 11 weeks to the oldest respectively). These are point-in-time closes, not daily/weekly averages. Partial snapshots are retained; only timestamps with no observations at all are omitted.
+Times T₁, T₂ and τ are remaining durations, using consistent units. Every historical close recomputes these from its own timestamp; a 30D point always means 30 days ahead of that close. Call and put use the same pair of bracketing expiries, and both wings come from the same historical hour. There is no linear interpolation of signed skew, time borrowing, delta extrapolation or maturity extrapolation. This is a constant-delta smile-slice interpolation, not an arbitrage-free fitted surface.
 
-Missing internal maturities are estimated by **linear interpolation of signed skew in actual expiry time**, between the nearest observed maturities at that same snapshot timestamp. Observed sections are solid; any interval touching an interpolated value is dashed. Hover details label estimated values and identify their bracketing maturities. Unbracketed leading/trailing maturities remain unavailable: no end extrapolation or borrowing from other timestamps. Estimates are chart-only, with no estimated wing IVs, and never enter historical percentile samples or the expiry detail table. A lone observed maturity remains visible as a short solid stroke.
+The chart uses calendar dates on the x-axis and skew on the left y-axis, titled **Call IV − put IV · Volatility points**, with a single zero reference line and no background grid. Each constant tenor has its own time series, with a stable red-to-blue color. The previous cross-sectional snapshot curves, common-tenor-axis filtering and age fading have been removed. Genuine unavailable UTC observations remain explicit gaps; they never cause another tenor or an entire timestamp to be hidden. The detail table retains all six requested tenors, with current wing IVs, skew, actual bracketing expiries, percentile and sample count.
 
-Historical curves transition from faded violet (oldest, 12% opacity), through blue, to bright cyan (newest, 85% opacity). The age scale uses the requested schedule, so missing dates do not change the remaining curves’ colors. The current curve stays white and uses the same solid/dashed convention; point markers and value labels appear only at observed live maturities. Hovering or focusing a historical curve highlights all its sections and shows its exact UTC timestamp and maturity values; PNG exports retain the dash patterns and restore age-based fading. Snapshot counts report all curves with observations, including partial ones. Axes fit the current curve and selected historical snapshots, with zero always included. The 2,000-hour input window already covers all twelve weekly targets.
+Percentiles rank current constant-tenor skew against **that tenor's** equally spaced observations in the selected history bucket, with half weight for ties. They no longer compare a listed expiry's changing maturity through time.
 
-There are no RV, forward-volatility, ATM or individual-wing controls. Detail rows show call IV, put IV, signed skew, percentile and sample count; missing live pairs remain visible as unavailable maturities. Source tooltips report the paired history range and the live quote collection range. PNG exports include titles, units, the current and selected historical curves, with delta, resolution and quote source in the filename. Percentiles always use the full available hourly sample, independently of the displayed resolution.
+Total-variance interpolation reference: [QuantLib BlackVarianceCurve implementation](https://github.com/lballabio/QuantLib/blob/master/ql/termstructures/volatility/equityfx/blackvariancecurve.cpp). The same interpolation primitive is applied separately to each fixed-delta wing here.
 
-Live marks use the batched option WebSocket snapshot with REST filling missing instruments. Book-mid selection solves IV from usable books and falls back to each option’s mark. Historical comparisons always use closing **mark** IV. Live collection is sequential rather than an atomic exchange snapshot; quote timestamps are exposed and refresh collects a fresh snapshot.
+## Time-series chart and live data
 
-The cache adapter and REST boundary retain Term Structure’s immutable Parquet source boundaries, session reuse, exact index/IV joins, bounded pagination, cancellation, rate pacing, shared origin budget, cooldown and retries. Backfill fetches **both sides’ full listed strike ladders once**; all three delta selections reuse those same inputs without new requests. A broad ladder is needed because historical delta depends on the observed IV. Only the 2,000-hour index window is fetched; index closes are delta inputs, not an RV overlay. Older gaps in the supplied Parquet history remain as supplied. Data notices disclose partial failures and cache fallback.
+| History bucket | Sampling | Approximate historical points per tenor |
+| --- | --- | --- |
+| 1 year | Daily UTC closes | 366–367 |
+| 6 months | Daily UTC closes | 182–185 |
+| 3 months (default) | 6-hourly UTC closes | 357–369 |
+| 1 month | 2-hourly UTC closes | 337–373 |
+| 1 week | Hourly UTC closes | 169 |
+
+Months and years use calendar boundaries with end-of-month/leap-year clamping, not fixed 30/365-day substitutes. Each schedule includes both endpoints and is aligned to its UTC sampling grid. A fresh live mark may add one additional endpoint.
+The newest historical target is the latest completed UTC boundary at the selected sampling interval. No neighbouring hour replaces a missing close. Cubic B-spline curves round each tenor's line for display, softening short-lived peaks within each uninterrupted run while retaining its endpoints. Hover values, calculations and percentiles use the original observations. Real data gaps remain unconnected. Shorter tenors start red, intermediate tenors transition through rose/purple, and the longest tenor is blue. Colors remain stable when a tenor is hidden or the history window changes.
+
+The legend defaults to visible 1w / 1m / 3m / 6m lines; click or keyboard-activate entries to toggle any of the six tenors. Hover over the plot to inspect every visible tenor at the same UTC timestamp; focus the plot and use left/right arrows for keyboard inspection. A live value appends at the end of its tenor's line in the same color, with a small endpoint marker. There is no separate white current-maturity curve.
+
+The **Index price** toggle adds faint neutral scatter points behind the skew lines, using a separately labelled USD scale on the right. It defaults off. Closing prices align to the selected history grid, use the same index inputs as delta calculations, appear in inspection tooltips, and are included in PNG exports when enabled. The cache includes sampled index closes across the full year, plus recent raw closes; toggling the overlay makes no additional API requests.
+
+Live marks use one batched option WebSocket snapshot, with REST filling missing names. Only live mark IV is used; the inherited book-mid/fallback selector and its IV solver have been removed. Historical points also use closing **mark** IV. The tooltip labels live versus historical data. Live delta/maturity calculations share the refresh reference time, with actual sequential quote collection times in the source tooltip. Refresh collects a fresh snapshot. Switching delta reuses the prepared series and recent quotes, fetching additional delta brackets when needed. Switching history buckets reuses stored closes and only fetches newly needed tail inputs.
+
+PNG exports include the date axis, left-side skew scale and y-axis title, title, selected tenor lines and legend. Crosshairs, inspection tooltips and the legend instruction are omitted.
+
+## Historical expiry universe and backfill
+
+Fixed-tenor history includes contracts that were alive at a historical timestamp but are expired today. The version-3 `thalex-skew-history` cache prepares a full calendar year directly from the canonical backtest Parquet files. Build time uses the union of the five sampling grids, computes all three delta surfaces using the same domain functions as runtime, and writes compact constant-tenor series. The browser decodes those small series before loading recent raw inputs; it does not download or recalculate a year of hourly strike ladders.
+
+Only one recent week of raw option inputs is packaged for incremental supplementation. The build prunes obsolete content-hashed files in its generated output. Prepared history and API-derived observations merge by exact timestamp and tenor, with successful API additions replacing matching keys without dropping older history. Estimates and source conventions do not differ between the build and runtime models.
+
+The adapter discovers contracts in the uncovered Parquet-to-present tail through `public/all_instruments`, paginating intervals no longer than three days. It merges those names with current listings and the recent cache. Both option wings and exact matching index closes are fetched only at the selected targets, bounded by listing/expiry times and immutable actual Parquet coverage. Daily buckets use native `1d` candles; 2/6-hourly buckets use `1h` request envelopes and reuse returned closes, since the API has no native 2h/6h resolution. Daily candle timestamps are normalized to the exact same UTC close as hourly inputs. Empty checks are remembered per resolution so a daily no-data response cannot suppress a later hourly check.
+
+The incremental fetch selects only the listed expiries surrounding the requested constant tenors and the strikes surrounding each wing's selected delta. Cached or live IVs seed the search; historical calculations always use actual quotes from the matching close. Observed deltas determine whether neighbouring strikes are needed. Confirmed empty responses expand the search; failed requests remain retryable on refresh. This avoids requesting every strike in every expiry while retaining the same interpolation inputs as a full ladder.
+
+Prepared Parquet series appear first, independently of live marks. Recent historical hours publish progressively once their required quote brackets are resolved, rather than displaying intermediate partial ladders. The chart labels the pending recent region while loading, and its footer reports loaded versus expected observations. The adaptive backfill uses two concurrent requests through the shared exchange transport. Skew and Term Structure share hard exchange ceilings of a 100-request burst per rolling second and 10/second thereafter. The public transport uses a stricter four requests/second with no initial burst, because live checks received Cloudflare 1015 responses at both 10/s and 5/s. WebSocket subscriptions, REST calls and retries all consume that same budget. Refresh/reload does not reset burst credit. Rate-limit errors, including errors inside HTTP 200 JSON responses, pause the whole queue and drain remaining burst credit.
+
+Successful universe discovery and raw additions remain in memory for the session, enabling bucket revisits without repeat history calls. No IndexedDB or localStorage history persistence is used. Cache/discovery/API failures are disclosed; unavailable static history limits API fallback to the latest week to avoid an accidental year-wide option backfill. Older gaps inside supplied Parquet history remain as supplied. REST retains paced shared-origin limits, bounded concurrency, deduplication, cancellation, retries and adaptive cooldown. Index closes are delta inputs; there is no RV or forward-vol overlay.
+
+[Official Thalex endpoint schema](https://thalex.com/docs/api.yaml) · [Historical data](https://thalex.com/historical-data)
 
 ## Boundaries
 
-`skew.js` owns paired-wing interpolation, exact historical pairing and signed-skew ranking. `skew-snapshots.js` selects exact timestamp schedules, retains partial snapshots and tags chart-only maturity estimates. `components/skew-curve.js` separates observed solid paths from interpolated dashed paths. `volatility.js` retains the spot-delta and book-price math. `market-data.js`, `history-cache.js`, `live-quotes.js` and `thalex-rest.js` contain the exchange/cache contracts; the app and chart consume normalized quotes and skew points. `App.vue` coordinates controls and loading; `SkewChart.vue` renders and exports.
+- `skew.js`: per-expiry constant-delta wing interpolation and signed-skew ranking.
+- `constant-maturity.js`: separate-wing total-variance interpolation, constant-tenor history.
+- `skew-history-plan.js`: pure selection of missing historical delta/maturity bracket inputs, including expansion past confirmed empty quotes.
+- `skew-timeseries.js`: calendar lookback/sampling plans, prepared/API merge, and chronological per-tenor series with explicit missing observations and live endpoints.
+- `history-cache.js`, `market-data.js`, `live-quotes.js`, `thalex-rest.js`: cache/exchange contracts and historical expiry discovery.
+- `App.vue`: loading and control orchestration. `SkewChart.vue` and `components/skew-curve.js`: time-series rendering, stable tenor colors, hover inspection, legend toggles and export.
 
-This is an independent fork: transport/cache code is copied so Term Structure behavior stays isolated. Provider fixes should be applied to both apps until real shared changes justify extracting a common market-data boundary.
-
-[Thalex API documentation](https://thalex.com/docs/) · [Historical data](https://thalex.com/historical-data)
+Chart calculations and history planning remain independent from Term Structure. Both apps re-export the same `lib/thalex-rest.js` and `lib/thalex-rate-limit.js` transport, keeping endpoint selection, request accounting, cooldown and retry policy together. The budget coordinates same-origin tabs through Web Locks and localStorage when available; requests from other origins or processes remain outside that browser budget.

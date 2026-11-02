@@ -9,6 +9,7 @@ const props = defineProps({
   loading: Boolean,
 });
 const svgRef = ref(null);
+const positionSide = ref("long");
 const hidden = ref(new Set());
 const hoverIndex = ref(null);
 const totalAreaId = `straddle-total-${useId()}`;
@@ -17,7 +18,11 @@ const money = value => d3.format("$,.2f")(Math.abs(value) < 1e-7 ? 0 : value);
 const date = ts => d3.utcFormat("%d %b %y %H:%M")(new Date(ts * 1000));
 const state = computed(() => {
   try {
-    return { result: props.history.legs.length ? attributePnlPath(props.history) : null };
+    const quantitySign = positionSide.value === "short" ? -1 : 1;
+    return { result: props.history.legs.length ? attributePnlPath({
+      ...props.history,
+      legs: props.history.legs.map(leg => ({ ...leg, quantity: leg.quantity * quantitySign })),
+    }) : null };
   } catch (error) {
     return { result: null, error: error.message };
   }
@@ -25,9 +30,9 @@ const state = computed(() => {
 const result = computed(() => state.value.result);
 const headline = computed(() => {
   if (!result.value || props.loading) return "P&L";
-  const entryMark = result.value.path[0].mark;
+  const entryMark = Math.abs(result.value.path[0].mark);
   const roi = entryMark > 0 ? d3.format(".1%")(result.value.marked / entryMark) : "—";
-  return `P&L ${money(result.value.marked)} · ROI ${roi}`;
+  return `${positionSide.value === "short" ? "Short" : "Long"} P&L ${money(result.value.marked)} · ROI ${roi}`;
 });
 const rangeLabel = computed(() => result.value
   ? date(result.value.path[0].ts) + " - " + date(result.value.path.at(-1).ts) : "");
@@ -109,8 +114,8 @@ defineExpose({ exportPng });
 <template>
   <section class="attribution" aria-labelledby="attribution-title" :aria-busy="loading">
     <div class="plot">
-      <svg ref="svgRef" viewBox="0 0 640 620" role="img" aria-label="Cumulative Greek P&L with delta fixed at entry" :font-family="SVG_FONT_FAMILY" font-size="11" fill="#70767d" @pointermove="hover" @pointerleave="hoverIndex = null">
-        <title>Cumulative Greeks P&amp;L · fixed entry delta</title>
+      <svg ref="svgRef" viewBox="0 0 640 620" role="img" :aria-label="`${positionSide} position cumulative Greek P&L with delta fixed at entry`" :font-family="SVG_FONT_FAMILY" font-size="11" fill="#70767d" @pointermove="hover" @pointerleave="hoverIndex = null">
+        <title>{{ positionSide === "short" ? "Short" : "Long" }} position · Cumulative Greeks P&amp;L · fixed entry delta</title>
         <rect width="640" height="620" fill="#0a0b0e" />
         <defs v-if="plot?.totalArea">
           <linearGradient :id="totalAreaId + '-above'" gradientUnits="userSpaceOnUse" x1="0" x2="0" :y1="plot.totalArea.positiveY" :y2="plot.totalArea.zero">
@@ -126,8 +131,16 @@ defineExpose({ exportPng });
           <clipPath :id="totalAreaId + '-above-clip'"><rect x="74" y="114" width="528" :height="plot.totalArea.zero - 114" /></clipPath>
           <clipPath :id="totalAreaId + '-below-clip'"><rect x="74" :y="plot.totalArea.zero" width="528" :height="566 - plot.totalArea.zero" /></clipPath>
         </defs>
-        <text id="attribution-title" x="320" y="30" text-anchor="middle" fill="#e8eaed" font-size="16" font-weight="600">{{ headline }}</text>
+        <text id="attribution-title" x="396" y="30" text-anchor="middle" fill="#e8eaed" font-size="16" font-weight="600">{{ headline }}</text>
         <text v-if="result && !loading" class="range" x="320" y="54" text-anchor="middle" font-size="11">Selected: {{ rangeLabel }}</text>
+        <g class="position-toggle" role="group" aria-label="Position side" transform="translate(16,10)">
+          <rect width="122" height="28" rx="8" fill="#1c1c1e" stroke="#ffffff" stroke-opacity="0.06" />
+          <rect class="position-toggle-thumb" x="3" y="3" width="58" height="22" rx="6" fill="#58585c" stroke="#ffffff" stroke-opacity="0.12" :style="{ transform: `translateX(${positionSide === 'short' ? 58 : 0}px)`, filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.4))' }" />
+          <g v-for="(side, index) in ['long', 'short']" :key="side" :transform="`translate(${3 + index * 58},0)`" role="button" tabindex="0" :aria-label="side === 'long' ? 'Long position' : 'Short position'" :aria-pressed="positionSide === side" @click="positionSide = side" @keydown.enter.prevent="positionSide = side" @keydown.space.prevent="positionSide = side">
+            <rect class="position-toggle-target" width="58" height="28" rx="6" fill="transparent" />
+            <text x="29" y="18" text-anchor="middle" font-size="11" font-weight="500" :fill="positionSide === side ? '#ffffff' : '#a1a1a6'">{{ side === "long" ? "Long" : "Short" }}</text>
+          </g>
+        </g>
         <text v-if="loading" x="320" y="310" text-anchor="middle" role="status">Loading…</text>
         <foreignObject v-else-if="state.error" x="74" y="114" width="528" height="400"><p class="error" role="alert">{{ state.error }}</p></foreignObject>
         <text v-else-if="!result" x="320" y="310" text-anchor="middle">Select two points to see P&amp;L.</text>
@@ -171,8 +184,16 @@ defineExpose({ exportPng });
 <style scoped>
 .attribution { background: #0a0b0e; color: #e8eaed; font-family: "Helvetica Neue", Helvetica, -apple-system, sans-serif; }
 .plot { position: relative; } svg { width: 100%; display: block; }
-.legend [role="button"] { cursor: pointer; }
+.legend [role="button"], .position-toggle [role="button"] { cursor: pointer; }
 .legend [role="button"]:focus-visible { outline: 1px solid #b9caff; outline-offset: 4px; }
+.position-toggle { user-select: none; }
+.position-toggle-thumb { transition: transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+.position-toggle [role="button"] { outline: none; }
+.position-toggle [role="button"]:hover text { fill: #ffffff; }
+.position-toggle [role="button"]:focus-visible .position-toggle-target { stroke: #a8c7fa; stroke-width: 2; }
+@media (prefers-reduced-motion: reduce) {
+  .position-toggle-thumb { transition: none; }
+}
 .composition-value { font-variant-numeric: tabular-nums; }
 .error { margin: 0; color: #a9abb6; font-size: 12px; line-height: 1.5; }
 .tooltip { position: absolute; top: 20%; right: 12px; min-width: 145px; padding: 9px 11px; border: 1px solid #2e3040; border-radius: 6px; background: rgba(0, 0, 0, 0.9); pointer-events: none; font-size: 11px; line-height: 1.6; }

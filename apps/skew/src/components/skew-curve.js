@@ -1,36 +1,24 @@
-import { curveMonotoneX, line } from "d3";
+import { curveBasis, line } from "d3";
 
-// Split paths at provenance changes. Any interval touching an estimated point
-// is dashed; contiguous observed intervals stay solid. Unbracketed ends stay empty.
-export function skewCurvePaths(points, x, y) {
-  const observed = [], interpolated = [];
-  const solidLine = line()
-    .x(point => x(point.expiry))
-    .y(point => y(point.skew))
-    .curve(curveMonotoneX);
-  const dashedLine = line().x(point => x(point.expiry)).y(point => y(point.skew));
-  let run = [], estimated = false;
-  const flush = () => {
-    if (run.length > 1)
-      (estimated ? interpolated : observed).push((estimated ? dashedLine : solidLine)(run));
-    run = [];
-  };
-  for (let i = 1; i < points.length; i++) {
-    const left = points[i - 1], right = points[i];
-    if (!left || !right) { flush(); continue; }
-    const nextEstimated = Boolean(left.interpolated || right.interpolated);
-    if (run.length && estimated !== nextEstimated) flush();
-    if (!run.length) { run.push(left); estimated = nextEstimated; }
-    run.push(right);
+// Colors are stable by tenor, independent of visible series or history window.
+export const TENOR_COLORS = {
+  7: "#f05b61", 14: "#eb7e99", 30: "#d18abd",
+  60: "#ae94dc", 90: "#828fee", 180: "#4f8fff",
+};
+export const tenorLegendLabel = days => ({ 7: "1w", 14: "2w", 30: "1m", 60: "2m", 90: "3m", 180: "6m" })[days] || `${days}d`;
+
+export function skewTimeSeriesPath(points, x, y) {
+  // A cubic B-spline rounds short-lived corners within each uninterrupted run.
+  // This is display smoothing only: source values, tooltips and ranks stay raw.
+  const path = line().x(p => x(p.ts)).y(p => y(p.skew)).curve(curveBasis);
+  const paths = [];
+  let run = [];
+  for (const point of [...points, null]) {
+    if (point) run.push(point);
+    else if (run.length) {
+      paths.push(run.length === 1 ? `M${x(run[0].ts) - 3},${y(run[0].skew)}h6` : path(run));
+      run = [];
+    }
   }
-  flush();
-  // A lone observed value still deserves a small solid stroke.
-  for (let i = 0; i < points.length; i++) {
-    const point = points[i];
-    if (point && !point.interpolated &&
-      (!points[i - 1] || points[i - 1].interpolated) &&
-      (!points[i + 1] || points[i + 1].interpolated))
-      observed.push(`M${x(point.expiry) - 3},${y(point.skew)}h6`);
-  }
-  return { observed: observed.join("") || null, interpolated: interpolated.join("") || null };
+  return paths.join("") || null;
 }

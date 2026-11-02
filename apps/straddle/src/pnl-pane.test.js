@@ -28,7 +28,7 @@ async function compileComponents(directory) {
   };
 }
 
-test("connecting two dots opens the P&L pane, preserves selection through resize, and closes cleanly", async t => {
+test("connecting two dots opens the P&L pane, switches position side, preserves selection, and closes cleanly", async t => {
   const appDirectory = fileURLToPath(new URL("../", import.meta.url));
   const temporary = await mkdtemp(resolve(appDirectory, ".component-test-"));
   const window = new Window({ url: "http://localhost/" });
@@ -98,7 +98,10 @@ test("connecting two dots opens the P&L pane, preserves selection through resize
     assert.match(pane.textContent, /[−-]\$409\.71/);
     assert.equal(pane.querySelectorAll("svg").length, 1, "the pane contains one chart");
     assert.equal(pane.querySelector("table, details, input[type=file]"), null, "no report or upload UI");
-    assert.equal(pane.querySelector("button"), null, "no close button or separate controls");
+    const longButton = pane.querySelector('[aria-label="Long position"]');
+    const shortButton = pane.querySelector('[aria-label="Short position"]');
+    assert.equal(longButton.getAttribute("aria-pressed"), "true", "positions start long");
+    assert.equal(shortButton.getAttribute("aria-pressed"), "false");
     assert.match(pane.querySelector("#attribution-title").textContent, /P&L [−-]\$409\.71 · ROI [−-]13\.7%/, "the title shows total P&L and return on entry premium");
     assert.match(pane.querySelector(".range").textContent, /^Selected: /);
     const legend = [...pane.querySelectorAll('.legend [role="button"]')];
@@ -131,9 +134,41 @@ test("connecting two dots opens the P&L pane, preserves selection through resize
     assert.equal(window.document.querySelector(".chartWrap svg").getAttribute("viewBox"), "0 0 640 620");
 
     const originalRange = pane.querySelector(".range").textContent;
+    const longPaths = [...pane.querySelectorAll("path.pnl-line")].map(node => node.getAttribute("d"));
+    const svg = pane.querySelector("svg");
+    t.mock.method(svg, "getBoundingClientRect", () => ({ left: 0, top: 0, width: 640, height: 620 }));
+    const hoverLastPoint = () => svg.dispatchEvent(new window.PointerEvent("pointermove", { clientX: 602, clientY: 300 }));
+    hoverLastPoint();
+    await settle();
+    const tooltipValues = () => [...pane.querySelectorAll(".tooltip-value span:last-child")].map(node => node.textContent);
+    const longTooltipValues = tooltipValues();
+    assert.equal(longTooltipValues.length, components.length);
+    const requestsBeforeToggle = globalThis.fetch.mock.callCount();
+    shortButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    await settle();
+    assert.equal(shortButton.getAttribute("aria-pressed"), "true");
+    assert.equal(longButton.getAttribute("aria-pressed"), "false");
+    assert.match(pane.querySelector("#attribution-title").textContent, /^Short P&L \$409\.71 · ROI 13\.7%$/, "short ROI uses the absolute entry premium");
+    const shortComponents = legend.map(node => Number(node.querySelector(".composition-value").textContent.replaceAll("−", "-").replaceAll(/[$,]/g, "")));
+    shortComponents.forEach((value, index) => assert.ok(Math.abs(value + components[index]) < 0.005, "all attribution components reverse sign"));
+    assert.notDeepEqual([...pane.querySelectorAll("path.pnl-line")].map(node => node.getAttribute("d")), longPaths, "chart lines update for the short position");
+    assert.notDeepEqual(tooltipValues(), longTooltipValues, "hover values update with the side");
+    assert.equal(tooltipValues()[0], "$409.71");
+    assert.equal(pane.querySelector(".range").textContent, originalRange, "toggling side preserves the selected range");
+    assert.equal(globalThis.fetch.mock.callCount(), requestsBeforeToggle, "side changes use the loaded history");
+
+    longButton.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    assert.match(pane.querySelector("#attribution-title").textContent, /^Long P&L [−-]\$409\.71 · ROI [−-]13\.7%$/);
+    assert.deepEqual([...pane.querySelectorAll("path.pnl-line")].map(node => node.getAttribute("d")), longPaths);
+    assert.deepEqual(tooltipValues(), longTooltipValues);
+    shortButton.dispatchEvent(new window.KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    await settle();
+    assert.equal(shortButton.getAttribute("aria-pressed"), "true", "space selects the short position");
     await select(points[10]);
     assert.ok(window.document.querySelector(".pnlPane"), "a third dot updates the open pane");
     assert.notEqual(window.document.querySelector(".pnlPane .range").textContent, originalRange);
+    assert.equal(shortButton.getAttribute("aria-pressed"), "true", "updating the range keeps the position side");
 
     window.document.querySelector(".chartWrap").click();
     await settle();

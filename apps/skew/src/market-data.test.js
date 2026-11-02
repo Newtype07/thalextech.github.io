@@ -174,6 +174,7 @@ test("cached history plus API tail merges once, retains cached strikes and is re
   const end = Math.floor(Date.now() / 1000 / HOUR) * HOUR,
     from = end - HISTORY_LIMIT * HOUR;
   const archive = emptyArchive();
+  archive.sourceThrough = { index: end - HOUR, marks: end - HOUR };
   for (let ts = from; ts < end - HOUR; ts += HOUR)
     archive.index.set(ts, [ts, 100, 102, 98, 101]);
   archive.marks.set(chain[0].name, {
@@ -201,17 +202,17 @@ test("cached history plus API tail merges once, retains cached strikes and is re
     archive,
     asOf: end,
   });
-  assert.equal(calls.length, 2);
-  assert.equal(result.quotes.length, 3);
+  assert.equal(calls.length, 3);
+  assert.equal(result.quotes.length, 4);
   assert.equal(result.quotes.find((q) => q.ts === end).spot, 102);
   assert.deepEqual(result.coverage, {
     cachedIndexRows: 1999,
     cachedMarkRows: 2,
     apiIndexRows: 1,
-    apiMarkRows: 1,
+    apiMarkRows: 2,
   });
   await fetchHistoricalQuotes(active, "BTC", { archive, asOf: end });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
 });
 
 test("long expiries do not extend the index lookback beyond the skew window", async (t) => {
@@ -476,5 +477,133 @@ test("skew backfill requests both wings once and reuses their full ladders acros
   assert.equal(result.quotes.length, 8);
   assert.deepEqual(result.failures, []);
   await fetchHistoricalQuotes(active, "BTC", { archive, asOf: end });
+  assert.equal(calls.length, 8);
+});
+
+test("historical universe discovery paginates in three-day intervals and backfills expired contracts only before expiry", async t => {
+  const end = Math.floor(Date.now() / 1000 / HOUR) * HOUR;
+  const from = end - 7 * 24 * HOUR, expiry = end - 24 * HOUR;
+  const archive = emptyArchive();
+  archive.sourceThrough = { index: end, marks: from };
+  for (let ts = from; ts < end; ts += HOUR) archive.index.set(ts, [ts, 100, 100, 100, 100]);
+  const discovery = [], markCalls = [];
+  t.mock.method(globalThis, "fetch", async input => {
+    const url = new URL(input);
+    if (url.pathname.endsWith("all_instruments")) {
+      discovery.push(url);
+      assert.ok(Number(url.searchParams.get("time_high")) - Number(url.searchParams.get("time_low")) <= 3 * 86400);
+      assert.equal(url.searchParams.get("underlying"), "BTCUSD");
+      assert.equal(url.searchParams.get("instrument_type"), "options");
+      return { ok: true, json: async () => ({ result: [{ type: "option", underlying: "BTCUSD", instrument_name: "expired-c",
+        strike_price: 100, option_type: "call", expiration_timestamp: expiry, create_time: from }] }) };
+    }
+    assert.ok(url.pathname.endsWith("mark_price_historical_data"));
+    markCalls.push(url);
+    assert.equal(url.searchParams.get("instrument_name"), "expired-c");
+    const first = Number(url.searchParams.get("from")), last = Number(url.searchParams.get("to"));
+    assert.equal(first, from); assert.equal(last, expiry - HOUR, "settlement close and later hours are excluded");
+    const mark = [];
+    for (let ts = first; ts < last; ts += HOUR) mark.push(bar(ts, 0.5));
+    return { ok: true, json: async () => ({ result: { mark } }) };
+  });
+  const result = await fetchHistoricalQuotes([], "BTC", { archive, asOf: end, discoverInstruments: true });
+  assert.equal(discovery.length, 3); assert.equal(markCalls.length, 1);
+  assert.equal(Number(discovery[0].searchParams.get("time_low")), from);
+  assert.equal(Number(discovery.at(-1).searchParams.get("time_high")), end);
+  assert.ok(result.quotes.length > 0);
+  assert.ok(result.quotes.every(q => q.ts < expiry && q.expiry === expiry));
+  assert.deepEqual(result.failures, []);
+  await fetchHistoricalQuotes([], "BTC", { archive, asOf: end, discoverInstruments: true });
+  assert.equal(discovery.length, 3, "discovered intervals are reused for the browser session");
+  assert.equal(markCalls.length, 1, "expired contract additions are reused");
+});
+
+test("daily backfill uses native daily candles, joins exact closes, and does not mark intervening hourly closes as checked", async t => {
+  const DAY = 86400, end = Math.floor(Date.now() / 1000 / DAY) * DAY;
+  const archive = emptyArchive();
+  archive.sourceThrough = { index: end - 2 * DAY, marks: end - 2 * DAY };
+  const active = [{ ...chain[0], listedAt: end - 2 * DAY }];
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async input => {
+    const url = new URL(input); calls.push(url);
+    assert.equal(url.searchParams.get("resolution"), "1d");
+    assert.equal(Number(url.searchParams.get("count")), 2);
+    const isIndex = url.pathname.endsWith("index_price_historical_data");
+    const rows = [end - 2 * DAY, end - DAY].map(ts => isIndex ? [ts, 100, 102, 98, 101] : bar(ts, 0.5));
+    return { ok: true, json: async () => ({ result: { [isIndex ? "index" : "mark"]: rows } }) };
+  });
+  const window = { from: end - 10 * DAY, step: DAY, timestamps: [end - DAY, end] };
+  const result = await fetchHistoricalQuotes(active, "BTC", { archive, asOf: end + 100, window });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(result.quotes.map(q => q.ts), [end - DAY, end]);
+  assert.ok(result.quotes.every(q => q.spot === 101));
+  const { planHistoryRequests } = await import("./market-data.js");
+  const intervening = end - 12 * HOUR;
+  assert.equal(planHistoryRequests([intervening], archive.index, archive.checkedIndex).length, 1);
+  await fetchHistoricalQuotes(active, "BTC", { archive, asOf: end + 100, window });
+  assert.equal(calls.length, 2, "a revisit reuses completed daily additions");
+});
+
+test("fully prepared historical windows make no history API requests when the Parquet boundary covers all target closes", async t => {
+  const end = Math.floor(Date.now() / 1000 / HOUR) * HOUR;
+  const archive = emptyArchive(); archive.sourceThrough = { index: end, marks: end };
+  archive.preparedHistory = { "25": [{ ts: end - 86400, tenorDays: 30, callIv: 0.5, putIv: 0.6, skew: -0.1 }] };
+  archive.index.set(end - HOUR, [end - HOUR, 100, 100, 100, 100]);
+  t.mock.method(globalThis, "fetch", () => assert.fail("Parquet coverage must prevent historical requests"));
+  const result = await fetchHistoricalQuotes(chain, "BTC", { archive, asOf: end, discoverInstruments: true,
+    window: { from: end - 365 * 86400, step: 86400, timestamps: [end - 86400, end] } });
+  assert.equal(result.preparedHistory, archive.preparedHistory, "final completion must retain the prepared year, not erase it after progressive updates");
+});
+
+test("empty daily checks never suppress an hourly retry of the same close", async () => {
+  const { planHistoryRequests } = await import("./market-data.js");
+  const ts = 500000 * HOUR;
+  const checked = [{ from: ts, to: ts + HOUR - 1, period: 86400, expires: Date.now() + 60000 }];
+  assert.equal(planHistoryRequests([ts], new Map(), checked, 86400).length, 0);
+  assert.equal(planHistoryRequests([ts], new Map(), checked, HOUR).length, 1);
+  assert.equal(planHistoryRequests([ts], new Map([[ts, 0.5]]), checked, HOUR).length, 0, "successful closes are shared across resolutions");
+});
+
+test("adaptive skew backfill publishes only completed hours, uses a small strike subset, and reuses it on revisit", async t => {
+  const { fetchSkewHistory } = await import("./market-data.js");
+  const { buildHistoricalSkew } = await import("./skew.js");
+  const { constantMaturityHistory } = await import("./constant-maturity.js");
+  const end = Math.floor(Date.now() / 1000 / HOUR) * HOUR;
+  const hours = [end - 3 * HOUR, end - 2 * HOUR, end - HOUR];
+  const active = [10, 50].flatMap(days => [60, 70, 80, 90, 95, 100, 105, 110, 120, 130, 150].flatMap(strike => ["C", "P"].map(side => ({
+    name: `${days}-${strike}-${side}`, expiry: end + days * 86400, strike, side,
+  }))));
+  const archive = emptyArchive(); archive.sourceThrough = { index: end, marks: hours[0] };
+  archive.preparedHistory = { "25": [{ ts: hours[0], tenorDays: 30, skew: -.1 }] };
+  for (const hour of hours) archive.index.set(hour, [hour, 100, 100, 100, 100]);
+  const calls = [], updates = [];
+  t.mock.method(globalThis, "fetch", async input => {
+    assert.ok(updates.length, "cached Parquet data must publish before REST work");
+    const url = new URL(input); calls.push(url);
+    const instrument = active.find(i => i.name === url.searchParams.get("instrument_name"));
+    assert.ok(instrument);
+    const mark = [];
+    for (let ts = Number(url.searchParams.get("from")); ts < Number(url.searchParams.get("to")); ts += HOUR)
+      mark.push(bar(ts, instrument.side === "C" ? .5 : .6));
+    return { ok: true, json: async () => ({ result: { mark } }) };
+  });
+  const settings = { archive, asOf: end, delta: .25, tenors: [30],
+    liveIvs: () => new Map(active.map(i => [i.name, i.side === "C" ? .5 : .6])),
+    window: { from: end - 7 * 86400, step: HOUR, timestamps: hours.map(h => h + HOUR) },
+    onUpdate: data => updates.push(data),
+  };
+  const result = await fetchSkewHistory(active, "BTC", settings);
+  assert.equal(calls.length, 8, "only four input strikes per expiry, not all 44 contracts");
+  assert.ok(updates[0].preparedHistory["25"].length);
+  assert.ok(updates.some(data => data.quotes.length > 0));
+  for (const data of updates) {
+    const points = constantMaturityHistory(buildHistoricalSkew({ quotes: data.quotes, delta: .25 }), [30]);
+    const publishedHours = new Set(data.quotes.map(q => q.ts));
+    assert.equal(points.length, publishedHours.size, "no partial strike ladder is advertised as a completed hour");
+    assert.ok(points.every(p => Math.abs(p.skew + .1) < 1e-12));
+  }
+  assert.deepEqual(result.failures, []);
+  assert.equal(new Set(result.quotes.map(q => q.ts)).size, 3);
+  await fetchSkewHistory(active, "BTC", settings);
   assert.equal(calls.length, 8);
 });

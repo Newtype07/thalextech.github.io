@@ -5,6 +5,7 @@ import {
   RateLimitPausedError,
   ThalexTokenBucket,
 } from "./thalex-rate-limit.js";
+const PACED = { capacity: 1, refillPerSecond: 8 };
 function clock() {
   let time = 100000;
   return {
@@ -29,12 +30,12 @@ function store() {
 }
 test("100-request burst is followed by spaced starts, including after idle time", async () => {
   const time = clock(),
-    bucket = new ThalexTokenBucket({ ...time, capacity: 100, refillPerSecond: 10 }),
+    bucket = new ThalexTokenBucket({ ...PACED, ...time, capacity: 100, refillPerSecond: 10 }),
     start = time.now();
   for (let i = 0; i < 100; i++) await bucket.take();
   assert.equal(time.now(), start);
   for (let i = 0; i < 10; i++) await bucket.take();
-  assert.equal(time.now(), start + 1000);
+  assert.equal(time.now(), start + 1900);
   time.advance(60000);
   const before = time.now();
   await bucket.take();
@@ -44,19 +45,19 @@ test("100-request burst is followed by spaced starts, including after idle time"
 test("two clients/reloads pace requests from the first call", async () => {
   const time = clock(),
     shared = store();
-  const first = new ThalexTokenBucket({ ...time, store: shared }),
-    second = new ThalexTokenBucket({ ...time, store: shared });
+  const first = new ThalexTokenBucket({ ...PACED, ...time, store: shared }),
+    second = new ThalexTokenBucket({ ...PACED, ...time, store: shared });
   const start = time.now();
   for (let i = 0; i < 10; i++) await (i % 2 ? first : second).take();
-  const reloaded = new ThalexTokenBucket({ ...time, store: shared });
+  const reloaded = new ThalexTokenBucket({ ...PACED, ...time, store: shared });
   await reloaded.take();
   assert.equal(time.now(), start + 1250);
 });
 test("429 cooldown drains the bucket and resumes at refill rate, including other clients", async () => {
   const time = clock(),
     shared = store();
-  const first = new ThalexTokenBucket({ ...time, store: shared }),
-    second = new ThalexTokenBucket({ ...time, store: shared });
+  const first = new ThalexTokenBucket({ ...PACED, ...time, store: shared }),
+    second = new ThalexTokenBucket({ ...PACED, ...time, store: shared });
   const start = time.now();
   await first.take();
   await first.penalize(5000);
@@ -67,7 +68,7 @@ test("429 cooldown drains the bucket and resumes at refill rate, including other
 });
 test("repeated shared failures open the circuit rather than sending every queued request", async () => {
   const time = clock(),
-    bucket = new ThalexTokenBucket(time);
+    bucket = new ThalexTokenBucket({ ...PACED, ...time });
   for (let i = 0; i < 5; i++) await bucket.penalize(1000);
   await assert.rejects(bucket.take(), RateLimitPausedError);
   const start = time.now();
@@ -75,9 +76,9 @@ test("repeated shared failures open the circuit rather than sending every queued
   await bucket.take();
   assert.equal(time.now(), start + 30125);
 });
-test("default pacing has no initial burst and leaves headroom below 10/s", async () => {
+test("explicit conservative pacing has no initial burst and leaves headroom below 10/s", async () => {
   const time = clock(),
-    bucket = new ThalexTokenBucket(time),
+    bucket = new ThalexTokenBucket({ ...PACED, ...time }),
     starts = [];
   for (let i = 0; i < 200; i++) {
     await bucket.take();
@@ -93,10 +94,10 @@ test("default pacing has no initial burst and leaves headroom below 10/s", async
 });
 test("a saved 100-token allowance is clamped on upgrade instead of bursting again", async () => {
   const time = clock(), shared = store();
-  const old = new ThalexTokenBucket({ ...time, store: shared, capacity: 100 });
+  const old = new ThalexTokenBucket({ ...PACED, ...time, store: shared, capacity: 100 });
   await old.take();
   const previousStart = time.now();
-  const upgraded = new ThalexTokenBucket({ ...time, store: shared });
+  const upgraded = new ThalexTokenBucket({ ...PACED, ...time, store: shared });
   const starts = [];
   for (let i = 0; i < 4; i++) {
     await upgraded.take();
@@ -115,7 +116,7 @@ test("legacy saved budget migrates without replenishing spent burst credit", asy
     blockedUntil: 0,
     circuitUntil: 0,
   });
-  const bucket = new ThalexTokenBucket({ ...time, store: shared });
+  const bucket = new ThalexTokenBucket({ ...PACED, ...time, store: shared });
   const start = time.now();
   await bucket.take();
   await bucket.take();
@@ -124,11 +125,11 @@ test("legacy saved budget migrates without replenishing spent burst credit", asy
 test("429 slowdown survives reload and recovers gradually without a burst", async () => {
   const time = clock(),
     shared = store(),
-    first = new ThalexTokenBucket({ ...time, store: shared });
+    first = new ThalexTokenBucket({ ...PACED, ...time, store: shared });
   const start = time.now();
   await first.take();
   await first.penalize(10000, { reduceRate: true });
-  const reloaded = new ThalexTokenBucket({ ...time, store: shared });
+  const reloaded = new ThalexTokenBucket({ ...PACED, ...time, store: shared });
   await reloaded.take();
   assert.equal(time.now(), start + 10250);
   await first.take();
@@ -145,7 +146,7 @@ test("429 slowdown survives reload and recovers gradually without a burst", asyn
   assert.equal(time.now(), before + 334);
 });
 test("cancellation during token/cooldown wait is immediate and costs no token", async () => {
-  const bucket = new ThalexTokenBucket();
+  const bucket = new ThalexTokenBucket(PACED);
   await bucket.penalize(10000);
   const controller = new AbortController(),
     pending = bucket.take(controller.signal);

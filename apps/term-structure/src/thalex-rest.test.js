@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createThalexClient, retryAfterMs } from "./thalex-rest.js";
 import { ThalexTokenBucket } from "./thalex-rate-limit.js";
+const PACED = { capacity: 1, refillPerSecond: 8 };
 const ok = (value) => ({ ok: true, json: async () => ({ result: value }) });
 test("Retry-After accepts seconds and HTTP dates", () => {
   assert.equal(retryAfterMs("2"), 2000);
@@ -19,7 +20,7 @@ test("429 honors Retry-After and re-enters the shared bucket without a retry bur
   let time = 100000,
     calls = 0;
   const starts = [];
-  const bucket = new ThalexTokenBucket({
+  const bucket = new ThalexTokenBucket({ ...PACED,
     now: () => time,
     sleep: async (ms) => {
       time += ms;
@@ -46,7 +47,7 @@ test("429 honors Retry-After and re-enters the shared bucket without a retry bur
 test("a 429 pauses other queued requests too, and they resume one token at a time", async () => {
   let time = 100000;
   const starts = [];
-  const bucket = new ThalexTokenBucket({
+  const bucket = new ThalexTokenBucket({ ...PACED,
     now: () => time,
     sleep: async (ms) => {
       time += ms;
@@ -78,7 +79,7 @@ test("a 429 pauses other queued requests too, and they resume one token at a tim
 test("opaque CORS/network errors also trigger shared cooldown and have only one retry", async () => {
   let time = 0,
     calls = 0;
-  const bucket = new ThalexTokenBucket({
+  const bucket = new ThalexTokenBucket({ ...PACED,
     now: () => time,
     sleep: async (ms) => {
       time += ms;
@@ -101,7 +102,7 @@ test("refresh adapts to a tighter upstream budget instead of repeating 429s at t
   let time = 0,
     previous = -Infinity,
     rejected = 0;
-  const bucket = new ThalexTokenBucket({
+  const bucket = new ThalexTokenBucket({ ...PACED,
     now: () => time,
     sleep: async (ms) => {
       time += ms;
@@ -133,7 +134,7 @@ test("concurrent refresh queues pace every REST start, including on first load",
     finished = false;
   const timers = [],
     starts = [];
-  const bucket = new ThalexTokenBucket({
+  const bucket = new ThalexTokenBucket({ ...PACED,
     now: () => time,
     sleep: (ms) =>
       new Promise((resolve) => timers.push({ at: time + ms, resolve })),
@@ -191,8 +192,10 @@ test("concurrency is bounded and a cancelled queued job never fetches or consume
   const client = createThalexClient({
     maxConcurrent: 2,
     bucket: {
-      take: async () => {
+      take: async (signal, dispatch) => {
+        signal?.throwIfAborted();
         tokens++;
+        return dispatch();
       },
     },
     fetchImpl: () => {

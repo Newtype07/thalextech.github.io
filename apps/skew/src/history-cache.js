@@ -3,6 +3,7 @@
 const archives = new Map();
 export const emptyArchive = () => ({
   index: new Map(),
+  preparedHistory: {},
   marks: new Map(),
   checked: new Map(),
   checkedIndex: [],
@@ -32,18 +33,16 @@ export function missingHourRanges(from, to, known, checked = []) {
   return ranges;
 }
 
-export function historySnapshot(cache, { from, end, indexFrom, expiries }) {
+export function historySnapshot(cache, { from, end, indexFrom }) {
   const index = [...cache.index.values()]
     .filter((r) => r[0] >= indexFrom && r[0] < end)
     .sort((a, b) => a[0] - b[0]);
   const spots = new Map(index.map((r) => [r[0], r[4]]));
-  const quotes = [],
-    liveExpiries = new Set(expiries);
+  const quotes = [];
   for (const instrument of cache.marks.values()) {
-    if (!liveExpiries.has(instrument.expiry)) continue;
     for (const [ts, iv] of instrument.rows) {
       const spot = spots.get(ts);
-      if (ts < from || ts >= end || !(spot > 0)) continue;
+      if (ts < from || ts >= end || ts + 3600 >= instrument.expiry || !(spot > 0)) continue;
       quotes.push({
         expiry: instrument.expiry,
         strike: instrument.strike,
@@ -56,6 +55,7 @@ export function historySnapshot(cache, { from, end, indexFrom, expiries }) {
   }
   return {
     quotes,
+    preparedHistory: cache.preparedHistory,
     indexBars: index.map(([ts, open, high, low, close]) => ({
       ts,
       open,
@@ -69,7 +69,6 @@ export function historySnapshot(cache, { from, end, indexFrom, expiries }) {
 
 export async function loadHistoryCache(
   asset,
-  expiries,
   signal,
   onArchive = () => {},
 ) {
@@ -108,8 +107,8 @@ export async function loadHistoryCache(
   try {
     const manifest = await read("manifest.json", true);
     if (
-      manifest.schema !== "thalex-term-history" ||
-      manifest.version !== 1 ||
+      manifest.schema !== "thalex-skew-history" ||
+      manifest.version !== 3 ||
       manifest.asset !== asset ||
       manifest.resolution !== 3600 ||
       manifest.ivBasis !== "close" ||
@@ -122,6 +121,24 @@ export async function loadHistoryCache(
         (!Number.isFinite(boundary) || boundary % 3600 !== 0)
       )
         throw new Error("Invalid Parquet coverage boundary");
+    archive.sourceThrough = { ...archive.sourceThrough, ...manifest.sourceThrough };
+    for (const [delta, filename] of Object.entries(manifest.prepared || {})) {
+      try {
+        const payload = await read(filename);
+        if (payload.version !== 1 || !Array.isArray(payload.rows)) throw new Error("Invalid prepared series");
+        const points = payload.rows.map(row => {
+          if (row.length !== 7 || !row.every(Number.isFinite) || row[2] <= 0 || row[3] <= 0)
+            throw new Error("Invalid prepared observation");
+          const [ts, tenorDays, callIv, putIv, nearExpiry, farExpiry, weight] = row;
+          return { ts, tenorDays, callIv, putIv, skew: callIv - putIv, nearExpiry, farExpiry, weight };
+        });
+        archive.preparedHistory = { ...archive.preparedHistory, [delta]: points };
+        onArchive(archive);
+      } catch (error) {
+        signal?.throwIfAborted();
+        archive.warning = `Prepared ${delta}Δ Parquet series unavailable (${error.message}); only available recent data can be shown.`;
+      }
+    }
     const index = await read(manifest.index);
     for (const row of index.rows) {
       if (
@@ -139,8 +156,8 @@ export async function loadHistoryCache(
       );
     onArchive(archive);
     let marksThrough = null;
-    for (const expiry of expiries) {
-      const filename = manifest.expiries[String(expiry)];
+    for (const [expiryKey, filename] of Object.entries(manifest.expiries)) {
+      const expiry = Number(expiryKey);
       if (!filename) continue;
       const payload = await read(filename);
       if (payload.expiry !== expiry || !Array.isArray(payload.instruments))

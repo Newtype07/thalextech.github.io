@@ -1,4 +1,5 @@
 import { bookMidIv } from "./volatility.js";
+import { takeThalexRequest, reportThalexStreamError } from "./thalex-rest.js";
 
 // REST and batched WebSocket tickers share one normalization boundary.
 export function normalizeTicker(instrument, ticker) {
@@ -47,6 +48,8 @@ export function fetchStreamSnapshot(
     chain.map((i) => `lwt_options.${i.name.split("-")[0]}USD.all.1000ms`),
   );
   return new Promise((resolve, reject) => {
+    const connection = new AbortController();
+    const requestSignal = signal ? AbortSignal.any([signal, connection.signal]) : connection.signal;
     let socket,
       timer,
       settleTimer,
@@ -54,6 +57,7 @@ export function fetchStreamSnapshot(
     const quotes = new Map();
     const received = new Set();
     const cleanup = () => {
+      connection.abort();
       clearTimeout(timer);
       clearTimeout(settleTimer);
       signal?.removeEventListener("abort", abort);
@@ -75,13 +79,13 @@ export function fetchStreamSnapshot(
     const abort = () => finish(signal.reason);
     const failed = () => finish(); // REST fills only the missing names.
     const open = () =>
-      socket.send(
+      takeThalexRequest(requestSignal, () => socket.send(
         JSON.stringify({
           id: 1,
           method: "public/subscribe",
           params: { channels: [...channels] },
         }),
-      );
+      )).catch(error => finish(error));
     const message = (event) => {
       let body;
       try {
@@ -89,8 +93,11 @@ export function fetchStreamSnapshot(
       } catch {
         return;
       }
+      if (body.error) {
+        void reportThalexStreamError(body.error).then(error => finish(error));
+        return;
+      }
       if (
-        body.error ||
         (body.id === 1 &&
           Array.isArray(body.result) &&
           body.result.length === 0)

@@ -3,13 +3,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { asyncBufferFromFile, parquetReadObjects } from "hyparquet";
+import { HISTORY_VIEWS, historyWindow } from "../src/skew-timeseries.js";
+import { DELTAS, buildHistoricalSkew } from "../src/skew.js";
+import { constantMaturityHistory } from "../src/constant-maturity.js";
 
 // Read the canonical files, not the backtest's open-IV/pricing-specific artifacts.
 const root = fileURLToPath(new URL("../", import.meta.url));
 const source = path.resolve(root, "../backtest/source-data/thalex");
 const files = (await fs.readdir(source)).sort();
 const now = Date.now() / 1000;
-const cutoff = Math.floor(now / 3600) * 3600 - 2000 * 3600;
+const targets = new Set(HISTORY_VIEWS.flatMap(view => historyWindow(view.value, now).timestamps));
+const cutoff = Math.min(...targets) - 3600;
+const rawCutoff = Math.floor(now / 3600) * 3600 - 7 * 86400;
 const cutoffMonth = new Date(cutoff * 1000)
   .toISOString()
   .slice(0, 7)
@@ -56,8 +61,7 @@ for (const asset of ["BTC", "ETH"]) {
     await fs.writeFile(path.join(out, filename), text);
     return filename;
   };
-  const index = new Map(),
-    expiries = new Map();
+  const index = new Map(), expiries = new Map(), sampledQuotes = [];
   let marksThrough = null;
   const indexFiles = files.filter((n) =>
     new RegExp(`^${asset}USD_index_1h_\\d{6}\\.parquet$`).test(n),
@@ -114,7 +118,7 @@ for (const asset of ["BTC", "ETH"]) {
         marksThrough = Math.max(marksThrough ?? 0, ts + 3600);
       if (
         !spec ||
-        spec.expiry <= now ||
+        spec.expiry <= ts + 3600 ||
         ts < cutoff ||
         ts + 3600 > now ||
         !Number.isFinite(ts) ||
@@ -122,6 +126,10 @@ for (const asset of ["BTC", "ETH"]) {
         iv <= 0
       )
         continue;
+      if (targets.has(ts + 3600) && index.has(ts)) sampledQuotes.push({
+        ...spec, ts: ts + 3600, iv, spot: index.get(ts)[4],
+      });
+      if (ts < rawCutoff) continue;
       if (!expiries.has(spec.expiry)) expiries.set(spec.expiry, new Map());
       const instruments = expiries.get(spec.expiry);
       if (!instruments.has(name))
@@ -131,8 +139,8 @@ for (const asset of ["BTC", "ETH"]) {
   }
   const indexRows = [...index.values()].sort((a, b) => a[0] - b[0]);
   const manifest = {
-    schema: "thalex-term-history",
-    version: 1,
+    schema: "thalex-skew-history",
+    version: 3,
     asset,
     resolution: 3600,
     timestampBasis: "bar-start",
@@ -143,9 +151,18 @@ for (const asset of ["BTC", "ETH"]) {
       marks: marksThrough,
     },
     ivBasis: "close",
-    index: await write("index", { rows: indexRows }),
+    // Keep the sampled year for the optional price backdrop, plus recent raw
+    // closes for incremental delta calculations. No extra browser API fetch.
+    index: await write("index", { rows: indexRows.filter(row => row[0] >= rawCutoff || targets.has(row[0] + 3600)) }),
+    prepared: {},
     expiries: {},
   };
+  for (const { value, delta } of DELTAS) {
+    const points = constantMaturityHistory(buildHistoricalSkew({ quotes: sampledQuotes, delta, limit: Infinity }));
+    manifest.prepared[value] = await write(`prepared-${value}`, { version: 1, rows: points.map(p =>
+      [p.ts, p.tenorDays, p.callIv, p.putIv, p.nearExpiry, p.farExpiry, p.weight]) });
+    console.log(`[${asset}] ${value}Δ: ${points.length} prepared constant-tenor observations`);
+  }
   let quoteCount = 0;
   for (const [expiry, instruments] of expiries) {
     const rows = [...instruments.values()]
@@ -161,7 +178,10 @@ for (const asset of ["BTC", "ETH"]) {
     });
   }
   await fs.writeFile(path.join(out, "manifest.json"), JSON.stringify(manifest));
+  const retained = new Set(["manifest.json", manifest.index, ...Object.values(manifest.expiries), ...Object.values(manifest.prepared)]);
+  for (const file of await fs.readdir(out))
+    if (/^(?:index|expiry-\d+|prepared-\d+)-[a-f0-9]{16}\.json$/.test(file) && !retained.has(file)) await fs.unlink(path.join(out, file));
   console.log(
-    `[${asset}] ${indexRows.length} OHLC bars, ${quoteCount} closing IVs, ${expiries.size} live expiries`,
+    `[${asset}] ${indexRows.length} OHLC bars, ${quoteCount} closing IVs, ${expiries.size} historical/live expiries`,
   );
 }
