@@ -17,5 +17,6 @@ node_modules
 /apps/backtest/public/runtime-data/thalex/eth/prepared_manifest.json
 /apps/backtest/public/runtime-data/thalex/eth/prepared_iv_rv_1h.json
 
-# Term structure cache is rebuilt from the canonical backtest Parquet files.
+# Market history caches are rebuilt from the canonical backtest Parquet files.
 /apps/term-structure/public/history-cache/
+/apps/skew/public/history-cache/
