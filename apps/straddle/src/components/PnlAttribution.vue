@@ -107,7 +107,10 @@ const toggle = key => {
   else next.add(key);
   hidden.value = next;
 };
-const exportPng = () => exportChartToPng({ element: svgRef.value, filename: "straddle-greeks-pnl.png", background: "#0a0b0e" });
+const exportPng = () => exportChartToPng({
+  element: svgRef.value, filename: "straddle-greeks-pnl.png", background: "#0a0b0e",
+  prepareSvgClone: clone => clone.querySelectorAll("[data-export-omit]").forEach(node => node.remove()),
+});
 defineExpose({ exportPng });
 </script>
 
@@ -133,7 +136,7 @@ defineExpose({ exportPng });
         </defs>
         <text id="attribution-title" x="396" y="30" text-anchor="middle" fill="#e8eaed" font-size="16" font-weight="600">{{ headline }}</text>
         <text v-if="result && !loading" class="range" x="320" y="54" text-anchor="middle" font-size="11">Selected: {{ rangeLabel }}</text>
-        <g class="position-toggle" role="group" aria-label="Position side" transform="translate(16,10)">
+        <g class="position-toggle" data-export-omit role="group" aria-label="Position side" transform="translate(16,10)">
           <rect width="122" height="28" rx="8" fill="#1c1c1e" stroke="#ffffff" stroke-opacity="0.06" />
           <rect class="position-toggle-thumb" x="3" y="3" width="58" height="22" rx="6" fill="#58585c" stroke="#ffffff" stroke-opacity="0.12" :style="{ transform: `translateX(${positionSide === 'short' ? 58 : 0}px)`, filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.4))' }" />
           <g v-for="(side, index) in ['long', 'short']" :key="side" :transform="`translate(${3 + index * 58},0)`" role="button" tabindex="0" :aria-label="side === 'long' ? 'Long position' : 'Short position'" :aria-pressed="positionSide === side" @click="positionSide = side" @keydown.enter.prevent="positionSide = side" @keydown.space.prevent="positionSide = side">

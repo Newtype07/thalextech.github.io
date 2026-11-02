@@ -15,6 +15,7 @@ import StyledSelectMenu from "./components/StyledSelectMenu.vue";
 import OptionPnlChart from "./components/OptionPnlChart.vue";
 import PnlAttribution from "./components/PnlAttribution.vue";
 import { buildStraddlePnlHistory } from "./pnl-history.js";
+import { exportStraddlePnlToPng } from "./export-pnl.js";
 import StraddleBreakEvenChart from "./components/StraddleBreakEvenChart.vue";
 import {
   fetchIndexHistory,
@@ -79,6 +80,7 @@ const data = reactive({
 });
 const allMaturityMarks = ref({});
 const chartRef = ref(null);
+const straddleWorkspaceRef = ref(null);
 const pnlRange = ref(null);
 const breakEvenChartRef = ref(null);
 const settingsMenuRef = ref(null);
@@ -838,6 +840,10 @@ function handleSavePng() {
     : optionInstrumentName.value || "straddle";
   const filenameBase = ui.resolutionKey ? `${base}-${ui.resolutionKey}` : base;
   if (ui.mode === "straddle") {
+    if (pnlRange.value) {
+      exportStraddlePnlToPng(straddleWorkspaceRef.value, `${filenameBase}.png`);
+      return;
+    }
     if (!chartRef.value) return;
     chartRef.value.exportPng({ filename: `${filenameBase}.png` });
     return;
@@ -1279,6 +1285,7 @@ watch(
       </p>
       <div
         v-if="ui.mode === 'straddle'"
+        ref="straddleWorkspaceRef"
         class="straddleWorkspace"
         :class="{ 'straddleWorkspace--selected': pnlRange }"
       >

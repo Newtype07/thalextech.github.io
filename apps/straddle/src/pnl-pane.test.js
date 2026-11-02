@@ -32,11 +32,18 @@ test("connecting two dots opens the P&L pane, switches position side, preserves 
   const appDirectory = fileURLToPath(new URL("../", import.meta.url));
   const temporary = await mkdtemp(resolve(appDirectory, ".component-test-"));
   const window = new Window({ url: "http://localhost/" });
-  const globals = ["window", "document", "Node", "Element", "HTMLElement", "SVGElement"];
+  const globals = ["window", "document", "Node", "Element", "HTMLElement", "SVGElement", "XMLSerializer", "Image"];
   const originals = new Map(globals.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const key of globals) Object.defineProperty(globalThis, key, { configurable: true, value: key === "window" ? window : window[key] });
   let app;
   try {
+    // Capture the SVG handed to the PNG rasterizer without loading a browser image.
+    Object.defineProperty(globalThis, "Image", { configurable: true, value: class {} });
+    const exportBlobs = [];
+    t.mock.method(URL, "createObjectURL", blob => {
+      exportBlobs.push(blob);
+      return "blob:chart-export";
+    });
     t.mock.method(Date, "now", () => history.observations.at(-1).ts * 1000);
     t.mock.method(globalThis, "fetch", async input => {
       const url = new URL(input);
@@ -78,6 +85,15 @@ test("connecting two dots opens the P&L pane, switches position side, preserves 
     assert.ok(button);
     button.click();
     await settle();
+    const savePng = [...window.document.querySelectorAll("button")].find(node => node.textContent.trim() === "Save PNG");
+    const exportSvg = async () => {
+      const count = exportBlobs.length;
+      savePng.click();
+      await settle();
+      assert.equal(exportBlobs.length, count + 1, "Save PNG exports one image");
+      return new window.DOMParser().parseFromString(await exportBlobs.at(-1).text(), "image/svg+xml").documentElement;
+    };
+    assert.equal((await exportSvg()).getAttribute("viewBox"), "0 0 1316 620", "without a selection, export retains the full-width bubble chart");
     const points = [...window.document.querySelectorAll("circle.main-point")];
     assert.equal(points.length, history.observations.length);
     assert.equal(window.document.querySelector(".pnlPane"), null);
@@ -127,6 +143,7 @@ test("connecting two dots opens the P&L pane, switches position side, preserves 
     legend.find(node => node.getAttribute("aria-label") === "Gamma − Theta").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     await settle();
     assert.equal(pane.querySelector('path[data-series="gammaTheta"]'), null, "legend toggles the combined gamma and theta line");
+    assert.equal((await exportSvg()).querySelector('path[data-series="gammaTheta"]'), null, "export respects hidden P&L lines");
     assert.equal(legend[2].querySelector(".composition-value").textContent, "−$217.17", "time decay is deducted from convexity and remains in the composition when hidden");
     legend.find(node => node.getAttribute("aria-label") === "Gamma − Theta").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
     await settle();
@@ -156,6 +173,25 @@ test("connecting two dots opens the P&L pane, switches position side, preserves 
     assert.equal(tooltipValues()[0], "$409.71");
     assert.equal(pane.querySelector(".range").textContent, originalRange, "toggling side preserves the selected range");
     assert.equal(globalThis.fetch.mock.callCount(), requestsBeforeToggle, "side changes use the loaded history");
+
+    const exported = await exportSvg();
+    assert.equal(exported.getAttribute("viewBox"), "0 0 1280 620", "the selected workspace exports both half-width panes");
+    assert.equal(exported.getAttribute("width"), "1280");
+    assert.equal(exported.getAttribute("height"), "620");
+    const exportedCharts = [...exported.querySelectorAll("svg")];
+    assert.equal(exportedCharts.length, 2);
+    assert.deepEqual(exportedCharts.map(chart => chart.getAttribute("x")), ["0", "640"], "the panes are placed side by side");
+    assert.deepEqual(exportedCharts.map(chart => chart.getAttribute("width")), ["640", "640"]);
+    assert.equal(exportedCharts[0].querySelectorAll("circle.main-point").length, points.length);
+    assert.equal(exportedCharts[0].innerHTML, window.document.querySelector(".chartWrap svg").innerHTML, "bubble colors and the selected-range connector are preserved");
+    const expectedPnl = svg.cloneNode(true);
+    expectedPnl.querySelector(".position-toggle").remove();
+    assert.equal(exportedCharts[1].innerHTML, expectedPnl.innerHTML, "P&L, gradients and visible lines are preserved without the position control");
+    assert.equal(exported.querySelector(".position-toggle"), null, "the position toggle is omitted from PNG export");
+    assert.ok(svg.querySelector(".position-toggle"), "the live position toggle stays visible");
+    assert.match(exported.querySelector("#attribution-title").textContent, /^Short P&L \$409\.71/);
+    assert.equal(exported.querySelector(".range").textContent, originalRange);
+    assert.equal(svg.parentElement.className, "plot", "export leaves the live pane attached");
 
     longButton.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await settle();
