@@ -70,13 +70,13 @@ body {
   border: 0;
   border-bottom: 2px solid transparent;
   background: none;
-  color: #9299a4;
+  color: #999999;
   font-size: 12px;
   cursor: pointer;
 }
 .appTabs button[aria-selected="true"] {
   color: #e8eaed;
-  border-bottom-color: #b5c4e2;
+  border-bottom-color: #ffffff;
 }
 
 .divider {

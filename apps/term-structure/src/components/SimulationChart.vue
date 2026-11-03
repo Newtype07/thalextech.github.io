@@ -1,9 +1,15 @@
 <script setup>
-import { computed, ref, watch } from "vue";
-import { scaleLinear, line, extent, format } from "d3";
+import { computed, ref, watch, useId } from "vue";
+import { scaleLinear, line, area, extent, format } from "d3";
+import { straddlePayoff } from "../simulation/straddle-payoff.js";
 
 const props = defineProps({ result: { type: Object, required: true } });
+const emit = defineEmits(["export"]);
 const selected = ref(null);
+const gradientId = `simulation-pnl-${useId()}`;
+const GAIN = "#00bf8c",
+  LOSS = "#ff1654";
+const signColor = (value) => (value > 0 ? GAIN : value < 0 ? LOSS : "#fff");
 watch(
   () => props.result,
   () => {
@@ -24,22 +30,32 @@ const definitions = [
   {
     key: "option",
     label: "Option P&L",
-    color: "#85a7cf",
+    color: "#cccccc",
     value: (row) => row.optionPnl - row.optionFees,
   },
   {
     key: "hedge",
     label: "Hedge P&L",
-    color: "#b69b76",
+    color: "#888888",
     value: (row) => row.hedgePnl - row.hedgeFees,
   },
   {
     key: "total",
     label: "Total P&L",
-    color: "#e8eaed",
+    color: GAIN,
     value: (row) => row.pnl,
   },
 ];
+const payoff = computed(() =>
+  straddlePayoff({
+    strike: props.result.config.strike,
+    entryPrice: props.result.entryPrice,
+    quantity: props.result.config.quantity,
+    side: props.result.config.side,
+  }),
+);
+const payoffNumber = (value) =>
+  Number.isFinite(value) ? format(",.0f")(value) : "∞";
 const row = computed(
   () => props.result.rows[selected.value] || props.result.end,
 );
@@ -67,6 +83,15 @@ const curves = computed(() =>
       .x((point) => x.value(point.elapsed / 86400))
       .y((point) => y.value(series.value(point)))(props.result.rows),
   })),
+);
+const zeroOffset = computed(
+  () => (y.value(0) - margin.top) / (H - margin.bottom - margin.top),
+);
+const totalArea = computed(() =>
+  area()
+    .x((point) => x.value(point.elapsed / 86400))
+    .y0(y.value(0))
+    .y1((point) => y.value(point.pnl))(props.result.rows),
 );
 const priceY = computed(() => {
   const [low, high] = extent(props.result.rows, (point) => point.spot);
@@ -120,6 +145,40 @@ function keyInspect(event) {
 
 <template>
   <section class="sim-performance" aria-label="Simulation performance">
+    <div
+      class="performance-summary"
+      aria-label="Option-only expiry payoff before hedge trading and fees"
+    >
+      <div class="payoff-stat">
+        <span>Max Loss</span
+        ><strong :style="{ color: LOSS }">{{
+          payoffNumber(payoff.maxLoss)
+        }}</strong>
+      </div>
+      <div class="payoff-stat">
+        <span>Break-even</span
+        ><strong>{{ payoff.breakEvens.map(payoffNumber).join(" - ") }}</strong>
+      </div>
+      <div class="payoff-stat">
+        <span>Max Return</span
+        ><strong :style="{ color: GAIN }">{{
+          payoffNumber(payoff.maxReturn)
+        }}</strong>
+      </div>
+    </div>
+    <p class="payoff-scope">
+      Straddle expiry payoff · USD · before hedge trading and fees
+    </p>
+    <div class="performance-actions">
+      <span class="performance-time">{{
+        selected == null ? "At expiry" : `Day ${inspectedDay.toFixed(3)}`
+      }}</span>
+      <button type="button" class="performance-export" @click="emit('export')">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3v12m-5-5 5 5 5-5M5 15v5h14v-5" /></svg
+        >Export CSV
+      </button>
+    </div>
     <div class="performance-scroll" @pointerleave="selected = null">
       <div class="performance-plots">
         <header class="performance-heading index-heading">
@@ -154,13 +213,6 @@ function keyInspect(event) {
           @keydown="keyInspect"
         >
           <g v-for="tick in priceY.ticks(5)" :key="tick">
-            <line
-              :x1="margin.left"
-              :x2="W - margin.right"
-              :y1="priceY(tick)"
-              :y2="priceY(tick)"
-              class="performance-grid"
-            />
             <text :x="margin.left - 12" :y="priceY(tick) + 4" text-anchor="end">
               {{ format(",.0f")(tick) }}
             </text>
@@ -169,8 +221,8 @@ function keyInspect(event) {
             class="index-price-path"
             :d="pricePath"
             fill="none"
-            stroke="#e8eaed"
-            stroke-width="1.4"
+            stroke="#ffffff"
+            stroke-width="1"
             vector-effect="non-scaling-stroke"
           />
           <circle
@@ -183,8 +235,8 @@ function keyInspect(event) {
             :data-elapsed="trade.elapsed"
             :cx="x(trade.elapsed / 86400)"
             :cy="priceY(trade.spot)"
-            r="3.5"
-            stroke="#08080a"
+            r="4.5"
+            stroke="#000000"
             stroke-width=".8"
           >
             <title>
@@ -200,7 +252,7 @@ function keyInspect(event) {
               :x2="x(inspectedDay)"
               :y1="margin.top"
               :y2="PRICE_H - margin.bottom"
-              stroke="#70767d"
+              stroke="#555555"
               stroke-dasharray="2 4"
             />
             <circle
@@ -233,17 +285,20 @@ function keyInspect(event) {
               {{ (result.config.horizon / 86400).toFixed(2) }} days
             </p>
           </div>
-          <div class="performance-legend" aria-live="off">
-            <span class="performance-time">{{
-              selected == null ? "At expiry" : `Day ${inspectedDay.toFixed(3)}`
-            }}</span>
+          <div class="pnl-key" aria-label="P&L line legend">
             <span
               v-for="series in definitions"
               :key="series.key"
               class="performance-value"
               :data-series="series.key"
-              ><i :style="{ background: series.color }"></i>{{ series.label }}
-              <strong>{{ money(series.value(row)) }}</strong></span
+              ><i
+                :class="`line-key-${series.key}`"
+                :style="{ borderColor: series.color }"
+              ></i
+              >{{ series.label }}
+              <strong :style="{ color: signColor(series.value(row)) }">{{
+                money(series.value(row))
+              }}</strong></span
             >
           </div>
         </header>
@@ -257,14 +312,40 @@ function keyInspect(event) {
           @pointerdown="inspect"
           @keydown="keyInspect"
         >
+          <defs>
+            <linearGradient
+              :id="`${gradientId}-line`"
+              gradientUnits="userSpaceOnUse"
+              x1="0"
+              :y1="margin.top"
+              x2="0"
+              :y2="H - margin.bottom"
+            >
+              <stop offset="0" :stop-color="GAIN" />
+              <stop :offset="zeroOffset" :stop-color="GAIN" />
+              <stop :offset="zeroOffset" :stop-color="LOSS" />
+              <stop offset="1" :stop-color="LOSS" />
+            </linearGradient>
+            <linearGradient
+              :id="`${gradientId}-area`"
+              gradientUnits="userSpaceOnUse"
+              x1="0"
+              :y1="margin.top"
+              x2="0"
+              :y2="H - margin.bottom"
+            >
+              <stop offset="0" :stop-color="GAIN" stop-opacity=".28" />
+              <stop :offset="zeroOffset" :stop-color="GAIN" stop-opacity="0" />
+              <stop :offset="zeroOffset" :stop-color="LOSS" stop-opacity="0" />
+              <stop offset="1" :stop-color="LOSS" stop-opacity=".28" />
+            </linearGradient>
+          </defs>
+          <path
+            class="total-pnl-area"
+            :d="totalArea"
+            :fill="`url(#${gradientId}-area)`"
+          />
           <g v-for="tick in y.ticks(6)" :key="tick">
-            <line
-              :x1="margin.left"
-              :x2="W - margin.right"
-              :y1="y(tick)"
-              :y2="y(tick)"
-              class="performance-grid"
-            />
             <text :x="margin.left - 12" :y="y(tick) + 4" text-anchor="end">
               {{ format(",.0f")(tick) }}
             </text>
@@ -274,8 +355,7 @@ function keyInspect(event) {
             :x2="W - margin.right"
             :y1="y(0)"
             :y2="y(0)"
-            stroke="#555b63"
-            stroke-dasharray="3 5"
+            stroke="#303030"
           />
           <path
             v-for="series in curves"
@@ -283,8 +363,12 @@ function keyInspect(event) {
             :data-series="series.key"
             :d="series.path"
             fill="none"
-            :stroke="series.color"
-            :stroke-width="series.key === 'total' ? 2 : 1.25"
+            :stroke="
+              series.key === 'total' ? `url(#${gradientId}-line)` : series.color
+            "
+            :stroke-width="series.key === 'total' ? 3 : 1.4"
+            :stroke-dasharray="series.key === 'hedge' ? '6 5' : null"
+            stroke-linejoin="round"
             vector-effect="non-scaling-stroke"
           />
           <g v-if="selected != null" class="performance-cursor">
@@ -293,7 +377,7 @@ function keyInspect(event) {
               :x2="x(inspectedDay)"
               :y1="margin.top"
               :y2="H - margin.bottom"
-              stroke="#70767d"
+              stroke="#555555"
               stroke-dasharray="2 4"
             />
             <circle
@@ -302,7 +386,11 @@ function keyInspect(event) {
               :cx="x(inspectedDay)"
               :cy="y(series.value(row))"
               r="3"
-              :fill="series.color"
+              :fill="
+                series.key === 'total'
+                  ? signColor(series.value(row))
+                  : series.color
+              "
             />
           </g>
           <g v-for="tick in x.ticks(8)" :key="tick">
@@ -332,8 +420,81 @@ function keyInspect(event) {
 
 <style scoped>
 .sim-performance {
-  background: #08080a;
-  padding: 22px 0 12px;
+  --payoff-gain: #00bf8c;
+  --payoff-loss: #ff1654;
+  background: #000;
+  color: #fff;
+  padding-bottom: 16px;
+}
+.performance-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+  padding: 26px 24px 28px;
+  border-top: 1px solid #292929;
+  border-bottom: 1px solid #292929;
+}
+.payoff-stat {
+  min-width: 0;
+  text-align: left;
+}
+.payoff-stat:nth-child(2) {
+  text-align: center;
+}
+.payoff-stat:last-child {
+  text-align: right;
+}
+.payoff-stat > span {
+  display: block;
+  color: #999999;
+  font-size: 16px;
+  font-weight: 400;
+  margin-bottom: 14px;
+}
+.payoff-stat strong {
+  display: block;
+  font-size: clamp(22px, 2.3vw, 30px);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.4px;
+  font-variant-numeric: tabular-nums;
+}
+.performance-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px 24px 24px;
+}
+.performance-time {
+  color: #999999;
+  font-size: 12px;
+}
+.performance-export {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  padding: 0;
+  color: #dedede;
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.performance-export:hover {
+  color: #fff;
+}
+.performance-export svg {
+  width: 20px;
+  height: 20px;
+  min-width: 0;
+}
+.performance-export path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .performance-heading {
   display: flex;
@@ -343,47 +504,25 @@ function keyInspect(event) {
   padding: 0 38px 14px 78px;
 }
 h2 {
-  color: var(--color-text);
+  color: #fff;
   font-size: 16px;
-  font-weight: 600;
+  font-weight: 500;
   margin: 0 0 8px;
 }
 .performance-subtitle {
-  color: var(--color-text-muted);
-  font-size: 11px;
+  color: #999999;
+  font-size: 12px;
   margin: 0;
   line-height: 1.6;
 }
-.performance-legend {
+.index-heading .performance-legend {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   align-items: center;
   gap: 12px 20px;
   padding-top: 2px;
-  font-size: 11px;
-}
-.performance-time {
-  width: 100%;
-  text-align: right;
-  color: var(--color-text-muted);
-  font-size: 10px;
-}
-.performance-value {
-  color: #9299a4;
-  white-space: nowrap;
-}
-.performance-value i {
-  display: inline-block;
-  width: 14px;
-  height: 2px;
-  margin: 0 7px 3px 0;
-}
-.performance-value strong {
-  color: var(--color-text);
-  font-weight: 500;
-  margin-left: 5px;
-  font-variant-numeric: tabular-nums;
+  font-size: 12px;
 }
 .performance-scroll {
   overflow-x: auto;
@@ -395,31 +534,32 @@ h2 {
   margin-bottom: 2px;
 }
 .index-time {
-  color: var(--color-text-muted);
-  font-size: 10px;
+  color: #999999;
+  font-size: 11px;
 }
 .index-price {
-  color: var(--color-text);
+  color: #fff;
+  font-size: 15px;
   font-variant-numeric: tabular-nums;
 }
 .hedge-dot-legend {
   white-space: nowrap;
-  color: #9299a4;
+  color: #bbbbbb;
 }
 .hedge-dot-legend i {
   display: inline-block;
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   margin: 0 6px 1px 0;
 }
 .buy-dot {
-  fill: #59b98c;
-  background: #59b98c;
+  fill: var(--payoff-gain);
+  background: var(--payoff-gain);
 }
 .sell-dot {
-  fill: #d77171;
-  background: #d77171;
+  fill: var(--payoff-loss);
+  background: var(--payoff-loss);
 }
 .hedge-trade-dot {
   cursor: help;
@@ -431,27 +571,54 @@ svg {
   touch-action: pan-y;
 }
 svg text {
-  fill: var(--color-text-muted);
+  fill: #c8c8c8;
   font:
-    10px "Helvetica Neue",
+    12px "Helvetica Neue",
     Helvetica,
     -apple-system,
     sans-serif;
 }
 svg:focus-visible {
-  outline: 1px solid var(--color-border-strong);
+  outline: 1px solid #666;
   outline-offset: -1px;
 }
-.performance-grid {
-  stroke: #fff;
-  stroke-opacity: 0.045;
-}
 svg .performance-axis-label {
+  fill: #999999;
+  font-size: 12px;
+}
+.payoff-scope {
+  margin: 10px 24px 0;
+  color: #999;
   font-size: 11px;
 }
+.performance-value strong {
+  margin-left: 6px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.pnl-key {
+  display: flex;
+  gap: 20px;
+  padding-top: 4px;
+  color: #999999;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.pnl-key i {
+  display: inline-block;
+  width: 18px;
+  border-top: 2px solid;
+  margin: 0 7px 3px 0;
+}
+.pnl-key .line-key-hedge {
+  border-top-style: dashed;
+}
+.pnl-key .line-key-total {
+  border-top-width: 3px;
+}
 .performance-note {
-  color: var(--color-text-muted);
-  font-size: 10px;
+  color: #999999;
+  font-size: 11px;
   margin: 4px 38px 0 78px;
 }
 @media (max-width: 1100px) {
@@ -459,23 +626,26 @@ svg .performance-axis-label {
     flex-direction: column;
     gap: 12px;
   }
-  .performance-legend {
+  .index-heading .performance-legend {
     justify-content: flex-start;
-  }
-  .performance-time {
-    width: auto;
-    text-align: left;
   }
 }
 @media (max-width: 650px) {
+  .performance-summary {
+    gap: 12px;
+    padding: 22px 12px;
+  }
+  .payoff-stat > span {
+    font-size: 13px;
+  }
+  .payoff-stat strong {
+    font-size: 20px;
+  }
+  .performance-actions {
+    padding: 18px 12px 24px;
+  }
   .performance-heading {
     padding: 0 16px 14px;
-  }
-  .performance-legend {
-    gap: 10px 16px;
-  }
-  .performance-time {
-    width: 100%;
   }
   .performance-note {
     margin-left: 16px;

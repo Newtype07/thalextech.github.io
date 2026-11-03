@@ -411,7 +411,7 @@ function download() {
       Settings changed. Rerun to update performance.
     </p>
     <div class="sim-results" :aria-busy="running">
-      <SimulationChart v-if="result" :result="result" />
+      <SimulationChart v-if="result" :result="result" @export="download" />
       <div v-else class="sim-empty">
         {{
           market
@@ -439,17 +439,21 @@ function download() {
           the price path when only side, hedge settings or costs change.
         </p>
       </details>
-      <button v-if="result" class="saveButton" type="button" @click="download">
-        Export CSV
-      </button>
     </footer>
   </section>
 </template>
 
 <style scoped>
 .simulator {
-  margin: 16px 36px 20px 28px;
+  --color-bg: #000;
+  --color-text: #fff;
+  --color-text-muted: #999999;
+  --color-border: #292929;
+  --color-border-strong: #484848;
+  margin: 0;
+  padding: 18px 28px 24px;
   font-size: 12px;
+  background: #000;
 }
 .sim-toolbar {
   display: flex;
@@ -478,7 +482,7 @@ function download() {
 }
 .sim-rv-control input {
   width: 120px;
-  accent-color: #c3c8d0;
+  accent-color: #00bf8c;
   cursor: pointer;
 }
 .sim-rv-control output {
@@ -500,7 +504,18 @@ function download() {
   color: var(--color-text-muted);
 }
 .sim-run {
-  color: var(--color-text);
+  color: #000;
+  background: #00bf8c;
+  border-color: #00bf8c;
+}
+.sim-run:hover:not(:disabled) {
+  color: #000;
+  background: #00d69d;
+  border-color: #00d69d;
+}
+.sim-toolbar .underlyingButtonActive {
+  background: #1b1b1b;
+  color: #fff;
 }
 .sim-settings {
   position: relative;
@@ -574,7 +589,7 @@ function download() {
 }
 .sim-status {
   margin: 12px 0;
-  color: #a9abb6;
+  color: #aaaaaa;
   font-size: 11px;
   line-height: 1.6;
 }
@@ -591,7 +606,7 @@ function download() {
   min-height: 500px;
   color: var(--color-text-muted);
   font-size: 12px;
-  background: #08080a;
+  background: #000;
 }
 .sim-footer {
   display: flex;
@@ -614,12 +629,12 @@ function download() {
 }
 input:focus-visible,
 select:focus-visible {
-  outline: 1px solid #9299a4;
+  outline: 1px solid #999999;
   outline-offset: 2px;
 }
 @media (max-width: 760px) {
   .simulator {
-    margin: 16px;
+    padding: 16px;
   }
   .sim-source {
     margin-left: 0;

@@ -165,13 +165,16 @@ test("performance UI selects a straddle, shows three net P&L curves, inspects, e
         )
         .join("; "),
     );
-    assert.equal(root().querySelectorAll(".pnl-chart path").length, 3);
+    assert.equal(
+      root().querySelectorAll(".pnl-chart path[data-series]").length,
+      3,
+    );
     assert.match(
       root().querySelector(".pnl-heading").textContent,
       /1 BTC per leg/,
     );
     assert.equal(
-      root().querySelectorAll(".performance-legend .performance-value").length,
+      root().querySelectorAll(".pnl-key .performance-value").length,
       3,
     );
     assert.equal(
@@ -213,15 +216,28 @@ test("performance UI selects a straddle, shows three net P&L curves, inspects, e
       root().querySelector(".sim-performance").textContent,
       /[Gg]reeks|[Dd]elta|[Vv]olatility/,
     );
-    const lowerRvLegend = root().querySelector(
-      ".performance-legend",
-    ).textContent;
+    const lowerRvLegend = root().querySelector(".pnl-key").textContent;
     await set("Realized / forward volatility", 200);
     await submit();
     assert.notEqual(
-      root().querySelector(".performance-legend").textContent,
+      root().querySelector(".pnl-key").textContent,
       lowerRvLegend,
     );
+    assert.deepEqual(
+      [...root().querySelectorAll(".payoff-stat > span")].map(
+        (node) => node.textContent,
+      ),
+      ["Max Loss", "Break-even", "Max Return"],
+    );
+    assert.equal(
+      root().querySelector(".payoff-stat strong").textContent,
+      "∞",
+      "a short straddle has unbounded option-only loss",
+    );
+    assert.equal(root().querySelectorAll(".performance-grid").length, 0);
+    const staticPayoff = root().querySelector(
+      ".performance-summary",
+    ).textContent;
     const noDriftPrice = root().querySelector(".index-price").textContent;
     await set("Annual drift", 20);
     await submit();
@@ -249,7 +265,7 @@ test("performance UI selects a straddle, shows three net P&L curves, inspects, e
     );
     await submit();
     assert.equal(root().querySelector(".sim-pending"), null);
-    const svg = root().querySelector(".sim-performance svg");
+    const svg = root().querySelector(".index-chart");
     svg.dispatchEvent(
       new window.KeyboardEvent("keydown", { key: "Home", bubbles: true }),
     );
@@ -262,6 +278,11 @@ test("performance UI selects a straddle, shows three net P&L curves, inspects, e
     assert.ok(root().querySelector(".index-cursor"));
     assert.ok(root().querySelector(".performance-cursor"));
 
+    assert.equal(
+      root().querySelector(".performance-summary").textContent,
+      staticPayoff,
+      "expiry payoff limits do not change with the inspection time",
+    );
     const openingValues = [
       ...root().querySelectorAll(".performance-value strong"),
     ].map((node) => Number(node.textContent.replace(/[^\d.-]/g, "")));

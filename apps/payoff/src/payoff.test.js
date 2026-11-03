@@ -96,3 +96,63 @@ test("exchange adapter rejects missing forwards and marks, including null fields
     assert.throws(() => normalizePayoffQuote({ ...ticker, [field]: null }, "CALL"), /CALL/);
   assert.equal(normalizePayoffQuote({ ...ticker, mark_price: 0 }, "CALL").premium, 0);
 });
+
+
+test("expiry payoff limits match long/short straddles, bounded puts and spreads", () => {
+  const straddle = [leg({ strike: 78000, premium: 3000 }), leg({ optionType: "put", strike: 78000, premium: 2905 })];
+  const long = buildPayoff(straddle, NOW);
+  assert.equal(long.maxLoss, 5905);
+  assert.equal(long.maxReturn, Infinity);
+  assert.deepEqual(long.breakEvens.points, [72095, 83905]);
+  const short = buildPayoff(straddle.map(item => ({ ...item, signedQty: -1 })), NOW);
+  assert.equal(short.maxLoss, Infinity);
+  assert.equal(short.maxReturn, 5905);
+  const put = buildPayoff([leg({ optionType: "put" })], NOW);
+  assert.equal(put.maxLoss, 10);
+  assert.equal(put.maxReturn, 90);
+  const spread = buildPayoff([leg(), leg({ strike: 120, signedQty: -1, premium: 3 })], NOW);
+  assert.equal(spread.maxLoss, 7);
+  assert.equal(spread.maxReturn, 13);
+});
+
+test("time curves show long-straddle decay on a common price and entry-cost basis", () => {
+  const legs = [leg({ forward: 100 }), leg({ optionType: "put", forward: 100 })];
+  const result = buildPayoff(legs, NOW);
+  assert.deepEqual(result.decayCurves.map(curve => curve.elapsedFraction), [0, 0.25, 0.5, 0.75]);
+  const atStrike = curve => curve.points.find(point => point.price === 100).pnl;
+  const values = [...result.decayCurves.map(atStrike), atStrike(result)];
+  assert.ok(values.every((value, i) => i === 0 || value < values[i - 1]), "time value decreases at a fixed ATM price");
+  assert.equal(values.at(-1), -20, "expiry loses the same original premium");
+  for (const curve of result.decayCurves) {
+    assert.deepEqual(curve.points.map(point => point.price), result.points.map(point => point.price));
+    assert.equal(curve.timestamp, NOW + (EXPIRY - NOW) * curve.elapsedFraction);
+    assert.ok(curve.points.every(point => Number.isFinite(point.pnl)));
+  }
+  const short = buildPayoff(legs.map(item => ({ ...item, signedQty: -1 })), NOW);
+  result.decayCurves.forEach((curve, i) => curve.points.forEach((point, j) => close(point.pnl, -short.decayCurves[i].points[j].pnl)));
+});
+
+test("time curves preserve call-put parity and keep later calendar legs alive", () => {
+  const call = buildPayoff([leg()], NOW);
+  const put = buildPayoff([leg({ optionType: "put" })], NOW);
+  for (let i = 0; i < call.decayCurves.length; i++) {
+    const c = call.decayCurves[i].points.find(point => point.price === 102);
+    const p = put.decayCurves[i].points.find(point => point.price === 102);
+    close(c.pnl - p.pnl, 2);
+  }
+  const later = leg({ expirationTs: EXPIRY + 30 * 86400, forward: 105, premium: 15 });
+  const first = leg({ signedQty: -1, forward: 101 });
+  const calendar = buildPayoff([later, first], NOW);
+  assert.ok(calendar.decayCurves.every(curve => curve.timestamp < EXPIRY));
+  assert.ok(calendar.decayCurves.every(curve => curve.points.every(point => Number.isFinite(point.pnl))));
+  assert.ok(calendar.points.find(point => point.price === 101).pnl > -5);
+});
+
+test("missing IV omits time curves without fabricating it or blocking an intrinsic payoff", () => {
+  const result = buildPayoff([leg({ iv: null })], NOW);
+  assert.deepEqual(result.decayCurves, []);
+  assert.match(result.decayUnavailableReason, /current IV/);
+  assert.deepEqual(result.breakEvens.points, [110]);
+  assert.ok(result.points.every(point => Number.isFinite(point.pnl)));
+  assert.throws(() => buildPayoff([leg(), leg({ expirationTs: EXPIRY + 86400, iv: -0.1 })], NOW), /IV is required/);
+});

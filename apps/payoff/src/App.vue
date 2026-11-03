@@ -21,14 +21,15 @@ const RESOLUTION_CONFIG = {
   3600: { label: "1h", resolution: "1h", interval_seconds: 60 * 60 },
   86400: { label: "1d", resolution: "1d", interval_seconds: 24 * 60 * 60 },
 };
-const GREEK_OPTIONS = [
-  { value: "delta", symbol: "\u03b4" },
-  { value: "gamma", symbol: "\u0393" },
-  { value: "theta", symbol: "\u0398" },
-  { value: "vega", symbol: "\u03c3" },
-  { value: "vanna", symbol: "va" },
-  { value: "charm", symbol: "ch" },
-  { value: "volga", symbol: "vo" },
+const CHART_OPTIONS = [
+  { value: "payoff", label: "Payoff" },
+  { value: "delta", label: "Delta", symbol: "\u03b4" },
+  { value: "gamma", label: "Gamma", symbol: "\u0393" },
+  { value: "theta", label: "Theta", symbol: "\u0398" },
+  { value: "vega", label: "Vega", symbol: "\u03c3" },
+  { value: "vanna", label: "Vanna", symbol: "va" },
+  { value: "charm", label: "Charm", symbol: "ch" },
+  { value: "volga", label: "Volga", symbol: "vo" },
 ];
 
 const LEG_COLOR_PALETTE = [
@@ -67,14 +68,15 @@ const FALLBACK_SPOT_BY_UNDERLYING = {
 };
 
 const ui = reactive({
-  view: "payoff",
+  chart: "payoff",
   resolutionKey: "900",
-  greek: "delta",
   maxPoints: DEFAULT_MAX_POINTS_PER_FETCH,
   timeProgress: 0,
   loading: false,
   error: "",
 });
+
+const isPayoff = computed(() => ui.chart === "payoff");
 
 const underlying = ref("BTCUSD");
 const positionLegs = ref([]);
@@ -117,7 +119,7 @@ const payoffState = computed(() => {
 });
 const payoff = computed(() => payoffState.value.data ?? null);
 const formatPrice = (value) => new Intl.NumberFormat("en-US", {
-  style: "currency", currency: "USD", maximumFractionDigits: 2,
+  style: "currency", currency: "USD", maximumFractionDigits: 0,
 }).format(value);
 const breakEvenText = computed(() => {
   if (!payoff.value) return "—";
@@ -974,7 +976,7 @@ const loadPayoff = async () => {
 };
 
 const loadSeries = async () => {
-  if (ui.view === "payoff") return loadPayoff();
+  if (isPayoff.value) return loadPayoff();
   payoffController?.abort();
   const requestId = ++loadRequestId;
 
@@ -1066,12 +1068,12 @@ const chartLoading = computed(
 );
 
 const handleSavePng = () => {
-  if (ui.view === "payoff") payoffChartRef.value?.exportPng();
-  else chartRef.value?.exportPng({ filename: `payoff-${ui.greek}.png` });
+  if (isPayoff.value) payoffChartRef.value?.exportPng();
+  else chartRef.value?.exportPng({ filename: `payoff-${ui.chart}.png` });
 };
 
 watch(
-  () => [ui.view, ui.resolutionKey, maxPointsPerFetch.value, positionLegs.value],
+  () => [isPayoff.value, ui.resolutionKey, maxPointsPerFetch.value, positionLegs.value],
   () => {
     if (isBootstrapping.value) return;
     scheduleLoad();
@@ -1083,7 +1085,7 @@ watch(
   () => ui.timeProgress,
   () => {
     if (isBootstrapping.value) return;
-    if (ui.loading || ui.view !== "greeks") return;
+    if (ui.loading || isPayoff.value) return;
     recomputeSimulationFromCache();
   },
 );
@@ -1138,7 +1140,7 @@ watch(
     simulationAnchorTs.value,
   ],
   () => {
-    if (ui.view === "greeks") rebuildBuilderSnapshots(simulationAnchorTs.value);
+    if (!isPayoff.value) rebuildBuilderSnapshots(simulationAnchorTs.value);
   },
   { deep: true },
 );
@@ -1202,7 +1204,7 @@ onUnmounted(() => {
         <h1>{{ headerTitle }}</h1>
       </div>
 
-      <div v-if="ui.error || (ui.view === 'payoff' && !ui.loading && payoffState.error)" class="error" role="alert">
+      <div v-if="ui.error || (isPayoff && !ui.loading && payoffState.error)" class="error" role="alert">
         {{ ui.error || payoffState.error }}
       </div>
     </header>
@@ -1241,63 +1243,38 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="chartShell">
-        <div class="viewRow">
-          <div class="viewToggle" role="group" aria-label="Chart view">
-            <button type="button" :class="{ selected: ui.view === 'payoff' }" :aria-pressed="ui.view === 'payoff'" @click="ui.view = 'payoff'">Payoff</button>
-            <button type="button" :class="{ selected: ui.view === 'greeks' }" :aria-pressed="ui.view === 'greeks'" @click="ui.view = 'greeks'">Greeks</button>
-          </div>
-          <div class="viewActions">
-            <button type="button" class="saveButton" :disabled="ui.loading" @click="loadSeries">Refresh</button>
-            <button type="button" class="saveButton" :disabled="ui.loading || (ui.view === 'payoff' ? !payoff : !simulationRows.length)" @click="handleSavePng">Save PNG</button>
-          </div>
-        </div>
-        <div v-if="ui.view === 'payoff'" class="payoffSummary" aria-live="polite">
-          <div><span>Forward · {{ payoff ? formatExpiryFromTs(payoff.horizonTs) : 'first maturity' }}</span><strong class="forwardValue">{{ payoff ? formatPrice(payoff.forward) : '—' }}</strong></div>
-          <div><span>{{ payoff?.mixedMaturities ? 'Estimated break-evens · shown range' : 'Break-even prices' }}</span><strong>{{ breakEvenText }}</strong></div>
-          <div><span>Net {{ (payoff?.netPremium ?? 0) < 0 ? 'credit' : 'debit' }} at current marks</span><strong>{{ payoff ? formatPrice(Math.abs(payoff.netPremium)) : '—' }}</strong></div>
-        </div>
-        <PayoffChart v-if="ui.view === 'payoff'" ref="payoffChartRef" :payoff="payoff" :asset="underlying === 'ETHUSD' ? 'ETH' : 'BTC'" :loading="ui.loading" />
-        <p v-if="ui.view === 'payoff'" class="payoffNote">
-          Profit/loss at {{ payoff ? formatExpiryFromTs(payoff.horizonTs) : 'the first expiry' }} relative to current marks, before fees.
-          <template v-if="payoff?.mixedMaturities">Later legs retain estimated time value, with unchanged IV and relative forwards. Break-evens are estimates within the shown range.</template>
-        </p>
-        <div v-if="ui.view === 'greeks'" class="chartControlRow">
+        <div class="chartControlRow">
           <div class="greekBarRow">
-            <div class="greekSymbolGrid" role="group" aria-label="Greek">
-              <button
-                v-for="option in GREEK_OPTIONS"
-                :key="option.value"
-                type="button"
-                class="greekSymbolButton"
-                :class="{ active: ui.greek === option.value }"
-                @click="ui.greek = option.value"
-              >
-                {{ option.symbol }}
+            <div class="greekSymbolGrid" role="group" aria-label="Payoff and Greeks">
+              <button v-for="option in CHART_OPTIONS" :key="option.value" type="button" class="greekSymbolButton" :class="{ active: ui.chart === option.value }" :aria-pressed="ui.chart === option.value" :aria-label="option.label" :title="option.label" @click="ui.chart = option.value">
+                <svg v-if="option.value === 'payoff'" class="payoffSymbol" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7 L11 17 L21 5" /></svg>
+                <template v-else>{{ option.symbol }}</template>
               </button>
             </div>
           </div>
-          <div class="timeSliderBar">
+          <div v-if="!isPayoff" class="timeSliderBar">
             <span class="timeSliderLabel">T</span>
-            <input
-              v-model.number="ui.timeProgress"
-              class="timeSliderInput"
-              :style="timeSliderStyle"
-              type="range"
-              min="0"
-              max="100"
-              step="1"
-              aria-label="Fast forward time to expiry"
-            />
+            <input v-model.number="ui.timeProgress" class="timeSliderInput" :style="timeSliderStyle" type="range" min="0" max="100" step="1" aria-label="Fast forward time to expiry" />
+          </div>
+          <div class="viewActions">
+            <button type="button" class="saveButton" :disabled="ui.loading" @click="loadSeries">Refresh</button>
+            <button type="button" class="saveButton" :disabled="ui.loading || (isPayoff ? !payoff : !simulationRows.length)" @click="handleSavePng">Save PNG</button>
           </div>
         </div>
+        <div v-if="isPayoff" class="payoffSummary" aria-live="polite">
+          <div><span>{{ payoff?.mixedMaturities ? 'Max Loss · shown range' : 'Max Loss' }}</span><strong class="lossValue">{{ payoff ? (payoff.maxLoss === Infinity ? '∞' : formatPrice(payoff.maxLoss)) : '—' }}</strong></div>
+          <div><span>{{ payoff?.mixedMaturities ? 'Estimated break-evens · shown range' : 'Break-even prices' }}</span><strong>{{ breakEvenText }}</strong></div>
+          <div><span>{{ payoff?.mixedMaturities ? 'Max Return · shown range' : 'Max Return' }}</span><strong class="returnValue">{{ payoff ? (payoff.maxReturn === Infinity ? '∞' : formatPrice(payoff.maxReturn)) : '—' }}</strong></div>
+        </div>
+        <PayoffChart v-if="isPayoff" ref="payoffChartRef" :payoff="payoff" :asset="underlying === 'ETHUSD' ? 'ETH' : 'BTC'" :loading="ui.loading" />
         <Greeks
-          v-if="ui.view === 'greeks'"
+          v-if="!isPayoff"
           ref="chartRef"
           :data="simulationRows"
           title=""
           subtitle=""
           :loading="chartLoading"
-          :greek="ui.greek"
+          :greek="ui.chart"
         />
       </div>
     </main>
@@ -1305,19 +1282,17 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.viewRow, .viewActions { display: flex; align-items: center; gap: 8px; }
-.viewRow { justify-content: space-between; flex-wrap: wrap; }
-.viewToggle { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: #0f1318; }
-.viewToggle button { background: transparent; border: 0; border-radius: 8px; color: #94a3b8; padding: 9px 18px; cursor: pointer; }
-.viewToggle button.selected { color: #fff; background: #273241; }
-.payoffSummary { display: grid; grid-template-columns: 1fr 1.5fr 1fr; gap: 16px; padding: 18px 20px; border: 1px solid #202630; border-radius: 12px; background: #0b0e13; }
+.viewActions { display: flex; align-items: center; gap: 8px; grid-column: 3; justify-self: end; }
+.payoffSummary { display: grid; grid-template-columns: 1fr 1.5fr 1fr; gap: 16px; padding: 12px 12.2% 14px 5%; background: #000; }
 .payoffSummary div { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.payoffSummary span { font-size: 11px; color: #94a3b8; }
-.payoffSummary strong { font-size: 17px; font-weight: 500; overflow-wrap: anywhere; }
-.payoffSummary .forwardValue { color: #93c5fd; }
-.payoffNote { margin: 0 14px; color: #94a3b8; font-size: 11px; line-height: 1.6; }
+.payoffSummary div:nth-child(2) { text-align: center; }
+.payoffSummary div:last-child { text-align: right; }
+.payoffSummary span { font-size: 10px; color: #999; }
+.payoffSummary strong { font-size: 13px; font-weight: 500; color: #fff; overflow-wrap: anywhere; }
+.payoffSummary .lossValue { color: #ff1654; }
+.payoffSummary .returnValue { color: #00bf8c; }
 button:disabled { opacity: 0.5; cursor: default; }
-@media (max-width: 650px) { .payoffSummary { grid-template-columns: 1fr; } }
+@media (max-width: 650px) { .payoffSummary { grid-template-columns: 1fr 1.5fr 1fr; padding: 12px 0; gap: 8px; }.payoffSummary strong { font-size: 12px; }.payoffSummary span { font-size: 9px; } }
 
 .appRoot {
   max-width: 1320px;
@@ -1421,9 +1396,13 @@ h1 {
 }
 
 .greekSymbolButton.active {
-  color: #f8fafc;
+  color: #fff;
+  background: #202329;
+  border-color: rgba(255, 255, 255, 0.4);
   font-weight: 600;
 }
+.greekSymbolButton:focus-visible { outline: 1px solid #999; outline-offset: 2px; }
+.payoffSymbol { display: block; width: 17px; height: 17px; margin: auto; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
 .saveButton {
   height: 40px;
@@ -1495,10 +1474,6 @@ h1 {
   font-size: 10px;
 }
 
-.builderMain :deep(.side-pill--buy) {
-  color: #22d3ee;
-}
-
 .chartShell {
   margin-top: 6px;
   display: flex;
@@ -1509,7 +1484,7 @@ h1 {
 
 .chartControlRow {
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: auto minmax(120px, 1fr) auto;
   align-items: center;
   column-gap: 16px;
   width: 100%;
@@ -1629,8 +1604,14 @@ h1 {
   }
 
   .chartControlRow {
+    grid-template-columns: minmax(0, 1fr) auto;
     column-gap: 10px;
+    row-gap: 10px;
   }
+  .greekBarRow { grid-column: 1 / -1; }
+  .greekSymbolGrid { display: flex; flex-wrap: wrap; gap: 6px; }
+  .viewActions { grid-column: 2; }
+  .timeSliderBar { grid-column: 1; }
 
   .timeSliderBar {
     max-width: 300px;

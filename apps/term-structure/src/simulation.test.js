@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildForwardCurve, YEAR } from "./simulation/forward-curve.js";
 import { nearestListedStrike } from "./simulation/straddle-selection.js";
+import { straddlePayoff } from "./simulation/straddle-payoff.js";
 import { hedgeDecision } from "./simulation/delta-hedge.js";
 import { simulateStraddle } from "./simulation/straddle-simulation.js";
 import { calcOptionPrice } from "../../../lib/thalex.js";
@@ -330,5 +331,40 @@ test("annual drift changes expected price growth while preserving the seeded ran
     deterministic.config.spot *
       Math.exp((0.2 * deterministic.config.horizon) / YEAR),
     1e-6,
+  );
+});
+
+test("option-only payoff summary has exact break-evens and correct bounded/unbounded sides", () => {
+  const long = straddlePayoff({
+    strike: 78000,
+    entryPrice: 5905,
+    quantity: 1,
+    side: "buy",
+  });
+  assert.deepEqual(long, {
+    maxLoss: 5905,
+    maxReturn: Infinity,
+    breakEvens: [72095, 83905],
+  });
+  const short = straddlePayoff({
+    strike: 78000,
+    entryPrice: 5905,
+    quantity: 2,
+    side: "sell",
+  });
+  assert.deepEqual(short, {
+    maxLoss: Infinity,
+    maxReturn: 11810,
+    breakEvens: [72095, 83905],
+  });
+  for (const price of long.breakEvens) near(Math.abs(price - 78000) - 5905, 0);
+  // Expiry prices cannot be negative: an expensive straddle may have one root.
+  assert.deepEqual(
+    straddlePayoff({ strike: 100, entryPrice: 150, quantity: 1, side: "buy" })
+      .breakEvens,
+    [250],
+  );
+  assert.throws(() =>
+    straddlePayoff({ strike: 100, entryPrice: NaN, quantity: 1, side: "buy" }),
   );
 });

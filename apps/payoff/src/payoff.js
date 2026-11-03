@@ -68,7 +68,7 @@ export function buildPayoff(legs, nowTs = Date.now() / 1000) {
   const first = legs.find((leg) => leg.expirationTs === horizonTs);
   const forward = first.forward;
   const mixedMaturities = legs.some((leg) => leg.expirationTs !== horizonTs);
-  if (mixedMaturities && legs.some((leg) => leg.expirationTs > horizonTs && !Number.isFinite(leg.iv))) {
+  if (mixedMaturities && legs.some((leg) => leg.expirationTs > horizonTs && (!Number.isFinite(leg.iv) || leg.iv < 0))) {
     throw new Error("Current IV is required for later-maturity legs.");
   }
   // A maturity has one reference forward, even if its tickers were marked at different instants.
@@ -103,9 +103,30 @@ export function buildPayoff(legs, nowTs = Date.now() / 1000) {
     ...Array.from({ length: 401 }, (_, i) => minPrice + (maxPrice - minPrice) * i / 400),
     ...strikes, ...breakEvens.points, forward,
   ])].filter((p) => p >= minPrice && p <= maxPrice).sort((a, b) => a - b);
+  const points = prices.map((price) => ({ price, pnl: valueAt(price) }));
+  // Keep every time slice on the expiry curve's price grid and entry-cost basis.
+  // Missing IV must not remove an otherwise valid intrinsic expiry payoff.
+  const hasValuationVol = normalized.every(leg => Number.isFinite(leg.iv) && leg.iv >= 0);
+  const decayCurves = hasValuationVol ? [0, 0.25, 0.5, 0.75].map(elapsedFraction => {
+    const timestamp = nowTs + (horizonTs - nowTs) * elapsedFraction;
+    return {
+      elapsedFraction, timestamp,
+      label: elapsedFraction === 0 ? "Now" : `${elapsedFraction * 100}% elapsed`,
+      points: prices.map(price => ({ price, pnl: payoffAtPrice(normalized, price, timestamp, forward) })),
+    };
+  }) : [];
+  // Same-expiry payoffs are linear between strikes and beyond the last strike.
+  // Extrema therefore occur at zero/strikes unless the call tail is unbounded.
+  const bounds = mixedMaturities ? points.map(point => point.pnl) : [0, ...strikes].map(valueAt);
+  const tailSlope = normalized.filter(leg => leg.optionType === "call").reduce((sum, leg) => sum + leg.signedQty, 0);
+  const maxLoss = !mixedMaturities && tailSlope < -1e-12 ? Infinity : Math.max(0, -Math.min(...bounds));
+  const maxReturn = !mixedMaturities && tailSlope > 1e-12 ? Infinity : Math.max(0, Math.max(...bounds));
   return {
     forward, horizonTs, mixedMaturities, breakEvens,
+    maxLoss, maxReturn,
+    decayCurves,
+    decayUnavailableReason: hasValuationVol ? "" : "Time curves require a current IV for every leg.",
     netPremium: legs.reduce((sum, leg) => sum + leg.signedQty * leg.premium, 0),
-    points: prices.map((price) => ({ price, pnl: valueAt(price) })),
+    points,
   };
 }
