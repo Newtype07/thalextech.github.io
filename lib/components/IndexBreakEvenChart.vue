@@ -43,6 +43,7 @@ const svgRef = ref(null);
 const tooltipRef = ref(null);
 const tooltip = ref(null);
 const tooltipId = `price-tooltip-${useId()}`;
+const projectionClipId = `price-projection-clip-${useId()}`;
 let tooltipRequestId = 0;
 const hideTooltip = () => {
   tooltipRequestId += 1;
@@ -351,8 +352,15 @@ function render() {
     (d) => d?.date instanceof Date && Number.isFinite(d?.value),
   );
   if (projected.length >= 2) {
+    // The projection can target an expiry beyond the displayed maturities.
+    g.append("clipPath")
+      .attr("id", projectionClipId)
+      .append("rect")
+      .attr("width", innerWidth)
+      .attr("height", innerHeight);
     g.append("path")
       .datum(projected)
+      .attr("clip-path", `url(#${projectionClipId})`)
       .attr("fill", "none")
       .attr("stroke", "#f5f5f7")
       .attr("stroke-width", props.indexStrokeWidth)

@@ -1,7 +1,7 @@
 <script setup>
 import * as d3 from "d3";
 import { onMounted, ref, watch } from "vue";
-import { exportChartToPng } from "../../../../lib/export-png.js";
+import { copyChartToClipboard, exportChartToPng } from "../../../../lib/export-png.js";
 
 const props = defineProps({
   data: { type: Array, default: () => [] },
@@ -61,7 +61,7 @@ const normalizeGreekValue = (key, value) => {
   return Number(value);
 };
 
-function exportPng({ filename = "payoff-greeks.png", scale = 4, padding = 24 } = {}) {
+function pngOptions({ filename = "payoff-greeks.png", scale = 4, padding = 24 } = {}) {
   const exportSvg = svgRef.value?.cloneNode(true);
   if (!exportSvg) return;
 
@@ -71,7 +71,7 @@ function exportPng({ filename = "payoff-greeks.png", scale = 4, padding = 24 } =
       return this.getAttribute("data-export-stroke-width");
     });
 
-  exportChartToPng({
+  return {
     element: exportSvg,
     filename,
     scale,
@@ -81,10 +81,16 @@ function exportPng({ filename = "payoff-greeks.png", scale = 4, padding = 24 } =
       if (!canvas) return;
       ctx.drawImage(canvas, p, p, width, height);
     },
-  });
+  };
 }
 
-defineExpose({ exportPng });
+defineExpose({
+  exportPng: (options) => {
+    const png = pngOptions(options);
+    if (png) exportChartToPng(png);
+  },
+  copyImage: (options) => copyChartToClipboard(pngOptions(options)),
+});
 
 const render = () => {
   const svgEl = svgRef.value;

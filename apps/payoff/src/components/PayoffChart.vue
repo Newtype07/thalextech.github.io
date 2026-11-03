@@ -1,7 +1,7 @@
 <script setup>
 import * as d3 from "d3";
 import { onMounted, onUnmounted, ref, watch, useId } from "vue";
-import { exportChartToPng } from "../../../../lib/export-png.js";
+import { copyChartToClipboard, exportChartToPng } from "../../../../lib/export-png.js";
 
 const props = defineProps({
   payoff: { type: Object, default: null },
@@ -115,17 +115,22 @@ function decorateExportClone(clone, meta) {
   clone.insertBefore(g, clone.firstChild);
 }
 
-defineExpose({ exportPng: (options = {}) => {
+function pngOptions(options = {}) {
   const { meta, ...rest } = options;
-  exportChartToPng({
+  return {
     element: svgRef.value,
     filename: "payoff.png",
     scale: 4,
     padding: 24,
     prepareSvgClone: (clone) => decorateExportClone(clone, meta || null),
     ...rest,
-  });
-}});
+  };
+}
+
+defineExpose({
+  exportPng: (options) => exportChartToPng(pngOptions(options)),
+  copyImage: (options) => copyChartToClipboard(pngOptions(options)),
+});
 
 function render() {
   if (!svgRef.value) return;

@@ -96,6 +96,8 @@ const simulationAnchorTs = ref(null);
 const simulationAnchorSpot = ref(null);
 const chartRef = ref(null);
 const payoffChartRef = ref(null);
+const copyState = reactive({ busy: false, message: "", failed: false });
+let copyFeedbackTimer;
 const payoffQuotes = ref({});
 const payoffAtmIv = ref(null);
 let payoffController = null;
@@ -122,11 +124,10 @@ const payoff = computed(() => payoffState.value.data ?? null);
 const formatPrice = (value) => new Intl.NumberFormat("en-US", {
   style: "currency", currency: "USD", maximumFractionDigits: 0,
 }).format(value);
-const payoffMarkInfo = computed(() => {
-  if (!payoff.value) return { label: "Net Mark", value: "—" };
-  const net = payoff.value.netPremium;
-  const label = net > 0 ? "Net Debit" : net < 0 ? "Net Credit" : "Net Mark";
-  return { label, value: formatPrice(Math.abs(net)) };
+const maxLossDisplay = computed(() => {
+  if (!payoff.value) return "—";
+  if (payoff.value.maxLoss === Infinity) return "Unbounded";
+  return formatPrice(payoff.value.maxLoss);
 });
 
 const pWinDisplay = computed(() => Number.isFinite(payoff.value?.probabilityOfProfit)
@@ -161,7 +162,7 @@ const exportInstrumentTitle = computed(() => {
   const sorted = [...groups.values()]
     .filter((g) => g.qty !== 0)
     .sort((a, b) => a.expirationTs - b.expirationTs || a.strike - b.strike || (a.type === "call" ? -1 : 1));
-  const intFmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+  const strikeFmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
   const maturityFmt = new Intl.DateTimeFormat("en-GB", {
     day: "2-digit", month: "short", year: "numeric", timeZone: "UTC",
   });
@@ -170,7 +171,7 @@ const exportInstrumentTitle = computed(() => {
   const parts = sorted.map((g) => {
     const sign = g.qty < 0 ? "−" : "";
     const maturity = sharedMaturity ? "" : `${formatMaturity(g.expirationTs)} `;
-    return `${sign}${Math.abs(g.qty)} × ${maturity}${intFmt.format(g.strike)} ${g.type === "put" ? "Put" : "Call"}`;
+    return `${sign}${Math.abs(g.qty)} × ${maturity}${strikeFmt.format(g.strike / 1000)}K ${g.type === "put" ? "Put" : "Call"}`;
   });
   const asset = underlying.value === "ETHUSD" ? "ETH" : "BTC";
   return [asset, ...(sharedMaturity ? [formatMaturity(legs[0].expirationTs)] : []), parts.join("\u2003\u2003")].join("  ·  ");
@@ -182,7 +183,7 @@ const payoffExportMeta = computed(() => {
   return {
     title: exportInstrumentTitle.value,
     stats: [
-      { label: payoffMarkInfo.value.label, value: payoffMarkInfo.value.value },
+      { label: mixed ? "Max Loss · shown range" : "Max Loss", value: maxLossDisplay.value, fill: "#ff1654" },
       { label: mixed ? "P(win) · first expiry est." : "P(win)", value: pWinDisplay.value, preserveCase: true },
       { label: mixed ? "Max Return · shown range" : "Max Return", value: maxReturnDisplay.value, fill: "#16B98E" },
     ],
@@ -1141,6 +1142,28 @@ const handleSavePng = () => {
   else chartRef.value?.exportPng({ filename: `payoff-${ui.chart}.png` });
 };
 
+const handleCopyImage = async () => {
+  if (copyState.busy) return;
+  const chart = isPayoff.value ? payoffChartRef.value : chartRef.value;
+  if (!chart) return;
+  clearTimeout(copyFeedbackTimer);
+  copyState.busy = true;
+  copyState.message = "";
+  copyState.failed = false;
+  try {
+    await chart.copyImage(isPayoff.value ? { meta: payoffExportMeta.value } : {});
+    copyState.message = "Image copied";
+    copyFeedbackTimer = setTimeout(() => { copyState.message = ""; }, 3000);
+  } catch (error) {
+    copyState.failed = true;
+    copyState.message = error?.name === "NotAllowedError"
+      ? "Clipboard access was blocked. Allow clipboard access or use Save PNG."
+      : error?.message || "Could not copy the image. Use Save PNG instead.";
+  } finally {
+    copyState.busy = false;
+  }
+};
+
 watch(
   () => [isPayoff.value, ui.resolutionKey, maxPointsPerFetch.value, positionLegs.value],
   () => {
@@ -1260,6 +1283,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  clearTimeout(copyFeedbackTimer);
   ++loadRequestId;
   payoffController?.abort();
   if (loadTimer) clearTimeout(loadTimer);
@@ -1300,8 +1324,12 @@ onUnmounted(() => {
           <button type="button" class="iconButton" :disabled="ui.loading || (isPayoff ? !payoff : !simulationRows.length)" @click="handleSavePng" aria-label="Save PNG" title="Save PNG">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3l2-3h8l2 3h3a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
           </button>
+          <button type="button" class="iconButton" :disabled="copyState.busy || ui.loading || (isPayoff ? !payoff : !simulationRows.length)" :aria-busy="copyState.busy" @click="handleCopyImage" :aria-label="copyState.busy ? 'Copying image' : 'Copy image to clipboard'" :title="copyState.busy ? 'Copying image…' : 'Copy image to clipboard'">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h3" /></svg>
+          </button>
         </div>
       </div>
+      <p v-if="copyState.message" class="copyFeedback" :class="{ copyFeedbackError: copyState.failed }" role="status">{{ copyState.message }}</p>
       <div class="builderRow">
         <div class="builderMain">
           <PositionBuilder
@@ -1325,7 +1353,7 @@ onUnmounted(() => {
           <input v-model.number="ui.timeProgress" class="timeSliderInput" :style="timeSliderStyle" type="range" min="0" max="100" step="1" aria-label="Fast forward time to expiry" />
         </div>
         <div v-if="isPayoff" class="payoffSummary" aria-live="polite">
-          <div><span>{{ payoffMarkInfo.label }}</span><strong>{{ payoffMarkInfo.value }}</strong></div>
+          <div><span>{{ payoff?.mixedMaturities ? 'Max Loss · shown range' : 'Max Loss' }}</span><strong class="lossValue">{{ maxLossDisplay }}</strong></div>
           <div :title="pWinHint"><span class="probabilityLabel">P(win)</span><strong>{{ pWinDisplay }}</strong></div>
           <div><span>{{ payoff?.mixedMaturities ? 'Max Return · shown range' : 'Max Return' }}</span><strong class="returnValue">{{ maxReturnDisplay }}</strong></div>
         </div>
@@ -1345,6 +1373,8 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.copyFeedback { margin: 0; color: #00bf8c; font-size: 12px; text-align: right; }
+.copyFeedbackError { color: #ff8282; }
 .viewActions { display: flex; align-items: center; gap: 6px; justify-self: end; }
 .payoffSummary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; padding: 18px var(--chart-right-pct) 20px var(--chart-left-pct); background: #000; border-top: 1px solid #262626; border-bottom: 1px solid #262626; }
 .payoffSummary div { display: flex; flex-direction: column; gap: 10px; min-width: 0; text-align: left; }
@@ -1354,6 +1384,7 @@ onUnmounted(() => {
 .payoffSummary .probabilityLabel { text-transform: none; }
 .payoffSummary strong { font-size: 20px; font-weight: 300; letter-spacing: -0.01em; color: #fff; overflow-wrap: anywhere; }
 .payoffSummary .returnValue { color: #00bf8c; }
+.payoffSummary .lossValue { color: #ff1654; }
 button:disabled { opacity: 0.5; cursor: default; }
 @media (max-width: 650px) { .payoffSummary { padding: 14px 0; gap: 10px; }.payoffSummary strong { font-size: 16px; }.payoffSummary span { font-size: 8px; } }
 
