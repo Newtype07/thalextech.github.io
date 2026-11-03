@@ -28,26 +28,31 @@ function decorateExportClone(clone, meta) {
   const vb = clone.getAttribute("viewBox");
   if (!vb) return;
   const [x0, y0, w, h] = vb.split(" ").map(Number);
-  const legs = meta.legs?.length ? meta.legs : [];
-  const hasStats = Boolean(meta.stats);
-  const greeks = meta.greeks || "";
+  const title = meta.title || "";
+  const subtitle = meta.subtitle || "";
+  const stats = Array.isArray(meta.stats) ? meta.stats : [];
 
+  const availableTitleWidth = (x0 + w - layout.margin.right) - (x0 + layout.margin.left);
+  const titleMaxSize = 32;
+  const titleMinSize = 18;
+  const titleEst = title ? Math.max(titleMinSize, Math.min(titleMaxSize, availableTitleWidth / Math.max(1, title.length * 0.56))) : titleMaxSize;
   const S = {
-    padTop: 36, padBottom: 24,
-    legSize: 22, legLineHeight: 34,
-    legsToRule: 30, ruleToLabel: 18, labelToValue: 8,
-    valueToGreeks: 20, greeksToRule: 20,
-    labelSize: 10, valueSize: 22, greeksSize: 14,
+    padTop: 40, padBottom: 24,
+    titleSize: titleEst, subtitleSize: 14,
+    titleToSubtitle: 14, subtitleToRule: 36,
+    titleToRule: 32,
+    ruleToLabel: 22, labelSize: 11, labelToValue: 12, valueSize: 28,
+    statsToRule: 22,
   };
 
-  const legsBlockH = legs.length ? S.legSize + Math.max(0, legs.length - 1) * S.legLineHeight : 0;
-  const headerBlockH = legsBlockH + S.legsToRule;
-  const statsBlockH = hasStats
-    ? S.ruleToLabel + S.labelSize + S.labelToValue + S.valueSize
+  const headerTextH = title
+    ? S.titleSize + (subtitle ? S.titleToSubtitle + S.subtitleSize : 0)
     : 0;
-  const greeksBlockH = greeks ? (hasStats ? S.valueToGreeks : S.ruleToLabel) + S.greeksSize : 0;
-  const bottomRuleH = (hasStats || greeks) ? S.greeksToRule : 0;
-  const headerH = S.padTop + headerBlockH + statsBlockH + greeksBlockH + bottomRuleH + S.padBottom;
+  const headerToStatsGap = title || subtitle ? (subtitle ? S.subtitleToRule : S.titleToRule) : 0;
+  const statsBlockH = stats.length
+    ? S.ruleToLabel + S.labelSize + S.labelToValue + S.valueSize + S.statsToRule
+    : 0;
+  const headerH = S.padTop + headerTextH + headerToStatsGap + statsBlockH + S.padBottom;
 
   clone.setAttribute("viewBox", `${x0} ${y0 - headerH} ${w} ${h + headerH}`);
   const chartLeft = x0 + layout.margin.left;
@@ -68,75 +73,43 @@ function decorateExportClone(clone, meta) {
     g.appendChild(el);
   };
 
-  const addRule = (y, opacity = 1) => {
+  const addRule = (y) => {
     const line = document.createElementNS(SVG_NS, "line");
     line.setAttribute("x1", String(chartLeft));
     line.setAttribute("x2", String(chartRight));
     line.setAttribute("y1", String(y));
     line.setAttribute("y2", String(y));
-    line.setAttribute("stroke", "#2a2f3a");
+    line.setAttribute("stroke", "#262626");
     line.setAttribute("stroke-width", "1");
-    line.setAttribute("stroke-opacity", String(opacity));
     g.appendChild(line);
   };
 
-  const addLegLine = (leg, y) => {
-    const el = document.createElementNS(SVG_NS, "text");
-    el.setAttribute("x", String(chartMid));
-    el.setAttribute("y", String(y));
-    el.setAttribute("text-anchor", "middle");
-    el.setAttribute("font-size", String(S.legSize));
-    el.setAttribute("font-weight", "700");
-    const dot = document.createElementNS(SVG_NS, "tspan");
-    dot.setAttribute("fill", leg.side === "sell" ? "#ff1654" : "#00bf8c");
-    dot.textContent = "●";
-    const label = document.createElementNS(SVG_NS, "tspan");
-    label.setAttribute("fill", "#f1f3f8");
-    label.setAttribute("dx", "10");
-    label.textContent = leg.label;
-    el.appendChild(dot);
-    el.appendChild(label);
-    g.appendChild(el);
-  };
+  let cursorY = y0 - headerH + S.padTop;
+  if (title) {
+    cursorY += S.titleSize;
+    addText(title, chartMid, cursorY, "#f1f3f8", S.titleSize,
+      { "text-anchor": "middle", "font-weight": "500", "letter-spacing": "-0.02em" });
+  }
+  if (subtitle) {
+    cursorY += S.titleToSubtitle + S.subtitleSize;
+    addText(subtitle, chartMid, cursorY, "#8A8A8A", S.subtitleSize,
+      { "text-anchor": "middle", "letter-spacing": "0.01em" });
+  }
 
-  const headerTop = y0 - headerH + S.padTop;
-  const firstLegBaseline = headerTop + S.legSize;
-  legs.forEach((leg, i) => addLegLine(leg, firstLegBaseline + i * S.legLineHeight));
-
-  const legsBottom = firstLegBaseline + Math.max(0, legs.length - 1) * S.legLineHeight;
-  const topRuleY = legsBottom + S.legsToRule;
-  addRule(topRuleY);
-
-  let cursorY = topRuleY;
-
-  if (hasStats) {
-    const s = meta.stats;
+  if (stats.length) {
+    cursorY += (subtitle ? S.subtitleToRule : (title ? S.titleToRule : 0));
+    addRule(cursorY);
+    const colWidth = (chartRight - chartLeft) / stats.length;
     const labelY = cursorY + S.ruleToLabel + S.labelSize;
     const valueY = labelY + S.labelToValue + S.valueSize;
-    const labelAttrs = { "letter-spacing": "0.14em", "font-weight": "500" };
-    addText(s.lossLabel.toUpperCase(), chartLeft, labelY, "#6b7280", S.labelSize, labelAttrs);
-    addText(s.markLabel.toUpperCase(), chartMid, labelY, "#6b7280", S.labelSize,
-      { ...labelAttrs, "text-anchor": "middle" });
-    addText(s.returnLabel.toUpperCase(), chartRight, labelY, "#6b7280", S.labelSize,
-      { ...labelAttrs, "text-anchor": "end" });
-    addText(s.loss, chartLeft, valueY, "#ff1654", S.valueSize, { "font-weight": "500" });
-    addText(s.mark, chartMid, valueY, "#f1f3f8", S.valueSize,
-      { "text-anchor": "middle", "font-weight": "500" });
-    addText(s.return, chartRight, valueY, "#00bf8c", S.valueSize,
-      { "text-anchor": "end", "font-weight": "500" });
-    cursorY = valueY;
-  }
-
-  if (greeks) {
-    const gap = hasStats ? S.valueToGreeks : S.ruleToLabel;
-    const baseline = cursorY + gap + S.greeksSize;
-    addText(greeks, chartMid, baseline, "#9ba1ad", S.greeksSize,
-      { "text-anchor": "middle", "letter-spacing": "0.04em" });
-    cursorY = baseline;
-  }
-
-  if (hasStats || greeks) {
-    addRule(cursorY + S.greeksToRule);
+    const labelAttrs = { "letter-spacing": "0.16em", "font-weight": "500" };
+    stats.forEach((stat, i) => {
+      const x = chartLeft + colWidth * i;
+      addText(String(stat.label).toUpperCase(), x, labelY, "#8A8A8A", S.labelSize, labelAttrs);
+      addText(String(stat.value), x, valueY, stat.fill || "#f1f3f8", S.valueSize,
+        { "font-weight": "300", "letter-spacing": "-0.01em" });
+    });
+    addRule(valueY + S.statsToRule);
   }
 
   clone.insertBefore(g, clone.firstChild);
@@ -226,18 +199,10 @@ function render() {
       .attr("stroke-width", 3).attr("stroke-linejoin", "round").attr("clip-path", `url(#payoff-${name})`);
   }
   const labelClampX = (px) => Math.max(margin.left + 90, Math.min(right - 90, px));
-  const markers = [
-    ...(props.payoff.breakEvens?.points || []).map((price) => ({
-      price, label: priceLabel(price), fill: "#f1f3f8", preferredRow: 0,
-    })),
-    {
-      price: props.payoff.forward,
-      label: `Forward ${priceLabel(props.payoff.forward)}`,
-      fill: "#8a92a3",
-      preferredRow: 1,
-    },
-  ];
-  for (const m of markers) {
+  const beMarkers = (props.payoff.breakEvens?.points || []).map((price) => ({
+    price, label: priceLabel(price), fill: "#f1f3f8",
+  }));
+  for (const m of beMarkers) {
     const px = x(m.price);
     svg.append("line").attr("x1", px).attr("x2", px).attr("y1", margin.top).attr("y2", bottom)
       .attr("stroke", "#9ba1ad").attr("stroke-width", 1).attr("stroke-opacity", 0.35);
@@ -247,18 +212,33 @@ function render() {
     { y: margin.top - 44, lastRight: -Infinity },
   ];
   const labelGap = markerLabelSize * 0.6;
-  const sortedMarkers = markers.slice().sort((a, b) => a.price - b.price);
-  for (const m of sortedMarkers) {
+  const sortedBe = beMarkers.slice().sort((a, b) => a.price - b.price);
+  for (const m of sortedBe) {
     const centerX = labelClampX(x(m.price));
     const halfW = (m.label.length * markerLabelSize * 0.55) / 2;
-    const order = m.preferredRow === 1 ? [1, 0] : [0, 1];
-    let row = order.find((r) => centerX - halfW >= labelRows[r].lastRight + labelGap);
-    if (row === undefined) row = m.preferredRow;
+    let row = [0, 1].find((r) => centerX - halfW >= labelRows[r].lastRight + labelGap);
+    if (row === undefined) row = 0;
     svg.append("text").attr("x", centerX).attr("y", labelRows[row].y)
       .attr("fill", m.fill).attr("text-anchor", "middle")
       .attr("font-size", markerLabelSize).text(m.label);
     labelRows[row].lastRight = centerX + halfW;
   }
+  const forwardX = x(props.payoff.forward);
+  const forwardPoint = points.reduce((best, p) =>
+    Math.abs(p.price - props.payoff.forward) < Math.abs(best.price - props.payoff.forward) ? p : best);
+  const curveGap = 22;
+  const forwardY1 = Math.min(bottom - 14, y(forwardPoint.pnl) + curveGap);
+  const forwardY2 = bottom;
+  svg.append("line")
+    .attr("x1", forwardX).attr("x2", forwardX)
+    .attr("y1", forwardY1).attr("y2", forwardY2)
+    .attr("stroke", "#5a5a5a").attr("stroke-width", 1).attr("stroke-opacity", 1);
+  svg.append("text")
+    .attr("x", forwardX + 8).attr("y", (forwardY1 + forwardY2) / 2)
+    .attr("fill", "#8A8A8A").attr("text-anchor", "start")
+    .attr("dominant-baseline", "middle")
+    .attr("font-size", markerLabelSize * 0.85)
+    .text(`Fwd ${priceLabel(props.payoff.forward)}`);
   if (decayCurves.length) {
     const legend = svg.append("g").attr("class", "decay-legend").attr("transform", `translate(${right + 28},${margin.top + 8})`);
     legend.append("text").attr("fill", "#d4d7e2").attr("font-size", dataLabelSize).attr("font-weight", 500).text("Elapsed");

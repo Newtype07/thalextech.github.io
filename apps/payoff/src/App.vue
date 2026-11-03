@@ -121,34 +121,85 @@ const payoff = computed(() => payoffState.value.data ?? null);
 const formatPrice = (value) => new Intl.NumberFormat("en-US", {
   style: "currency", currency: "USD", maximumFractionDigits: 0,
 }).format(value);
-const breakEvenText = computed(() => {
+const payoffMarkInfo = computed(() => {
+  if (!payoff.value) return { label: "Net Mark", value: "—" };
+  const net = payoff.value.netPremium;
+  const label = net > 0 ? "Net Debit" : net < 0 ? "Net Credit" : "Net Mark";
+  return { label, value: formatPrice(Math.abs(net)) };
+});
+
+const formatSignedPercent = (pct) => {
+  const sign = pct > 0 ? "+" : pct < 0 ? "−" : "";
+  return `${sign}${Math.abs(pct).toFixed(1)}%`;
+};
+
+const breakEvenPercents = computed(() => {
+  const empty = { downside: "—", upside: "—" };
+  if (!payoff.value) return empty;
+  const bePoints = payoff.value.breakEvens?.points || [];
+  const s = Number(spot.value);
+  if (!Number.isFinite(s) || s <= 0) return empty;
+  const below = bePoints.filter((p) => p < s);
+  const above = bePoints.filter((p) => p > s);
+  return {
+    downside: below.length ? formatSignedPercent((Math.max(...below) - s) / s * 100) : "—",
+    upside: above.length ? formatSignedPercent((Math.min(...above) - s) / s * 100) : "—",
+  };
+});
+
+const maxReturnDisplay = computed(() => {
   if (!payoff.value) return "—";
-  const { points, ranges } = payoff.value.breakEvens;
-  return [
-    ...points.map(formatPrice),
-    ...ranges.map((r) => r.to === Infinity ? `${formatPrice(r.from)} and above` : `${formatPrice(r.from)} – ${formatPrice(r.to)}`),
-  ].join(" / ") || (payoff.value.mixedMaturities ? "None in shown range" : "None");
+  if (payoff.value.maxReturn === Infinity) return "Unbounded";
+  return formatPrice(payoff.value.maxReturn);
+});
+
+const positionDescriptor = computed(() => {
+  const legs = selectedLegInstruments.value;
+  if (!legs.length) return { legsLine: "", contextLine: "" };
+  const groups = new Map();
+  for (const leg of legs) {
+    const key = `${leg.strike}:${leg.optionType}`;
+    const g = groups.get(key) || { strike: leg.strike, type: leg.optionType, qty: 0 };
+    g.qty += leg.signedQty;
+    groups.set(key, g);
+  }
+  const sorted = [...groups.values()]
+    .filter((g) => g.qty !== 0)
+    .sort((a, b) => a.strike - b.strike || (a.type === "call" ? -1 : 1));
+  const intFmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+  const parts = sorted.map((g) => {
+    const sign = g.qty < 0 ? "−" : "";
+    return `${sign}${Math.abs(g.qty)} × ${intFmt.format(g.strike)} ${g.type === "put" ? "Put" : "Call"}`;
+  });
+  const asset = underlying.value === "ETHUSD" ? "ETH" : "BTC";
+  const expiries = new Set(legs.map((l) => l.expirationTs));
+  let expiryLabel = "mixed expiries";
+  if (expiries.size === 1) {
+    const ts = [...expiries][0];
+    const date = new Date(Number(ts) * 1000);
+    if (!Number.isNaN(date.getTime())) {
+      const month = date.toLocaleString("en-US", { month: "short", timeZone: "UTC" });
+      expiryLabel = `${date.getUTCDate()} ${month} ${date.getUTCFullYear()}`;
+    }
+  }
+  return {
+    legsLine: parts.join("  ·  "),
+    contextLine: `${asset}  ·  ${expiryLabel}`,
+  };
 });
 
 const payoffExportMeta = computed(() => {
   if (!payoff.value) return null;
-  const legs = selectedLegInstruments.value.map((leg) => ({
-    label: leg.legLabel,
-    side: leg.signedQty < 0 ? "sell" : "buy",
-  }));
   const mixed = payoff.value.mixedMaturities;
-  const netPrem = payoff.value.netPremium;
-  const markLabel = netPrem > 0 ? "Net Debit" : netPrem < 0 ? "Net Credit" : "Net Mark";
   return {
-    legs,
-    stats: {
-      lossLabel: mixed ? "Max Loss · shown range" : "Max Loss",
-      loss: payoff.value.maxLoss === Infinity ? "∞" : formatPrice(payoff.value.maxLoss),
-      markLabel,
-      mark: formatPrice(Math.abs(netPrem)),
-      returnLabel: mixed ? "Max Return · shown range" : "Max Return",
-      return: payoff.value.maxReturn === Infinity ? "∞" : formatPrice(payoff.value.maxReturn),
-    },
+    title: positionDescriptor.value.legsLine,
+    subtitle: positionDescriptor.value.contextLine,
+    stats: [
+      { label: payoffMarkInfo.value.label, value: payoffMarkInfo.value.value },
+      { label: mixed ? "Downside BE · shown range" : "Downside break-even", value: breakEvenPercents.value.downside },
+      { label: mixed ? "Upside BE · shown range" : "Upside break-even", value: breakEvenPercents.value.upside },
+      { label: mixed ? "Max Return · shown range" : "Max Return", value: maxReturnDisplay.value, fill: "#16B98E" },
+    ],
   };
 });
 
@@ -1232,7 +1283,7 @@ onUnmounted(() => {
     </header>
 
     <main class="workspaceShell">
-      <div class="underlyingRow">
+      <div class="topControlRow">
         <div class="underlyingToggle" role="group" aria-label="Underlying">
           <button
             v-for="opt in UNDERLYING_OPTIONS"
@@ -1244,6 +1295,20 @@ onUnmounted(() => {
             @click="switchUnderlying(opt.value)"
           >
             {{ opt.label }}
+          </button>
+        </div>
+        <div class="greekSymbolGrid" role="group" aria-label="Payoff and Greeks">
+          <button v-for="option in CHART_OPTIONS" :key="option.value" type="button" class="greekSymbolButton" :class="{ active: ui.chart === option.value }" :aria-pressed="ui.chart === option.value" :aria-label="option.label" :title="option.label" @click="ui.chart = option.value">
+            <svg v-if="option.value === 'payoff'" class="payoffSymbol" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7 L11 17 L21 5" /></svg>
+            <template v-else>{{ option.symbol }}</template>
+          </button>
+        </div>
+        <div class="viewActions">
+          <button type="button" class="iconButton" :disabled="ui.loading" @click="loadSeries" aria-label="Refresh" title="Refresh">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" /></svg>
+          </button>
+          <button type="button" class="iconButton" :disabled="ui.loading || (isPayoff ? !payoff : !simulationRows.length)" @click="handleSavePng" aria-label="Save PNG" title="Save PNG">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3l2-3h8l2 3h3a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
           </button>
         </div>
       </div>
@@ -1265,28 +1330,15 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="chartShell">
-        <div class="chartControlRow">
-          <div class="greekBarRow">
-            <div class="greekSymbolGrid" role="group" aria-label="Payoff and Greeks">
-              <button v-for="option in CHART_OPTIONS" :key="option.value" type="button" class="greekSymbolButton" :class="{ active: ui.chart === option.value }" :aria-pressed="ui.chart === option.value" :aria-label="option.label" :title="option.label" @click="ui.chart = option.value">
-                <svg v-if="option.value === 'payoff'" class="payoffSymbol" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7 L11 17 L21 5" /></svg>
-                <template v-else>{{ option.symbol }}</template>
-              </button>
-            </div>
-          </div>
-          <div v-if="!isPayoff" class="timeSliderBar">
-            <span class="timeSliderLabel">T</span>
-            <input v-model.number="ui.timeProgress" class="timeSliderInput" :style="timeSliderStyle" type="range" min="0" max="100" step="1" aria-label="Fast forward time to expiry" />
-          </div>
-          <div class="viewActions">
-            <button type="button" class="saveButton" :disabled="ui.loading" @click="loadSeries">Refresh</button>
-            <button type="button" class="saveButton" :disabled="ui.loading || (isPayoff ? !payoff : !simulationRows.length)" @click="handleSavePng">Save PNG</button>
-          </div>
+        <div v-if="!isPayoff" class="timeSliderBar">
+          <span class="timeSliderLabel">T</span>
+          <input v-model.number="ui.timeProgress" class="timeSliderInput" :style="timeSliderStyle" type="range" min="0" max="100" step="1" aria-label="Fast forward time to expiry" />
         </div>
         <div v-if="isPayoff" class="payoffSummary" aria-live="polite">
-          <div><span>{{ payoff?.mixedMaturities ? 'Max Loss · shown range' : 'Max Loss' }}</span><strong class="lossValue">{{ payoff ? (payoff.maxLoss === Infinity ? '∞' : formatPrice(payoff.maxLoss)) : '—' }}</strong></div>
-          <div><span>{{ payoff?.mixedMaturities ? 'Estimated break-evens · shown range' : 'Break-even prices' }}</span><strong>{{ breakEvenText }}</strong></div>
-          <div><span>{{ payoff?.mixedMaturities ? 'Max Return · shown range' : 'Max Return' }}</span><strong class="returnValue">{{ payoff ? (payoff.maxReturn === Infinity ? '∞' : formatPrice(payoff.maxReturn)) : '—' }}</strong></div>
+          <div><span>{{ payoffMarkInfo.label }}</span><strong>{{ payoffMarkInfo.value }}</strong></div>
+          <div><span>{{ payoff?.mixedMaturities ? 'Downside BE · shown range' : 'Downside break-even' }}</span><strong>{{ breakEvenPercents.downside }}</strong></div>
+          <div><span>{{ payoff?.mixedMaturities ? 'Upside BE · shown range' : 'Upside break-even' }}</span><strong>{{ breakEvenPercents.upside }}</strong></div>
+          <div><span>{{ payoff?.mixedMaturities ? 'Max Return · shown range' : 'Max Return' }}</span><strong class="returnValue">{{ maxReturnDisplay }}</strong></div>
         </div>
         <PayoffChart v-if="isPayoff" ref="payoffChartRef" :payoff="payoff" :asset="underlying === 'ETHUSD' ? 'ETH' : 'BTC'" :loading="ui.loading" />
         <Greeks
@@ -1304,17 +1356,14 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.viewActions { display: flex; align-items: center; gap: 8px; grid-column: 3; justify-self: end; }
-.payoffSummary { display: grid; grid-template-columns: 1fr 1.5fr 1fr; gap: 16px; padding: 12px 12.2% 14px 5%; background: #000; }
-.payoffSummary div { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.payoffSummary div:nth-child(2) { text-align: center; }
-.payoffSummary div:last-child { text-align: right; }
-.payoffSummary span { font-size: 9px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 500; }
-.payoffSummary strong { font-size: 13px; font-weight: 500; color: #fff; overflow-wrap: anywhere; }
-.payoffSummary .lossValue { color: #ff1654; }
+.viewActions { display: flex; align-items: center; gap: 6px; justify-self: end; }
+.payoffSummary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; padding: 18px var(--chart-right-pct) 20px var(--chart-left-pct); background: #000; border-top: 1px solid #262626; border-bottom: 1px solid #262626; }
+.payoffSummary div { display: flex; flex-direction: column; gap: 10px; min-width: 0; text-align: left; }
+.payoffSummary span { font-size: 9px; color: #8A8A8A; text-transform: uppercase; letter-spacing: 0.14em; font-weight: 500; }
+.payoffSummary strong { font-size: 20px; font-weight: 300; letter-spacing: -0.01em; color: #fff; overflow-wrap: anywhere; }
 .payoffSummary .returnValue { color: #00bf8c; }
 button:disabled { opacity: 0.5; cursor: default; }
-@media (max-width: 650px) { .payoffSummary { grid-template-columns: 1fr 1.5fr 1fr; padding: 12px 0; gap: 8px; }.payoffSummary strong { font-size: 12px; }.payoffSummary span { font-size: 9px; } }
+@media (max-width: 650px) { .payoffSummary { grid-template-columns: repeat(2, 1fr); row-gap: 14px; padding: 14px 0; gap: 10px; }.payoffSummary strong { font-size: 16px; }.payoffSummary span { font-size: 8px; } }
 
 .appRoot {
   max-width: 1320px;
@@ -1336,6 +1385,8 @@ button:disabled { opacity: 0.5; cursor: default; }
 .workspaceShell {
   --chart-left-inset: 1%;
   --chart-right-inset: 11%;
+  --chart-left-pct: 7.22%;
+  --chart-right-pct: 12.22%;
   width: 100%;
   max-width: 1160px;
   margin: 0 auto;
@@ -1344,10 +1395,17 @@ button:disabled { opacity: 0.5; cursor: default; }
   gap: 10px;
 }
 
-.underlyingRow {
-  display: flex;
-  justify-content: flex-start;
+.topControlRow {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 16px;
+  padding: 0 var(--chart-right-pct) 0 var(--chart-left-pct);
+  width: 100%;
+  box-sizing: border-box;
 }
+
+.topControlRow .greekSymbolGrid { justify-self: center; }
 
 .underlyingToggle {
   display: inline-flex;
@@ -1406,40 +1464,43 @@ h1 {
 }
 
 .greekSymbolButton {
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: #0f1318;
-  color: #f8fafc;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: transparent;
+  color: rgba(226, 232, 240, 0.55);
   font-size: 10px;
   line-height: 1;
-  width: 44px;
-  height: 40px;
-  border-radius: 12px;
+  width: 30px;
+  height: 26px;
+  border-radius: 8px;
   cursor: pointer;
 }
 
 .greekSymbolButton.active {
   color: #fff;
-  background: #202329;
-  border-color: rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.2);
   font-weight: 600;
 }
+.greekSymbolButton:hover:not(:disabled):not(.active) { color: #fff; background: rgba(255, 255, 255, 0.06); }
 .greekSymbolButton:focus-visible { outline: 1px solid #999; outline-offset: 2px; }
-.payoffSymbol { display: block; width: 17px; height: 17px; margin: auto; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.payoffSymbol { display: block; width: 13px; height: 13px; margin: auto; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
-.saveButton {
-  height: 40px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: #0f1318;
-  color: #f8fafc;
-  font-size: 10px;
-  font-weight: 600;
-  box-shadow: none;
+.iconButton {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(226, 232, 240, 0.75);
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.saveButton:hover {
-  background: #141b24;
-}
+.iconButton:hover:not(:disabled) { color: #fff; background: rgba(255, 255, 255, 0.09); }
+.iconButton svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
 .builderRow {
   display: flex;
@@ -1497,34 +1558,22 @@ h1 {
 }
 
 .chartShell {
-  margin-top: 6px;
+  margin-top: 28px;
   display: flex;
   flex-direction: column;
   gap: 10px;
   width: 100%;
 }
 
-.chartControlRow {
-  display: grid;
-  grid-template-columns: auto minmax(120px, 1fr) auto;
-  align-items: center;
-  column-gap: 16px;
-  width: 100%;
-  padding-left: var(--chart-left-inset);
-  padding-right: var(--chart-right-inset);
-  box-sizing: border-box;
-}
-
 .timeSliderBar {
-  grid-column: 2;
   width: 100%;
   max-width: 520px;
-  justify-self: center;
-  height: 40px;
+  margin: 0 auto;
+  height: 32px;
   padding: 0 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: #0f1318;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1586,16 +1635,6 @@ h1 {
   box-shadow: none;
 }
 
-.greekBarRow {
-  grid-column: 1;
-  justify-self: start;
-}
-
-.savePngRow {
-  grid-column: 3;
-  justify-self: end;
-}
-
 .error {
   color: #ff8282;
   font-size: 14px;
@@ -1617,27 +1656,15 @@ h1 {
     gap: 10px;
   }
 
-  .greekBarRow {
-    justify-self: start;
-  }
-
-  .savePngRow {
-    justify-self: end;
-  }
-
-  .chartControlRow {
+  .topControlRow {
     grid-template-columns: minmax(0, 1fr) auto;
-    column-gap: 10px;
     row-gap: 10px;
   }
-  .greekBarRow { grid-column: 1 / -1; }
-  .greekSymbolGrid { display: flex; flex-wrap: wrap; gap: 6px; }
+  .topControlRow .greekSymbolGrid { grid-column: 1 / -1; justify-self: start; display: flex; flex-wrap: wrap; gap: 6px; }
   .viewActions { grid-column: 2; }
-  .timeSliderBar { grid-column: 1; }
 
   .timeSliderBar {
     max-width: 300px;
-    height: 40px;
     padding: 0 10px;
   }
 }

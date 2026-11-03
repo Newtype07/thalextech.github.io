@@ -767,8 +767,6 @@ const totalMarkPrice = computed<number | null>(() => {
         </div>
       </div>
 
-      <div class="legs-divider" aria-hidden="true"></div>
-
       <div class="legs-footer">
         <div class="footer-actions">
           <button
@@ -942,7 +940,8 @@ const totalMarkPrice = computed<number | null>(() => {
   height: var(--control-height);
   padding: 0 6px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 10px;
+  font-family: inherit;
   line-height: 1;
   font-weight: 600;
   letter-spacing: 0;
@@ -985,9 +984,20 @@ const totalMarkPrice = computed<number | null>(() => {
   border: 1px solid rgba(255, 255, 255, 0.09);
   background: #111114;
   color: #e8eaed;
-  font-size: 12px;
+  font-size: 10px;
+  font-family: inherit;
   text-align: center;
   font-variant-numeric: tabular-nums;
+}
+
+.qty-input:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.qty-input:focus,
+.qty-input:focus-visible {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.3);
 }
 
 .qty-input::-webkit-inner-spin-button,
@@ -1029,7 +1039,10 @@ const totalMarkPrice = computed<number | null>(() => {
 
 .leg-select :deep(.styled-select-trigger) {
   height: var(--control-height);
-  font-size: 12px;
+  font-size: 10px;
+  font-family: inherit;
+  justify-content: center;
+  padding: 0 4px;
 }
 
 .type-toggle {
@@ -1050,7 +1063,8 @@ const totalMarkPrice = computed<number | null>(() => {
   border: 1px solid rgba(255, 255, 255, 0.09);
   background: #111114;
   color: #e8eaed;
-  font-size: 12px;
+  font-size: 10px;
+  font-family: inherit;
   line-height: 1;
   cursor: pointer;
 }
