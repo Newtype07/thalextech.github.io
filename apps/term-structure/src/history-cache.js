@@ -8,6 +8,8 @@ export const emptyArchive = () => ({
   checkedIndex: [],
   warning: "",
   sourceThrough: { index: null, marks: null },
+  // Immutable per-expiry Parquet ends; API additions never advance these.
+  markSourceThrough: new Map(),
 });
 
 export function missingHourRanges(from, to, known, checked = []) {
@@ -73,11 +75,12 @@ export async function loadHistoryCache(
   signal,
   onArchive = () => {},
 ) {
-  if (archives.has(asset)) {
-    onArchive(archives.get(asset));
-    return archives.get(asset);
-  }
-  const archive = emptyArchive();
+  const entry = archives.get(asset) || {
+    archive: emptyArchive(),
+    manifest: null,
+  };
+  const { archive } = entry;
+  onArchive(archive);
   const base = `${import.meta.env?.BASE_URL || "/"}history-cache/${asset.toLowerCase()}/`;
   const read = async (filename, fresh = false) => {
     if (!/^[a-z0-9.-]+\.json$/.test(filename))
@@ -95,7 +98,9 @@ export async function loadHistoryCache(
       );
     }
     try {
-      return await response.json();
+      const payload = await response.json();
+      signal?.throwIfAborted();
+      return payload;
     } catch (error) {
       if (error instanceof SyntaxError)
         throw new Error(
@@ -106,46 +111,54 @@ export async function loadHistoryCache(
     }
   };
   try {
-    const manifest = await read("manifest.json", true);
-    if (
-      manifest.schema !== "thalex-term-history" ||
-      manifest.version !== 1 ||
-      manifest.asset !== asset ||
-      manifest.resolution !== 3600 ||
-      manifest.ivBasis !== "close" ||
-      manifest.timestampBasis !== "bar-start"
-    )
-      throw new Error("Unsupported historical cache");
-    for (const boundary of Object.values(manifest.sourceThrough || {}))
+    let manifest = entry.manifest;
+    if (!manifest) {
+      manifest = await read("manifest.json", true);
       if (
-        boundary != null &&
-        (!Number.isFinite(boundary) || boundary % 3600 !== 0)
+        manifest.schema !== "thalex-term-history" ||
+        manifest.version !== 1 ||
+        manifest.asset !== asset ||
+        manifest.resolution !== 3600 ||
+        manifest.ivBasis !== "close" ||
+        manifest.timestampBasis !== "bar-start"
       )
-        throw new Error("Invalid Parquet coverage boundary");
-    const index = await read(manifest.index);
-    for (const row of index.rows) {
-      if (
-        row.length === 5 &&
-        row.every(Number.isFinite) &&
-        row.slice(1).every((v) => v > 0)
-      )
-        archive.index.set(row[0], row);
-    }
-    archive.sourceThrough.index =
-      manifest.sourceThrough?.index ??
-      [...archive.index.keys()].reduce(
-        (latest, ts) => Math.max(latest ?? 0, ts + 3600),
-        null,
+        throw new Error("Unsupported historical cache");
+      for (const boundary of Object.values(manifest.sourceThrough || {}))
+        if (
+          boundary != null &&
+          (!Number.isFinite(boundary) || boundary % 3600 !== 0)
+        )
+          throw new Error("Invalid Parquet coverage boundary");
+      const index = await read(manifest.index);
+      if (!Array.isArray(index.rows)) throw new Error("Invalid index cache");
+      const indexRows = index.rows.filter(
+        (row) =>
+          Array.isArray(row) &&
+          row.length === 5 &&
+          row.every(Number.isFinite) &&
+          row.slice(1).every((v) => v > 0),
       );
-    onArchive(archive);
-    let marksThrough = null;
+      for (const row of indexRows)
+        if (!archive.index.has(row[0])) archive.index.set(row[0], row);
+      archive.sourceThrough.index =
+        manifest.sourceThrough?.index ??
+        indexRows.reduce(
+          (latest, row) => Math.max(latest ?? 0, row[0] + 3600),
+          null,
+        );
+      archive.sourceThrough.marks = manifest.sourceThrough?.marks ?? null;
+      entry.manifest = manifest;
+      onArchive(archive);
+    }
     for (const expiry of expiries) {
+      if (archive.markSourceThrough.has(expiry)) continue;
       const filename = manifest.expiries[String(expiry)];
       if (!filename) continue;
       const payload = await read(filename);
       if (payload.expiry !== expiry || !Array.isArray(payload.instruments))
         throw new Error("Invalid expiry cache");
-      for (const i of payload.instruments) {
+      let marksThrough = null;
+      const instruments = payload.instruments.map((i) => {
         if (
           typeof i.name !== "string" ||
           !Number.isFinite(i.strike) ||
@@ -158,22 +171,40 @@ export async function loadHistoryCache(
         );
         for (const [ts] of rows)
           marksThrough = Math.max(marksThrough ?? 0, ts + 3600);
-        archive.marks.set(i.name, {
+        return {
           name: i.name,
           expiry,
           strike: i.strike,
           side: i.side,
           rows: new Map(rows),
+        };
+      });
+      // Commit a shard only after it is decoded completely. Preserve any API
+      // observations already fetched while this expiry was absent/unavailable.
+      for (const instrument of instruments) {
+        const previous = archive.marks.get(instrument.name);
+        archive.marks.set(instrument.name, {
+          ...previous,
+          ...instrument,
+          rows: new Map([...instrument.rows, ...(previous?.rows || [])]),
         });
       }
+      archive.markSourceThrough.set(expiry, marksThrough);
       onArchive(archive);
     }
-    archive.sourceThrough.marks = manifest.sourceThrough?.marks ?? marksThrough;
+    archive.sourceThrough.marks =
+      manifest.sourceThrough?.marks ??
+      [...archive.markSourceThrough.values()].reduce(
+        (latest, ts) => (ts == null ? latest : Math.max(latest ?? 0, ts)),
+        null,
+      );
+    archive.warning = "";
   } catch (error) {
     signal?.throwIfAborted();
     archive.warning = `Parquet cache unavailable or incomplete (${error.message}); missing history will be fetched from Thalex within the requested lookback.`;
   }
-  // Cache only successfully decoded archive state; API supplements remain session-local.
-  archives.set(asset, archive);
+  // Reuse decoded shards, but still discover requested expiries on refresh.
+  // Failed manifest/shard reads remain retryable without losing API additions.
+  archives.set(asset, entry);
   return archive;
 }

@@ -77,7 +77,8 @@ export async function fetchLiveQuotes(
   }
   const streamed = new Set(quotes.map((q) => q.name));
   for (const name of streamed) unavailable.delete(name);
-  for (const [name, message] of unavailable) failures.push(`${name}: ${message}`);
+  for (const [name, message] of unavailable)
+    failures.push(`${name}: ${message}`);
   let done = quotes.length + unavailable.size;
   onProgress(done, chain.length);
   await pool(
@@ -205,7 +206,6 @@ export async function fetchHistoricalQuotes(
   publish(cache);
   // The immutable Parquet boundaries survive session additions. A failed request
   // must not move the boundary forward and hide a hole on the next refresh.
-  const updateFrom = Math.max(from, cache.sourceThrough?.marks ?? from);
   const indexUpdateFrom = Math.max(
     indexFrom,
     cache.sourceThrough?.index ?? indexFrom,
@@ -221,14 +221,15 @@ export async function fetchHistoricalQuotes(
     0,
   );
   const activeChecks = new Map();
-  const reportActivity = (stage) => onActivity({
-    stage,
-    active: [...activeChecks.values()],
-    completedChecks,
-    completedExpiries,
-    totalExpiries: expiries.length,
-    coverage: { cachedIndexRows, cachedMarkRows, apiIndexRows, apiMarkRows },
-  });
+  const reportActivity = (stage) =>
+    onActivity({
+      stage,
+      active: [...activeChecks.values()],
+      completedChecks,
+      completedExpiries,
+      totalExpiries: expiries.length,
+      coverage: { cachedIndexRows, cachedMarkRows, apiIndexRows, apiMarkRows },
+    });
   reportActivity("index");
   for (const range of missingHourRanges(
     indexUpdateFrom,
@@ -288,6 +289,12 @@ export async function fetchHistoricalQuotes(
     [...byExpiry.values()],
     2,
     async (instruments) => {
+      // Asset-wide coverage does not establish coverage for this expiry.
+      // An absent/empty shard must fetch from the lookback/listing boundary.
+      const updateFrom = Math.max(
+        from,
+        cache.markSourceThrough?.get(instruments[0].expiry) ?? from,
+      );
       // Publish only after the expiry's selected inputs have been checked.
       // Empty responses can move the ATM bracket outward in another round.
       const checkedAt = Date.now();
@@ -348,7 +355,11 @@ export async function fetchHistoricalQuotes(
           requests,
           4,
           async ({ instrument, from, to }) => {
-            activeChecks.set(instrument.name, { name: instrument.name, from, to });
+            activeChecks.set(instrument.name, {
+              name: instrument.name,
+              from,
+              to,
+            });
             reportActivity("marks");
             try {
               if (!cache.marks.has(instrument.name))

@@ -10,8 +10,9 @@ const props = defineProps({
 });
 const svgRef = ref(null);
 let resizeObserver;
-const DATA_LABEL_PX = 9;
-const AXIS_TITLE_PX = 10;
+const DATA_LABEL_PX = 7;
+const AXIS_TITLE_PX = 9;
+const MARKER_LABEL_PX = 10;
 
 const SVG_FONT_FAMILY = 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"';
 const EXPORT_FONT_FAMILY = 'Helvetica, Arial, sans-serif';
@@ -32,9 +33,9 @@ function decorateExportClone(clone, meta) {
   const greeks = meta.greeks || "";
 
   const S = {
-    padTop: 32, padBottom: 24,
-    legSize: 18, legLineHeight: 24,
-    legsToRule: 26, ruleToLabel: 18, labelToValue: 8,
+    padTop: 36, padBottom: 24,
+    legSize: 22, legLineHeight: 34,
+    legsToRule: 30, ruleToLabel: 18, labelToValue: 8,
     valueToGreeks: 20, greeksToRule: 20,
     labelSize: 10, valueSize: 22, greeksSize: 14,
   };
@@ -114,12 +115,12 @@ function decorateExportClone(clone, meta) {
     const valueY = labelY + S.labelToValue + S.valueSize;
     const labelAttrs = { "letter-spacing": "0.14em", "font-weight": "500" };
     addText(s.lossLabel.toUpperCase(), chartLeft, labelY, "#6b7280", S.labelSize, labelAttrs);
-    addText(s.breakEvenLabel.toUpperCase(), chartMid, labelY, "#6b7280", S.labelSize,
+    addText(s.markLabel.toUpperCase(), chartMid, labelY, "#6b7280", S.labelSize,
       { ...labelAttrs, "text-anchor": "middle" });
     addText(s.returnLabel.toUpperCase(), chartRight, labelY, "#6b7280", S.labelSize,
       { ...labelAttrs, "text-anchor": "end" });
     addText(s.loss, chartLeft, valueY, "#ff1654", S.valueSize, { "font-weight": "500" });
-    addText(s.breakEven, chartMid, valueY, "#f1f3f8", S.valueSize,
+    addText(s.mark, chartMid, valueY, "#f1f3f8", S.valueSize,
       { "text-anchor": "middle", "font-weight": "500" });
     addText(s.return, chartRight, valueY, "#00bf8c", S.valueSize,
       { "text-anchor": "end", "font-weight": "500" });
@@ -160,6 +161,7 @@ function render() {
   // Preserve the same screen-pixel type scale when the SVG viewBox resizes.
   const dataLabelSize = DATA_LABEL_PX * width / renderedWidth;
   const axisTitleSize = AXIS_TITLE_PX * width / renderedWidth;
+  const markerLabelSize = MARKER_LABEL_PX * width / renderedWidth;
   const right = width - margin.right, bottom = height - margin.bottom;
   const svg = d3.select(svgRef.value).attr("viewBox", `0 0 ${width} ${height}`);
   svg.selectAll("*").remove();
@@ -223,22 +225,40 @@ function render() {
     svg.append("path").datum(points).attr("d", line).attr("fill", "none").attr("stroke", color)
       .attr("stroke-width", 3).attr("stroke-linejoin", "round").attr("clip-path", `url(#payoff-${name})`);
   }
-  const markerStroke = "#9ba1ad";
-  const markerOpacity = 0.35;
-  const markerLabelFill = "#8a92a3";
   const labelClampX = (px) => Math.max(margin.left + 90, Math.min(right - 90, px));
-  const drawPriceMarker = (price, label) => {
-    const px = x(price);
+  const markers = [
+    ...(props.payoff.breakEvens?.points || []).map((price) => ({
+      price, label: priceLabel(price), fill: "#f1f3f8", preferredRow: 0,
+    })),
+    {
+      price: props.payoff.forward,
+      label: `Forward ${priceLabel(props.payoff.forward)}`,
+      fill: "#8a92a3",
+      preferredRow: 1,
+    },
+  ];
+  for (const m of markers) {
+    const px = x(m.price);
     svg.append("line").attr("x1", px).attr("x2", px).attr("y1", margin.top).attr("y2", bottom)
-      .attr("stroke", markerStroke).attr("stroke-width", 1).attr("stroke-opacity", markerOpacity);
-    svg.append("text").attr("x", labelClampX(px)).attr("y", margin.top - 15)
-      .attr("fill", markerLabelFill).attr("text-anchor", "middle")
-      .attr("font-size", dataLabelSize).text(label);
-  };
-  for (const bePrice of props.payoff.breakEvens?.points || []) {
-    drawPriceMarker(bePrice, priceLabel(bePrice));
+      .attr("stroke", "#9ba1ad").attr("stroke-width", 1).attr("stroke-opacity", 0.35);
   }
-  drawPriceMarker(props.payoff.forward, `Forward ${priceLabel(props.payoff.forward)}`);
+  const labelRows = [
+    { y: margin.top - 14, lastRight: -Infinity },
+    { y: margin.top - 44, lastRight: -Infinity },
+  ];
+  const labelGap = markerLabelSize * 0.6;
+  const sortedMarkers = markers.slice().sort((a, b) => a.price - b.price);
+  for (const m of sortedMarkers) {
+    const centerX = labelClampX(x(m.price));
+    const halfW = (m.label.length * markerLabelSize * 0.55) / 2;
+    const order = m.preferredRow === 1 ? [1, 0] : [0, 1];
+    let row = order.find((r) => centerX - halfW >= labelRows[r].lastRight + labelGap);
+    if (row === undefined) row = m.preferredRow;
+    svg.append("text").attr("x", centerX).attr("y", labelRows[row].y)
+      .attr("fill", m.fill).attr("text-anchor", "middle")
+      .attr("font-size", markerLabelSize).text(m.label);
+    labelRows[row].lastRight = centerX + halfW;
+  }
   if (decayCurves.length) {
     const legend = svg.append("g").attr("class", "decay-legend").attr("transform", `translate(${right + 28},${margin.top + 8})`);
     legend.append("text").attr("fill", "#d4d7e2").attr("font-size", dataLabelSize).attr("font-weight", 500).text("Elapsed");

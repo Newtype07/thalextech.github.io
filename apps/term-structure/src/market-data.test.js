@@ -18,32 +18,54 @@ const chain = [
   },
 ];
 const bar = (ts, iv) => [ts, 1, 1, 1, 1, iv, iv, iv, iv];
-test("exclusive API boundaries include the latest complete hour in both index and IV backfill", async t => {
+test("exclusive API boundaries include the latest complete hour in both index and IV backfill", async (t) => {
   const end = Math.floor(Date.now() / 1000 / HOUR) * HOUR;
   const latest = end - HOUR;
   const archive = emptyArchive();
   archive.sourceThrough = { index: latest, marks: latest };
+  archive.markSourceThrough.set(chain[0].expiry, latest);
   archive.index.set(latest - HOUR, [latest - HOUR, 100, 100, 100, 100]);
-  archive.marks.set(chain[0].name, { ...chain[0], rows: new Map([[latest - HOUR, 0.4]]) });
+  archive.marks.set(chain[0].name, {
+    ...chain[0],
+    rows: new Map([[latest - HOUR, 0.4]]),
+  });
   const calls = [];
-  t.mock.method(globalThis, "fetch", async input => {
+  t.mock.method(globalThis, "fetch", async (input) => {
     const url = new URL(input);
     calls.push(url);
     const from = Number(url.searchParams.get("from"));
-    const exclusiveEnd = Math.floor(Number(url.searchParams.get("to")) / HOUR) * HOUR;
+    const exclusiveEnd =
+      Math.floor(Number(url.searchParams.get("to")) / HOUR) * HOUR;
     const isIndex = url.pathname.endsWith("index_price_historical_data");
     const rows = [];
     for (let ts = from; ts + HOUR <= exclusiveEnd; ts += HOUR)
       rows.push(isIndex ? [ts, 100, 100, 100, 100] : bar(ts, 0.5));
-    return { ok: true, json: async () => ({ result: { [isIndex ? "index" : "mark"]: rows } }) };
+    return {
+      ok: true,
+      json: async () => ({ result: { [isIndex ? "index" : "mark"]: rows } }),
+    };
   });
-  const result = await fetchHistoricalQuotes(chain, "BTC", { archive, asOf: end + 1200 });
-  assert.equal(result.indexBars.at(-1).ts + HOUR, end, "index reaches the last complete close");
-  assert.equal(Math.max(...result.quotes.map(point => point.ts)), end, "IV reaches the same close");
+  const result = await fetchHistoricalQuotes(chain, "BTC", {
+    archive,
+    asOf: end + 1200,
+  });
+  assert.equal(
+    result.indexBars.at(-1).ts + HOUR,
+    end,
+    "index reaches the last complete close",
+  );
+  assert.equal(
+    Math.max(...result.quotes.map((point) => point.ts)),
+    end,
+    "IV reaches the same close",
+  );
   assert.deepEqual(result.failures, []);
   assert.equal(calls.length, 2);
-  assert.ok(calls.every(url => Number(url.searchParams.get("to")) === end));
-  assert.ok(result.quotes.every(point => point.ts <= end), "the current incomplete hour stays excluded");
+  assert.ok(calls.every((url) => Number(url.searchParams.get("to")) === end));
+  assert.ok(
+    result.quotes.every((point) => point.ts <= end),
+    "the current incomplete hour stays excluded",
+  );
 });
 
 test("history pages backwards, joins exact index timestamps and labels completed bar closes", async (t) => {
@@ -294,11 +316,13 @@ test("cached history publishes before network requests, then updates after each 
     "initial snapshot, each completed expiry and final snapshot publish",
   );
   assert.equal(updates.at(-1).length, 4);
-  const checking = activities.find(data => data.active.length);
+  const checking = activities.find((data) => data.active.length);
   assert.ok(checking, "history activity is visible before an expiry finishes");
   assert.equal(checking.active[0].from, end - HOUR);
   assert.equal(checking.active[0].to, end - 1);
-  assert.ok(active.some(instrument => instrument.name === checking.active[0].name));
+  assert.ok(
+    active.some((instrument) => instrument.name === checking.active[0].name),
+  );
   const complete = activities.at(-1);
   assert.equal(complete.stage, "complete");
   assert.equal(complete.completedChecks, 2);
@@ -594,6 +618,7 @@ test("gaps inside Parquet history remain untouched when the subsequent tail is c
   }
   archive.marks.set(chain[0].name, { ...chain[0], rows });
   archive.sourceThrough = { index: end, marks: end - HOUR };
+  archive.markSourceThrough.set(chain[0].expiry, end - HOUR);
   t.mock.method(globalThis, "fetch", async () => {
     assert.fail("gaps inside Parquet history must not trigger API requests");
   });
@@ -623,6 +648,7 @@ test("backfill spans the entire Parquet-to-present gap with separate index/IV bo
   ];
   const archive = emptyArchive();
   archive.sourceThrough = { index: indexThrough, marks: marksThrough };
+  archive.markSourceThrough.set(active[0].expiry, marksThrough);
   const rows = new Map();
   for (let ts = from; ts < indexThrough; ts += HOUR)
     archive.index.set(ts, [ts, 100, 100, 100, 100]);
@@ -675,4 +701,136 @@ test("backfill spans the entire Parquet-to-present gap with separate index/IV bo
   );
   await fetchHistoricalQuotes(active, "BTC", { archive, asOf: end });
   assert.equal(calls.length, 3, "completed tail is reused in memory");
+});
+
+test("expiries absent from Parquet fetch pre-boundary listing history for ATM and delta slices", async (t) => {
+  const end = Math.floor(Date.now() / 1000 / HOUR) * HOUR;
+  const listedAt = end - 6 * HOUR,
+    assetEnd = end - 2 * HOUR;
+  const expiry = end + 86400;
+  const active = ["C", "P"].map((side) => ({
+    name: `unarchived-${side}`,
+    expiry,
+    strike: 100,
+    side,
+    listedAt,
+  }));
+  for (const slice of ["atm", "25p"]) {
+    const archive = emptyArchive();
+    archive.sourceThrough = { index: end, marks: assetEnd };
+    for (let ts = listedAt; ts < end; ts += HOUR)
+      archive.index.set(ts, [ts, 100, 100, 100, 100]);
+    const calls = [];
+    t.mock.method(globalThis, "fetch", async (input) => {
+      const url = new URL(input);
+      assert.match(url.pathname, /mark_price_historical_data$/);
+      assert.equal(
+        Number(url.searchParams.get("from")),
+        listedAt,
+        "a different expiry's newer Parquet end must not truncate this listing",
+      );
+      assert.equal(Number(url.searchParams.get("to")), end);
+      calls.push(url.searchParams.get("instrument_name"));
+      return {
+        ok: true,
+        json: async () => ({
+          result: {
+            mark: Array.from({ length: 6 }, (_, i) =>
+              bar(listedAt + i * HOUR, 0.4),
+            ),
+          },
+        }),
+      };
+    });
+    const result = await fetchHistoricalQuotes(active, "BTC", {
+      archive,
+      asOf: end,
+      slice,
+    });
+    assert.deepEqual(result.failures, []);
+    assert.deepEqual(
+      calls.toSorted(),
+      slice === "atm" ? ["unarchived-C", "unarchived-P"] : ["unarchived-P"],
+    );
+    assert.equal(result.quotes.length, slice === "atm" ? 12 : 6);
+    assert.equal(
+      Math.min(...result.quotes.map((point) => point.ts)),
+      listedAt + HOUR,
+    );
+    assert.equal(
+      archive.markSourceThrough.has(expiry),
+      false,
+      "API rows do not become Parquet provenance",
+    );
+    const count = calls.length;
+    await fetchHistoricalQuotes(active, "BTC", { archive, asOf: end, slice });
+    assert.equal(calls.length, count, "session additions are reused");
+    t.mock.restoreAll();
+  }
+});
+
+test("an unarchived expiry without a listing timestamp is bounded by the full lookback", async (t) => {
+  const end = Math.floor(Date.now() / 1000 / HOUR) * HOUR,
+    from = end - HISTORY_LIMIT * HOUR;
+  const archive = emptyArchive();
+  archive.sourceThrough = { index: end, marks: end };
+  for (let ts = from; ts < end; ts += HOUR)
+    archive.index.set(ts, [ts, 100, 100, 100, 100]);
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    assert.equal(Number(url.searchParams.get("from")), from);
+    assert.equal(Number(url.searchParams.get("to")), end);
+    return {
+      ok: true,
+      json: async () => ({
+        result: {
+          mark: Array.from({ length: HISTORY_LIMIT }, (_, i) =>
+            bar(from + i * HOUR, 0.4),
+          ),
+        },
+      }),
+    };
+  });
+  const result = await fetchHistoricalQuotes(chain, "BTC", {
+    archive,
+    asOf: end,
+  });
+  assert.equal(result.quotes.length, HISTORY_LIMIT);
+  assert.equal(result.failures.length, 0);
+});
+
+test("covered expiries use their own Parquet end and retain older intentional holes", async (t) => {
+  const end = Math.floor(Date.now() / 1000 / HOUR) * HOUR,
+    from = end - HISTORY_LIMIT * HOUR;
+  const expiryEnd = end - 3 * HOUR,
+    gap = end - 100 * HOUR;
+  const archive = emptyArchive();
+  archive.sourceThrough = { index: end, marks: end };
+  archive.markSourceThrough.set(chain[0].expiry, expiryEnd);
+  const rows = new Map();
+  for (let ts = from; ts < end; ts += HOUR) {
+    archive.index.set(ts, [ts, 100, 100, 100, 100]);
+    if (ts < expiryEnd && ts !== gap) rows.set(ts, 0.4);
+  }
+  archive.marks.set(chain[0].name, { ...chain[0], rows });
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async (input) => {
+    const url = new URL(input);
+    assert.equal(Number(url.searchParams.get("from")), expiryEnd);
+    calls++;
+    return {
+      ok: true,
+      json: async () => ({
+        result: { mark: [0, 1, 2].map((i) => bar(expiryEnd + i * HOUR, 0.5)) },
+      }),
+    };
+  });
+  const result = await fetchHistoricalQuotes(chain, "BTC", {
+    archive,
+    asOf: end,
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.quotes.length, HISTORY_LIMIT - 1);
+  assert.equal(archive.marks.get(chain[0].name).rows.has(gap), false);
+  assert.equal(archive.markSourceThrough.get(chain[0].expiry), expiryEnd);
 });
