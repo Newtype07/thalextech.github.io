@@ -1441,10 +1441,10 @@ button:disabled { opacity: 0.5; cursor: default; }
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: transparent;
   color: rgba(226, 232, 240, 0.55);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1;
-  width: 30px;
-  height: 26px;
+  width: 36px;
+  height: 36px;
   border-radius: var(--control-radius);
   cursor: pointer;
 }
@@ -1457,11 +1457,11 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 .greekSymbolButton:hover:not(:disabled):not(.active) { color: #fff; background: rgba(255, 255, 255, 0.06); }
 .greekSymbolButton:focus-visible { outline: 1px solid #999; outline-offset: 2px; }
-.payoffSymbol { display: block; width: 13px; height: 13px; margin: auto; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.payoffSymbol { display: block; width: 16px; height: 16px; margin: auto; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
 .iconButton {
-  width: 26px;
-  height: 26px;
+  width: 36px;
+  height: 36px;
   padding: 0;
   border: none;
   background: rgba(255, 255, 255, 0.05);
@@ -1474,7 +1474,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 
 .iconButton:hover:not(:disabled) { color: #fff; background: rgba(255, 255, 255, 0.09); }
-.iconButton svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.iconButton svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
 .builderRow {
   display: flex;
