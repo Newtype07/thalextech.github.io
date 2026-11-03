@@ -15,7 +15,6 @@ const AXIS_TITLE_PX = 9;
 const MARKER_LABEL_PX = 10;
 
 const SVG_FONT_FAMILY = 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"';
-const EXPORT_FONT_FAMILY = 'Helvetica, Arial, sans-serif';
 const SVG_NS = "http://www.w3.org/2000/svg";
 const layout = { width: 1800, height: 900, margin: { top: 90, right: 220, bottom: 80, left: 130 } };
 const money = d3.format(",.2f");
@@ -23,7 +22,7 @@ const priceLabel = (value) => `$${d3.format(",.0f")(value)}`;
 const gradientId = `payoff-fill-${useId()}`;
 
 function decorateExportClone(clone, meta) {
-  clone.setAttribute("font-family", EXPORT_FONT_FAMILY);
+  clone.setAttribute("font-family", SVG_FONT_FAMILY);
   if (!meta) return;
   const vb = clone.getAttribute("viewBox");
   if (!vb) return;
@@ -33,8 +32,8 @@ function decorateExportClone(clone, meta) {
   const stats = Array.isArray(meta.stats) ? meta.stats : [];
 
   const availableTitleWidth = (x0 + w - layout.margin.right) - (x0 + layout.margin.left);
-  const titleMaxSize = 28;
-  const titleMinSize = 16;
+  const titleMaxSize = 20;
+  const titleMinSize = 14;
   const titleEst = title ? Math.max(titleMinSize, Math.min(titleMaxSize, availableTitleWidth / Math.max(1, title.length * 0.56))) : titleMaxSize;
   const S = {
     padTop: 40, padBottom: 24,
@@ -60,7 +59,7 @@ function decorateExportClone(clone, meta) {
   const chartMid = (chartLeft + chartRight) / 2;
 
   const g = document.createElementNS(SVG_NS, "g");
-  g.setAttribute("font-family", EXPORT_FONT_FAMILY);
+  g.setAttribute("font-family", SVG_FONT_FAMILY);
 
   const addText = (text, x, y, fill, size, attrs = {}) => {
     const el = document.createElementNS(SVG_NS, "text");
@@ -88,7 +87,7 @@ function decorateExportClone(clone, meta) {
   if (title) {
     cursorY += S.titleSize;
     addText(title, chartMid, cursorY, "#f1f3f8", S.titleSize,
-      { "text-anchor": "middle", "font-weight": "500", "letter-spacing": "-0.02em" });
+      { "text-anchor": "middle", "font-weight": "700" });
   }
   if (subtitle) {
     cursorY += S.titleToSubtitle + S.subtitleSize;
@@ -140,6 +139,8 @@ function render() {
   const dataLabelSize = DATA_LABEL_PX * width / renderedWidth;
   const axisTitleSize = AXIS_TITLE_PX * width / renderedWidth;
   const markerLabelSize = MARKER_LABEL_PX * width / renderedWidth;
+  const markerRadius = 3.5 * width / renderedWidth;
+  const markerStrokeWidth = width / renderedWidth;
   const right = width - margin.right, bottom = height - margin.bottom;
   const svg = d3.select(svgRef.value).attr("viewBox", `0 0 ${width} ${height}`);
   svg.selectAll("*").remove();
@@ -191,6 +192,10 @@ function render() {
     svg.append("path").datum(points).attr("d", area).attr("fill", `url(#${gradientId}-${name})`)
       .attr("clip-path", `url(#payoff-${name})`);
   }
+  const rulers = svg.append("g").attr("class", "break-even-rulers").attr("pointer-events", "none");
+  rulers.append("line").attr("class", "zero-baseline")
+    .attr("x1", margin.left).attr("x2", right).attr("y1", y(0)).attr("y2", y(0))
+    .attr("stroke", "#f1f3f8").attr("stroke-width", markerStrokeWidth * 0.75).attr("stroke-opacity", 0.12);
   const decayOpacity = [0.6, 0.45, 0.3, 0.2];
   const decayColor = "#b8c0d0";
   decayCurves.forEach((curve, i) => {
@@ -207,11 +212,6 @@ function render() {
   const beMarkers = (props.payoff.breakEvens?.points || []).map((price) => ({
     price, label: priceLabel(price), fill: "#f1f3f8",
   }));
-  for (const m of beMarkers) {
-    const px = x(m.price);
-    svg.append("line").attr("x1", px).attr("x2", px).attr("y1", margin.top).attr("y2", bottom)
-      .attr("stroke", "#9ba1ad").attr("stroke-width", 1).attr("stroke-opacity", 0.35);
-  }
   const labelRows = [
     { y: margin.top - 14, lastRight: -Infinity },
     { y: margin.top - 44, lastRight: -Infinity },
@@ -219,13 +219,21 @@ function render() {
   const labelGap = markerLabelSize * 0.6;
   const sortedBe = beMarkers.slice().sort((a, b) => a.price - b.price);
   for (const m of sortedBe) {
-    const centerX = labelClampX(x(m.price));
+    const px = x(m.price);
+    const centerX = labelClampX(px);
     const halfW = (m.label.length * markerLabelSize * 0.55) / 2;
     let row = [0, 1].find((r) => centerX - halfW >= labelRows[r].lastRight + labelGap);
     if (row === undefined) row = 0;
+    rulers.append("line").attr("class", "break-even-ruler")
+      .attr("x1", px).attr("x2", px)
+      .attr("y1", labelRows[row].y + markerLabelSize * 0.7).attr("y2", y(0))
+      .attr("stroke", "#f1f3f8").attr("stroke-width", markerStrokeWidth * 0.75).attr("stroke-opacity", 0.2);
+    svg.append("circle").attr("class", "break-even-dot")
+      .attr("cx", px).attr("cy", y(0)).attr("r", markerRadius)
+      .attr("fill", "#000").attr("stroke", m.fill).attr("stroke-width", markerStrokeWidth);
     svg.append("text").attr("x", centerX).attr("y", labelRows[row].y)
       .attr("fill", m.fill).attr("text-anchor", "middle")
-      .attr("font-size", markerLabelSize).text(m.label);
+      .attr("font-size", markerLabelSize).attr("font-weight", 600).text(m.label);
     labelRows[row].lastRight = centerX + halfW;
   }
   if (decayCurves.length) {

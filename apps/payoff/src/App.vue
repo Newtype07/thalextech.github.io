@@ -96,7 +96,7 @@ const simulationAnchorTs = ref(null);
 const simulationAnchorSpot = ref(null);
 const chartRef = ref(null);
 const payoffChartRef = ref(null);
-const copyState = reactive({ busy: false, message: "", failed: false });
+const copyState = reactive({ busy: false, copied: false, error: "" });
 let copyFeedbackTimer;
 const payoffQuotes = ref({});
 const payoffAtmIv = ref(null);
@@ -174,7 +174,7 @@ const exportInstrumentTitle = computed(() => {
     return `${sign}${Math.abs(g.qty)} × ${maturity}${strikeFmt.format(g.strike / 1000)}K ${g.type === "put" ? "Put" : "Call"}`;
   });
   const asset = underlying.value === "ETHUSD" ? "ETH" : "BTC";
-  return [asset, ...(sharedMaturity ? [formatMaturity(legs[0].expirationTs)] : []), parts.join("\u2003\u2003")].join("  ·  ");
+  return [asset, ...(sharedMaturity ? [formatMaturity(legs[0].expirationTs)] : []), parts.join("\u2002")].join(" · ");
 });
 
 const payoffExportMeta = computed(() => {
@@ -1148,15 +1148,14 @@ const handleCopyImage = async () => {
   if (!chart) return;
   clearTimeout(copyFeedbackTimer);
   copyState.busy = true;
-  copyState.message = "";
-  copyState.failed = false;
+  copyState.copied = false;
+  copyState.error = "";
   try {
     await chart.copyImage(isPayoff.value ? { meta: payoffExportMeta.value } : {});
-    copyState.message = "Image copied";
-    copyFeedbackTimer = setTimeout(() => { copyState.message = ""; }, 3000);
+    copyState.copied = true;
+    copyFeedbackTimer = setTimeout(() => { copyState.copied = false; }, 3000);
   } catch (error) {
-    copyState.failed = true;
-    copyState.message = error?.name === "NotAllowedError"
+    copyState.error = error?.name === "NotAllowedError"
       ? "Clipboard access was blocked. Allow clipboard access or use Save PNG."
       : error?.message || "Could not copy the image. Use Save PNG instead.";
   } finally {
@@ -1324,12 +1323,13 @@ onUnmounted(() => {
           <button type="button" class="iconButton" :disabled="ui.loading || (isPayoff ? !payoff : !simulationRows.length)" @click="handleSavePng" aria-label="Save PNG" title="Save PNG">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3l2-3h8l2 3h3a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
           </button>
-          <button type="button" class="iconButton" :disabled="copyState.busy || ui.loading || (isPayoff ? !payoff : !simulationRows.length)" :aria-busy="copyState.busy" @click="handleCopyImage" :aria-label="copyState.busy ? 'Copying image' : 'Copy image to clipboard'" :title="copyState.busy ? 'Copying image…' : 'Copy image to clipboard'">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h3" /></svg>
+          <button type="button" class="iconButton" :class="{ copySuccess: copyState.copied }" :disabled="copyState.busy || ui.loading || (isPayoff ? !payoff : !simulationRows.length)" :aria-busy="copyState.busy" @click="handleCopyImage" :aria-label="copyState.busy ? 'Copying image' : copyState.copied ? 'Image copied' : 'Copy image to clipboard'" :title="copyState.busy ? 'Copying image…' : copyState.copied ? 'Image copied' : 'Copy image to clipboard'">
+            <svg v-if="copyState.copied" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l4 4L19 6" /></svg>
+            <svg v-else viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h3" /></svg>
           </button>
         </div>
       </div>
-      <p v-if="copyState.message" class="copyFeedback" :class="{ copyFeedbackError: copyState.failed }" role="status">{{ copyState.message }}</p>
+      <p v-if="copyState.error" class="copyFeedbackError" role="alert">{{ copyState.error }}</p>
       <div class="builderRow">
         <div class="builderMain">
           <PositionBuilder
@@ -1373,8 +1373,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.copyFeedback { margin: 0; color: #00bf8c; font-size: 12px; text-align: right; }
-.copyFeedbackError { color: #ff8282; }
+.copyFeedbackError { margin: 0; color: #ff8282; font-size: 12px; text-align: right; }
 .viewActions { display: flex; align-items: center; gap: 6px; justify-self: end; }
 .payoffSummary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; padding: 18px var(--chart-right-pct) 20px var(--chart-left-pct); background: #000; border-top: 1px solid #262626; border-bottom: 1px solid #262626; }
 .payoffSummary div { display: flex; flex-direction: column; gap: 10px; min-width: 0; text-align: left; }
@@ -1505,6 +1504,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 }
 
 .iconButton:hover:not(:disabled) { color: #fff; background: rgba(255, 255, 255, 0.09); }
+.iconButton.copySuccess { color: #00bf8c; }
 .iconButton svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
 .builderRow {
