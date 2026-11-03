@@ -29,7 +29,7 @@ import {
 } from "./forward-volatility.js";
 import { getThalexQueueStatus } from "./thalex-rest.js";
 import { buildTermSnapshots, SNAPSHOT_RESOLUTIONS } from "./term-snapshots.js";
-import StraddleSimulator from "./components/StraddleSimulator.vue";
+import PositionSimulator from "./components/PositionSimulator.vue";
 import { nearestListedStrike } from "./simulation/straddle-selection.js";
 
 const activeTab = ref("curve"),
@@ -643,13 +643,14 @@ onBeforeUnmount(() => {
       role="tabpanel"
       aria-labelledby="tab-simulate"
     >
-      <StraddleSimulator
+      <PositionSimulator
         :key="asset"
         :asset="asset"
         :live-curve="simulationCurve"
         :live-spot="simulationSpot"
         :as-of="referenceTime"
         :market-loading="liveLoading"
+        :instruments="currentChain"
       />
     </div>
   </main>

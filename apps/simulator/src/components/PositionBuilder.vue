@@ -16,6 +16,11 @@ const props = defineProps<{
   indexName?: string | null;
   indexPrice?: number | null;
   indexFetchedAt?: number | null;
+  valuationByLeg?: Record<string, {
+    mark: number;
+    iv: number;
+    greeks: ReturnType<typeof blackScholesGreeks>;
+  }>;
 }>();
 
 const emit = defineEmits<{
@@ -384,6 +389,8 @@ const formatTteForLeg = (leg: OptionLeg): string => {
 };
 
 const getLegGreeks = (leg: OptionLeg) => {
+  const valuation = props.valuationByLeg?.[leg.id];
+  if (valuation) return valuation.greeks;
   const ticker = getTickerForLeg(leg);
   const instrument = resolveInstrumentForLeg(leg);
   const tickerIv = extractTickerIV(ticker);
@@ -570,7 +577,7 @@ const legDisplayById = computed(() => {
 
   for (const leg of optionLegs.value) {
     const ticker = getTickerForLeg(leg);
-    display[leg.id] = {
+    display[leg.id] = props.valuationByLeg?.[leg.id] ?? {
       mark: extractTickerMark(ticker),
       iv: extractTickerIV(ticker),
       greeks: getLegGreeks(leg),

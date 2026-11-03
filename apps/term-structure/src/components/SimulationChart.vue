@@ -1,14 +1,14 @@
 <script setup>
 import { computed, ref, watch, useId } from "vue";
-import { scaleLinear, line, area, extent, format } from "d3";
-import { straddlePayoff } from "../simulation/straddle-payoff.js";
+import { scaleLinear, line, area, curveStepAfter, extent, format } from "d3";
 
 const props = defineProps({ result: { type: Object, required: true } });
 const emit = defineEmits(["export"]);
 const selected = ref(null);
 const gradientId = `simulation-pnl-${useId()}`;
-const GAIN = "#00bf8c",
-  LOSS = "#ff1654";
+// Match Combo P&L's total mark curve; keep component lines neutral.
+const GAIN = "#32e68a",
+  LOSS = "#ff5c6c";
 const signColor = (value) => (value > 0 ? GAIN : value < 0 ? LOSS : "#fff");
 watch(
   () => props.result,
@@ -24,19 +24,20 @@ const money = (value) =>
   new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
-    maximumFractionDigits: 2,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
   }).format(value);
 const definitions = [
   {
     key: "option",
     label: "Option P&L",
-    color: "#cccccc",
+    color: "#ffffff",
     value: (row) => row.optionPnl - row.optionFees,
   },
   {
     key: "hedge",
     label: "Hedge P&L",
-    color: "#888888",
+    color: "#999999",
     value: (row) => row.hedgePnl - row.hedgeFees,
   },
   {
@@ -46,16 +47,15 @@ const definitions = [
     value: (row) => row.pnl,
   },
 ];
-const payoff = computed(() =>
-  straddlePayoff({
-    strike: props.result.config.strike,
-    entryPrice: props.result.entryPrice,
-    quantity: props.result.config.quantity,
-    side: props.result.config.side,
-  }),
+const mixedMaturities = computed(() =>
+  props.result.legs.some((leg) => leg.maturity !== props.result.legs[0].maturity),
 );
-const payoffNumber = (value) =>
-  Number.isFinite(value) ? format(",.0f")(value) : "∞";
+const exitDescription = computed(() => {
+  if (!mixedMaturities.value) return "expiry";
+  const last = Math.max(...props.result.legs.map(leg => leg.maturity));
+  return props.result.config.horizon >= last - 1e-6 ? "last expiry" : "first expiry";
+});
+const exitLabel = computed(() => `At ${exitDescription.value}`);
 const row = computed(
   () => props.result.rows[selected.value] || props.result.end,
 );
@@ -80,6 +80,7 @@ const curves = computed(() =>
   definitions.map((series) => ({
     ...series,
     path: line()
+      .curve(curveStepAfter)
       .x((point) => x.value(point.elapsed / 86400))
       .y((point) => y.value(series.value(point)))(props.result.rows),
   })),
@@ -87,8 +88,19 @@ const curves = computed(() =>
 const zeroOffset = computed(
   () => (y.value(0) - margin.top) / (H - margin.bottom - margin.top),
 );
+const fillRange = computed(() => {
+  const [low, high] = extent(props.result.rows, (point) => point.pnl);
+  const gain = Math.max(0, high),
+    loss = Math.min(0, low);
+  return {
+    top: y.value(gain),
+    bottom: y.value(loss),
+    zero: gain === loss ? 0.5 : gain / (gain - loss),
+  };
+});
 const totalArea = computed(() =>
   area()
+    .curve(curveStepAfter)
     .x((point) => x.value(point.elapsed / 86400))
     .y0(y.value(0))
     .y1((point) => y.value(point.pnl))(props.result.rows),
@@ -115,9 +127,9 @@ function inspect(event) {
   let low = 0,
     high = rows.length - 1;
   while (low < high) {
-    const mid = Math.floor((low + high) / 2);
-    if (rows[mid].elapsed < seconds) low = mid + 1;
-    else high = mid;
+    const mid = Math.ceil((low + high) / 2);
+    if (rows[mid].elapsed <= seconds) low = mid;
+    else high = mid - 1;
   }
   selected.value = low;
 }
@@ -144,34 +156,13 @@ function keyInspect(event) {
 </script>
 
 <template>
-  <section class="sim-performance" aria-label="Simulation performance">
-    <div
-      class="performance-summary"
-      aria-label="Option-only expiry payoff before hedge trading and fees"
-    >
-      <div class="payoff-stat">
-        <span>Max Loss</span
-        ><strong :style="{ color: LOSS }">{{
-          payoffNumber(payoff.maxLoss)
-        }}</strong>
-      </div>
-      <div class="payoff-stat">
-        <span>Break-even</span
-        ><strong>{{ payoff.breakEvens.map(payoffNumber).join(" - ") }}</strong>
-      </div>
-      <div class="payoff-stat">
-        <span>Max Return</span
-        ><strong :style="{ color: GAIN }">{{
-          payoffNumber(payoff.maxReturn)
-        }}</strong>
-      </div>
-    </div>
-    <p class="payoff-scope">
-      Straddle expiry payoff · USD · before hedge trading and fees
-    </p>
+  <section
+    class="sim-performance"
+    aria-label="Simulation performance"
+  >
     <div class="performance-actions">
       <span class="performance-time">{{
-        selected == null ? "At expiry" : `Day ${inspectedDay.toFixed(3)}`
+        selected == null ? exitLabel : `Day ${inspectedDay.toFixed(3)}`
       }}</span>
       <button type="button" class="performance-export" @click="emit('export')">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -181,6 +172,159 @@ function keyInspect(event) {
     </div>
     <div class="performance-scroll" @pointerleave="selected = null">
       <div class="performance-plots">
+        <header class="performance-heading pnl-heading">
+          <div>
+            <h2>{{ result.config.asset }} position P&L</h2>
+            <p class="performance-subtitle">
+              {{ result.legs.length }} option {{ result.legs.length === 1 ? "leg" : "legs" }} ·
+              {{ (result.config.horizon / 86400).toFixed(2) }} days ·
+              {{ mixedMaturities ? `exit at ${exitDescription}` : "hold to expiry" }}
+            </p>
+          </div>
+          <div class="pnl-key" aria-label="P&L line legend">
+            <span
+              v-for="series in definitions"
+              :key="series.key"
+              class="performance-value"
+              :data-series="series.key"
+              ><i
+                :class="`line-key-${series.key}`"
+                :style="{
+                  borderColor:
+                    series.key === 'total' ? signColor(row.pnl) : series.color,
+                }"
+              ></i
+              >{{ series.label }}
+              <strong>{{ money(series.value(row)) }}</strong></span
+            >
+          </div>
+        </header>
+        <svg
+          class="pnl-chart"
+          :viewBox="`0 0 ${W} ${H}`"
+          tabindex="0"
+          role="img"
+          aria-label="Option, hedge and total P&L in USD. Use left and right arrows to inspect; Escape returns to expiry."
+          @pointermove="inspect"
+          @pointerdown="inspect"
+          @keydown="keyInspect"
+        >
+          <defs>
+            <linearGradient
+              :id="`${gradientId}-line`"
+              gradientUnits="userSpaceOnUse"
+              x1="0"
+              :y1="margin.top"
+              x2="0"
+              :y2="H - margin.bottom"
+            >
+              <stop offset="0" :stop-color="GAIN" />
+              <stop :offset="zeroOffset" :stop-color="GAIN" />
+              <stop :offset="zeroOffset" :stop-color="LOSS" />
+              <stop offset="1" :stop-color="LOSS" />
+            </linearGradient>
+            <linearGradient
+              :id="`${gradientId}-area`"
+              gradientUnits="userSpaceOnUse"
+              x1="0"
+              :y1="fillRange.top"
+              x2="0"
+              :y2="fillRange.bottom"
+            >
+              <stop offset="0" :stop-color="GAIN" stop-opacity=".42" />
+              <stop
+                :offset="fillRange.zero * 0.55"
+                :stop-color="GAIN"
+                stop-opacity=".22"
+              />
+              <stop
+                :offset="fillRange.zero"
+                :stop-color="GAIN"
+                stop-opacity=".06"
+              />
+              <stop
+                :offset="fillRange.zero"
+                :stop-color="LOSS"
+                stop-opacity=".06"
+              />
+              <stop
+                :offset="fillRange.zero + (1 - fillRange.zero) * 0.45"
+                :stop-color="LOSS"
+                stop-opacity=".22"
+              />
+              <stop offset="1" :stop-color="LOSS" stop-opacity=".42" />
+            </linearGradient>
+          </defs>
+          <path
+            class="total-pnl-area"
+            :d="totalArea"
+            :fill="`url(#${gradientId}-area)`"
+          />
+          <g v-for="tick in y.ticks(6)" :key="tick">
+            <text :x="margin.left - 12" :y="y(tick) + 4" text-anchor="end">
+              {{ format(",.0f")(tick) }}
+            </text>
+          </g>
+          <line
+            :x1="margin.left"
+            :x2="W - margin.right"
+            :y1="y(0)"
+            :y2="y(0)"
+            stroke="#303030"
+          />
+          <path
+            v-for="series in curves"
+            :key="series.key"
+            :data-series="series.key"
+            :d="series.path"
+            fill="none"
+            :stroke="
+              series.key === 'total' ? `url(#${gradientId}-line)` : series.color
+            "
+            :stroke-width="series.key === 'total' ? 1.5 : 1.35"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            vector-effect="non-scaling-stroke"
+          />
+          <g v-if="selected != null" class="performance-cursor">
+            <line
+              :x1="x(inspectedDay)"
+              :x2="x(inspectedDay)"
+              :y1="margin.top"
+              :y2="H - margin.bottom"
+              stroke="#555555"
+              stroke-dasharray="2 4"
+            />
+            <circle
+              v-for="series in definitions"
+              :key="series.key"
+              :cx="x(inspectedDay)"
+              :cy="y(series.value(row))"
+              r="3"
+              :fill="
+                series.key === 'total'
+                  ? signColor(series.value(row))
+                  : series.color
+              "
+            />
+          </g>
+          <g v-for="tick in x.ticks(8)" :key="tick">
+            <text :x="x(tick)" :y="H - margin.bottom + 22" text-anchor="middle">
+              {{ format(".2~f")(tick) }}
+            </text>
+          </g>
+          <text :x="margin.left" :y="14" class="performance-axis-label">
+            P&L (USD)
+          </text>
+          <text
+            :x="(margin.left + W - margin.right) / 2"
+            :y="H - 10"
+            text-anchor="middle"
+            class="performance-axis-label"
+          >
+            Days from entry
+          </text>
+        </svg>
         <header class="performance-heading index-heading">
           <div>
             <h2>{{ result.config.asset }} index simulation</h2>
@@ -191,7 +335,7 @@ function keyInspect(event) {
           </div>
           <div class="performance-legend">
             <span class="index-time">{{
-              selected == null ? "At expiry" : `Day ${inspectedDay.toFixed(3)}`
+              selected == null ? exitLabel : `Day ${inspectedDay.toFixed(3)}`
             }}</span>
             <span class="index-price">{{ money(row.spot) }}</span>
             <span class="hedge-dot-legend"
@@ -275,141 +419,6 @@ function keyInspect(event) {
             Index (USD)
           </text>
         </svg>
-        <header class="performance-heading pnl-heading">
-          <div>
-            <h2>{{ result.config.asset }} straddle P&L</h2>
-            <p class="performance-subtitle">
-              {{ result.config.side === "sell" ? "Short" : "Long" }} ·
-              {{ result.config.quantity }} {{ result.config.asset }} per leg ·
-              strike {{ money(result.config.strike) }} ·
-              {{ (result.config.horizon / 86400).toFixed(2) }} days
-            </p>
-          </div>
-          <div class="pnl-key" aria-label="P&L line legend">
-            <span
-              v-for="series in definitions"
-              :key="series.key"
-              class="performance-value"
-              :data-series="series.key"
-              ><i
-                :class="`line-key-${series.key}`"
-                :style="{ borderColor: series.color }"
-              ></i
-              >{{ series.label }}
-              <strong :style="{ color: signColor(series.value(row)) }">{{
-                money(series.value(row))
-              }}</strong></span
-            >
-          </div>
-        </header>
-        <svg
-          class="pnl-chart"
-          :viewBox="`0 0 ${W} ${H}`"
-          tabindex="0"
-          role="img"
-          aria-label="Option, hedge and total P&L in USD. Use left and right arrows to inspect; Escape returns to expiry."
-          @pointermove="inspect"
-          @pointerdown="inspect"
-          @keydown="keyInspect"
-        >
-          <defs>
-            <linearGradient
-              :id="`${gradientId}-line`"
-              gradientUnits="userSpaceOnUse"
-              x1="0"
-              :y1="margin.top"
-              x2="0"
-              :y2="H - margin.bottom"
-            >
-              <stop offset="0" :stop-color="GAIN" />
-              <stop :offset="zeroOffset" :stop-color="GAIN" />
-              <stop :offset="zeroOffset" :stop-color="LOSS" />
-              <stop offset="1" :stop-color="LOSS" />
-            </linearGradient>
-            <linearGradient
-              :id="`${gradientId}-area`"
-              gradientUnits="userSpaceOnUse"
-              x1="0"
-              :y1="margin.top"
-              x2="0"
-              :y2="H - margin.bottom"
-            >
-              <stop offset="0" :stop-color="GAIN" stop-opacity=".28" />
-              <stop :offset="zeroOffset" :stop-color="GAIN" stop-opacity="0" />
-              <stop :offset="zeroOffset" :stop-color="LOSS" stop-opacity="0" />
-              <stop offset="1" :stop-color="LOSS" stop-opacity=".28" />
-            </linearGradient>
-          </defs>
-          <path
-            class="total-pnl-area"
-            :d="totalArea"
-            :fill="`url(#${gradientId}-area)`"
-          />
-          <g v-for="tick in y.ticks(6)" :key="tick">
-            <text :x="margin.left - 12" :y="y(tick) + 4" text-anchor="end">
-              {{ format(",.0f")(tick) }}
-            </text>
-          </g>
-          <line
-            :x1="margin.left"
-            :x2="W - margin.right"
-            :y1="y(0)"
-            :y2="y(0)"
-            stroke="#303030"
-          />
-          <path
-            v-for="series in curves"
-            :key="series.key"
-            :data-series="series.key"
-            :d="series.path"
-            fill="none"
-            :stroke="
-              series.key === 'total' ? `url(#${gradientId}-line)` : series.color
-            "
-            :stroke-width="series.key === 'total' ? 3 : 1.4"
-            :stroke-dasharray="series.key === 'hedge' ? '6 5' : null"
-            stroke-linejoin="round"
-            vector-effect="non-scaling-stroke"
-          />
-          <g v-if="selected != null" class="performance-cursor">
-            <line
-              :x1="x(inspectedDay)"
-              :x2="x(inspectedDay)"
-              :y1="margin.top"
-              :y2="H - margin.bottom"
-              stroke="#555555"
-              stroke-dasharray="2 4"
-            />
-            <circle
-              v-for="series in definitions"
-              :key="series.key"
-              :cx="x(inspectedDay)"
-              :cy="y(series.value(row))"
-              r="3"
-              :fill="
-                series.key === 'total'
-                  ? signColor(series.value(row))
-                  : series.color
-              "
-            />
-          </g>
-          <g v-for="tick in x.ticks(8)" :key="tick">
-            <text :x="x(tick)" :y="H - margin.bottom + 22" text-anchor="middle">
-              {{ format(".2~f")(tick) }}
-            </text>
-          </g>
-          <text :x="margin.left" :y="14" class="performance-axis-label">
-            P&L (USD)
-          </text>
-          <text
-            :x="(margin.left + W - margin.right) / 2"
-            :y="H - 10"
-            text-anchor="middle"
-            class="performance-axis-label"
-          >
-            Days from entry
-          </text>
-        </svg>
       </div>
     </div>
     <p class="performance-note">
@@ -420,50 +429,17 @@ function keyInspect(event) {
 
 <style scoped>
 .sim-performance {
-  --payoff-gain: #00bf8c;
-  --payoff-loss: #ff1654;
+  --hedge-buy: #00bf8c;
+  --hedge-sell: #ff1654;
   background: #000;
   color: #fff;
   padding-bottom: 16px;
-}
-.performance-summary {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 24px;
-  padding: 26px 24px 28px;
-  border-top: 1px solid #292929;
-  border-bottom: 1px solid #292929;
-}
-.payoff-stat {
-  min-width: 0;
-  text-align: left;
-}
-.payoff-stat:nth-child(2) {
-  text-align: center;
-}
-.payoff-stat:last-child {
-  text-align: right;
-}
-.payoff-stat > span {
-  display: block;
-  color: #999999;
-  font-size: 16px;
-  font-weight: 400;
-  margin-bottom: 14px;
-}
-.payoff-stat strong {
-  display: block;
-  font-size: clamp(22px, 2.3vw, 30px);
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: -0.4px;
-  font-variant-numeric: tabular-nums;
 }
 .performance-actions {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 18px 24px 24px;
+  padding: 8px 38px 16px 78px;
 }
 .performance-time {
   color: #999999;
@@ -554,12 +530,12 @@ h2 {
   margin: 0 6px 1px 0;
 }
 .buy-dot {
-  fill: var(--payoff-gain);
-  background: var(--payoff-gain);
+  fill: var(--hedge-buy);
+  background: var(--hedge-buy);
 }
 .sell-dot {
-  fill: var(--payoff-loss);
-  background: var(--payoff-loss);
+  fill: var(--hedge-sell);
+  background: var(--hedge-sell);
 }
 .hedge-trade-dot {
   cursor: help;
@@ -586,12 +562,8 @@ svg .performance-axis-label {
   fill: #999999;
   font-size: 12px;
 }
-.payoff-scope {
-  margin: 10px 24px 0;
-  color: #999;
-  font-size: 11px;
-}
 .performance-value strong {
+  color: #fff;
   margin-left: 6px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
@@ -607,14 +579,12 @@ svg .performance-axis-label {
 .pnl-key i {
   display: inline-block;
   width: 18px;
-  border-top: 2px solid;
+  border-top: 1.15px solid;
+  border-radius: 1px;
   margin: 0 7px 3px 0;
 }
-.pnl-key .line-key-hedge {
-  border-top-style: dashed;
-}
 .pnl-key .line-key-total {
-  border-top-width: 3px;
+  border-top-width: 1.5px;
 }
 .performance-note {
   color: #999999;
@@ -631,18 +601,8 @@ svg .performance-axis-label {
   }
 }
 @media (max-width: 650px) {
-  .performance-summary {
-    gap: 12px;
-    padding: 22px 12px;
-  }
-  .payoff-stat > span {
-    font-size: 13px;
-  }
-  .payoff-stat strong {
-    font-size: 20px;
-  }
   .performance-actions {
-    padding: 18px 12px 24px;
+    padding: 8px 16px 16px;
   }
   .performance-heading {
     padding: 0 16px 14px;
