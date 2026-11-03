@@ -1,8 +1,10 @@
 <script setup>
-import { computed, ref, shallowRef, watch } from "vue";
+import { computed, ref, shallowRef, watch, onBeforeUnmount } from "vue";
 import SimulationChart from "./SimulationChart.vue";
+import SimulationPathsChart from "./SimulationPathsChart.vue";
 import PositionBuilder from "../../../simulator/src/components/PositionBuilder.vue";
 import { simulatePosition } from "../simulation/position-simulation.js";
+import { runPositionEnsemble } from "../simulation/ensemble-worker-client.js";
 import { builderInstruments, defaultShortStraddle, resolvePosition, entryValuations } from "../simulation/position-selection.js";
 
 const props = defineProps({
@@ -21,6 +23,7 @@ const positionLegs = ref([]);
 let initialized = false;
 const instruments = computed(() => builderInstruments(market.value?.instruments || [], props.asset));
 const settings = ref({
+  runs: 1,
   exitAt: "first",
   rvPercent: 100,
   driftPercent: 0,
@@ -37,6 +40,8 @@ const result = shallowRef(null),
   settingsOpen = ref(true),
   runFingerprint = ref(""),
   form = ref(null);
+const completed = ref(0);
+let runController;
 const fingerprint = computed(() =>
   JSON.stringify({ settings: settings.value, legs: positionLegs.value, market: market.value }),
 );
@@ -114,6 +119,7 @@ let autoRunTimer;
 watch(
   [market, fingerprint, form],
   (_, __, onCleanup) => {
+    runController?.abort();
     error.value = "";
     if (!market.value || !form.value || preview.value.error) return;
     const timer = setTimeout(run, 120);
@@ -122,16 +128,25 @@ watch(
   },
   { flush: "post" },
 );
+onBeforeUnmount(() => {
+  clearTimeout(autoRunTimer);
+  runController?.abort();
+});
 async function run() {
   clearTimeout(autoRunTimer);
-  if (running.value || preview.value.error) return;
+  if (preview.value.error) return;
+  runController?.abort();
+  const controller = new AbortController();
+  runController = controller;
   running.value = true;
+  completed.value = 0;
   error.value = "";
-  // Give the browser a paint before a longer single-path calculation.
+  // Give the browser a paint before starting the simulation.
   await new Promise((resolve) =>
     requestAnimationFrame(() => setTimeout(resolve, 0)),
   );
   try {
+    if (controller.signal.aborted) return;
     // A change during the paint delay is included in this run.
     clearTimeout(autoRunTimer);
     if (!form.value || preview.value.error) return;
@@ -140,7 +155,8 @@ async function run() {
       return;
     }
     const s = settings.value;
-    const next = simulatePosition({
+    const startedFingerprint = fingerprint.value;
+    const config = {
       asset: props.asset,
       spot: entrySpot.value,
       legs: preview.value.legs,
@@ -158,19 +174,26 @@ async function run() {
       nodes: nodeInputs.value,
       curveSource,
       curveTime: curveTime.value,
-    });
+    };
+    const next = s.runs === 100
+      ? await runPositionEnsemble(config, {
+          signal: controller.signal,
+          onProgress: (count) => { completed.value = count; },
+        })
+      : simulatePosition(config);
+    if (controller.signal.aborted) return;
     result.value = next;
-    runFingerprint.value = fingerprint.value;
+    runFingerprint.value = startedFingerprint;
   } catch (e) {
-    error.value = e.message;
+    if (!controller.signal.aborted) error.value = e.message;
   } finally {
-    running.value = false;
+    if (runController === controller) running.value = false;
   }
 }
 function download() {
   if (!result.value) return;
   const data = result.value;
-  const columns = [
+  const columns = data.paths ? ["run", "elapsedSeconds", "totalPnl"] : [
     "elapsedSeconds",
     "spot",
     "optionPnl",
@@ -180,7 +203,11 @@ function download() {
   ];
   const csv = [
     columns.join(","),
-    ...data.rows.map((row) =>
+    ...(data.paths ? [
+      ...data.paths.flatMap((path, run) => path.pnl.map((pnl, i) =>
+        [run + 1, data.elapsed[i], pnl].join(","))),
+      ...data.median.map((pnl, i) => ["median", data.elapsed[i], pnl].join(",")),
+    ] : data.rows.map((row) =>
       [
         row.elapsed,
         row.spot,
@@ -189,14 +216,14 @@ function download() {
         row.pnl,
         row.fees,
       ].join(","),
-    ),
+    )),
   ].join("\n");
   const url = URL.createObjectURL(
     new Blob([csv], { type: "text/csv;charset=utf-8" }),
   );
   const a = document.createElement("a");
   a.href = url;
-  a.download = `${data.config.asset}-position.csv`;
+  a.download = `${data.config.asset}-position${data.paths ? '-100-runs' : ''}.csv`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
@@ -226,6 +253,15 @@ function download() {
       </div>
       <div class="sim-divider" role="separator"></div>
       <div class="sim-toolbar">
+        <div class="sim-exit-control" role="group" aria-label="Simulation runs">
+          <div class="underlyingToggle">
+            <button v-for="count in [1, 100]" :key="count" type="button" class="underlyingButton"
+              :class="{ underlyingButtonActive: settings.runs === count }"
+              :aria-pressed="settings.runs === count" @click="settings.runs = count">
+              {{ count === 1 ? 'Single run' : '100 runs' }}
+            </button>
+          </div>
+        </div>
         <div class="sim-exit-control" role="group" aria-label="Simulate until">
           <span>Simulate until</span>
           <div class="underlyingToggle">
@@ -276,7 +312,7 @@ function download() {
           type="submit"
           aria-label="Refresh simulation"
           :aria-busy="running"
-          :title="running ? 'Simulating…' : 'Generate a new simulation'"
+          :title="running ? 'Simulating…' : settings.runs === 100 ? 'Generate 100 new simulations' : 'Generate a new simulation'"
           :disabled="running || !!preview.error"
         >
           <svg
@@ -322,14 +358,23 @@ function download() {
           {{ preview.error }}
         </p>
         <p
-          v-if="dirty && !error && !preview.error"
+          v-if="running && settings.runs === 100"
+          class="sim-status sim-progress"
+          role="status"
+          aria-live="polite"
+        >
+          Simulating {{ completed }} / 100 runs…
+        </p>
+        <p
+          v-else-if="dirty && !error && !preview.error"
           class="sim-status sim-pending"
           role="status"
         >
           Updating simulation…
         </p>
         <div class="sim-results" :aria-busy="running">
-          <SimulationChart v-if="result" :result="result" @export="download" />
+          <SimulationPathsChart v-if="result?.paths" :result="result" @export="download" />
+          <SimulationChart v-else-if="result" :result="result" @export="download" />
           <div v-else class="sim-empty">
             {{
               market
@@ -356,7 +401,9 @@ function download() {
               Hedges fill at the simulated spot and are checked at the selected time
               step. Option and hedge P&L each include their own execution costs,
               including the initial hedge and final unwind. Each run generates a new
-              random price path.
+              random price path. In 100 runs mode, the same assumptions are used
+              for 100 independent paths. The highlighted line is their median
+              total P&L at each time, after all option and hedge costs.
             </p>
           </details>
         </footer>

@@ -8,6 +8,7 @@ import { Window } from "happy-dom";
 import { transformWithEsbuild } from "vite";
 import { builderExpiry } from "./simulation/position-selection.js";
 import { calcGreeks } from "../../../lib/thalex.js";
+import { Worker as NodeWorker } from "node:worker_threads";
 
 // Exercise the real templates and SVG output, without an exchange connection.
 async function compiler(directory) {
@@ -44,6 +45,24 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
     fileURLToPath(new URL("../.simulation-test-", import.meta.url)),
   );
   const window = new Window({ url: "http://localhost/" });
+  const workers = new Set();
+  // Run the actual browser worker module in a Node thread, adapting only messaging.
+  class BrowserWorker {
+    constructor(url) {
+      this.worker = new NodeWorker(`
+        const { parentPort } = require('node:worker_threads');
+        globalThis.self = { postMessage: data => parentPort.postMessage(data) };
+        import(${JSON.stringify(url.href)}).then(() => {
+          parentPort.on('message', data => self.onmessage({ data }));
+        });
+      `, { eval: true });
+      workers.add(this);
+      this.worker.on("message", data => this.onmessage?.({ data }));
+      this.worker.on("error", error => this.onerror?.({ message: error.message }));
+    }
+    postMessage(data) { this.worker.postMessage(data); }
+    terminate() { workers.delete(this); this.worker.terminate(); }
+  }
   const values = {
     window,
     WebSocket: undefined,
@@ -52,6 +71,7 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
     Element: window.Element,
     HTMLElement: window.HTMLElement,
     SVGElement: window.SVGElement,
+    Worker: BrowserWorker,
     requestAnimationFrame: (callback) => setTimeout(callback, 0),
   };
   const originals = new Map(
@@ -406,6 +426,57 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
     await set("Tolerance", 0.15);
     await settle();
     assert.equal(root().querySelector('[role="alert"]'), null);
+    // Change modes while a real worker is running; stale batches must not publish.
+    button("100 runs").click();
+    for (let i = 0; i < 200 && !workers.size; i++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+      await nextTick();
+    }
+    assert.equal(workers.size, 1);
+    assert.ok(root().querySelector(".sim-progress"));
+    button("Single run").click();
+    await settle();
+    assert.equal(workers.size, 0, "switching to single run terminates the batch worker");
+    assert.ok(root().querySelector(".sim-performance"));
+    assert.equal(root().querySelector(".sim-ensemble"), null);
+    button("100 runs").click();
+    await settle();
+    for (let i = 0; i < 100 && root().querySelector(".sim-progress"); i++) await settle();
+    assert.equal(root().querySelector('[role="alert"]'), null);
+    assert.equal(root().querySelector(".sim-progress"), null);
+    assert.equal(root().querySelectorAll(".ensemble-path").length, 100);
+    assert.equal(root().querySelectorAll(".ensemble-median").length, 1);
+    assert.equal(root().querySelector(".sim-performance"), null);
+    assert.equal(workers.size, 0, "completed workers are released");
+    const ensembleChart = root().querySelector(".ensemble-chart");
+    ensembleChart.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    await nextTick();
+    assert.match(root().querySelector(".ensemble-actions").textContent, /Day 0.000/);
+    assert.ok(root().querySelector(".ensemble-cursor"));
+    ensembleChart.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await nextTick();
+    assert.match(root().querySelector(".ensemble-actions").textContent, /At exit/);
+    button("Export CSV").click();
+    await nextTick();
+    assert.equal(downloads.at(-1), "BTC-position-100-runs.csv");
+    const ensembleCsv = (await blobs.at(-1).text()).trim().split("\n");
+    assert.equal(ensembleCsv[0], "run,elapsedSeconds,totalPnl");
+    const exported = ensembleCsv.slice(1).map(row => row.split(","));
+    const medians = exported.filter(row => row[0] === "median");
+    assert.equal(medians.length, 1200);
+    assert.equal(exported.length, 1200 * 101);
+    const terminal = exported.filter(row => row[0] !== "median" && row[1] === medians.at(-1)[1])
+      .map(row => Number(row[2])).sort((a, b) => a - b);
+    assert.equal(Number(medians.at(-1)[2]), (terminal[49] + terminal[50]) / 2);
+    const oldMedian = root().querySelector(".ensemble-median").getAttribute("d");
+    button("Refresh simulation").click();
+    await settle();
+    for (let i = 0; i < 100 && root().querySelector(".sim-progress"); i++) await settle();
+    assert.notEqual(root().querySelector(".ensemble-median").getAttribute("d"), oldMedian);
+    button("Single run").click();
+    await settle();
+    assert.ok(root().querySelector(".sim-performance"));
+    assert.equal(root().querySelectorAll(".leg-row").length, 2, "mode switches preserve legs");
     for (const [label, value] of [
       ["Period", 60],
       ["Timer behaviour", "scheduled"],
@@ -637,6 +708,7 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
     assert.deepEqual(errors, []);
   } finally {
     app?.unmount();
+    for (const worker of workers) worker.terminate();
     await window.happyDOM.close();
     for (const [key, original] of originals) {
       if (original) Object.defineProperty(globalThis, key, original);
