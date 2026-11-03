@@ -1173,27 +1173,8 @@ const totalMarkPrice = computed<number | null>(() => {
 
 .legs-divider {
   border-top: 0.5px solid rgba(148, 163, 184, 0.45);
-  margin: 0 0 0 var(--row-pad-x);
-  width: calc(
-    var(--col-side) +
-    var(--col-qty) +
-    var(--col-type) +
-    var(--col-expiry) +
-    var(--col-tte) +
-    var(--strike-width) +
-    var(--greek-iv) +
-    var(--greek-mark) +
-    var(--greek-delta) +
-    var(--greek-gamma) +
-    var(--greek-theta) +
-    var(--greek-vega) +
-    var(--greek-remove) +
-    var(--leg-row-gap-total) +
-    var(--strike-greeks-gap) +
-    var(--strike-greeks-gap-extra) +
-    var(--leg-greeks-gap-total)
-  );
-  max-width: calc(100% - var(--row-pad-x));
+  margin: 0 var(--row-pad-x);
+  width: calc(100% - 2 * var(--row-pad-x));
 }
 
 .legs-footer {
@@ -1263,10 +1244,6 @@ const totalMarkPrice = computed<number | null>(() => {
 
   .leg-greeks {
     justify-content: space-between;
-  }
-
-  .legs-divider {
-    width: calc(100% - var(--row-pad-x));
   }
 }
 </style>

@@ -121,6 +121,37 @@ const payoff = computed(() => payoffState.value.data ?? null);
 const formatPrice = (value) => new Intl.NumberFormat("en-US", {
   style: "currency", currency: "USD", maximumFractionDigits: 0,
 }).format(value);
+const netGreeks = computed(() => {
+  const legs = selectedLegInstruments.value;
+  if (!legs.length) return null;
+  const totals = { delta: 0, gamma: 0, theta: 0, vega: 0 };
+  let any = false;
+  for (const leg of legs) {
+    const quote = payoffQuotes.value[leg.instrumentName];
+    if (!quote) return null;
+    const tteSeconds = Math.max(60, Number(leg.expirationTs) - Number(quote.timestamp));
+    const iv = Number.isFinite(quote.iv) && quote.iv > 0 ? quote.iv : DEFAULT_VOL;
+    const g = calcGreeks(quote.spot, Number(leg.strike), tteSeconds, iv, leg.optionType);
+    if (!Number.isFinite(g.delta)) continue;
+    any = true;
+    totals.delta += leg.signedQty * g.delta;
+    totals.gamma += leg.signedQty * g.gamma;
+    totals.theta += leg.signedQty * g.theta;
+    totals.vega += leg.signedQty * g.vega;
+  }
+  return any ? totals : null;
+});
+
+const formatSignedPrice = (value) => {
+  if (!Number.isFinite(value)) return "—";
+  const abs = Math.abs(value);
+  const formatted = new Intl.NumberFormat("en-US", {
+    style: "currency", currency: "USD", maximumFractionDigits: 0,
+  }).format(abs);
+  if (value === 0) return formatted;
+  return `${value < 0 ? "−" : "+"}${formatted}`;
+};
+
 const breakEvenText = computed(() => {
   if (!payoff.value) return "—";
   const { points, ranges } = payoff.value.breakEvens;
@@ -128,6 +159,37 @@ const breakEvenText = computed(() => {
     ...points.map(formatPrice),
     ...ranges.map((r) => r.to === Infinity ? `${formatPrice(r.from)} and above` : `${formatPrice(r.from)} – ${formatPrice(r.to)}`),
   ].join(" / ") || (payoff.value.mixedMaturities ? "None in shown range" : "None");
+});
+
+const payoffExportMeta = computed(() => {
+  if (!payoff.value) return null;
+  const legs = selectedLegInstruments.value.map((leg) => ({
+    label: leg.legLabel,
+    side: leg.signedQty < 0 ? "sell" : "buy",
+  }));
+  const greeks = netGreeks.value;
+  const greeksLine = greeks
+    ? [
+        `Net Mark ${formatSignedPrice(payoff.value.netPremium)}`,
+        `Δ ${greeks.delta.toFixed(3)}`,
+        `Γ ${greeks.gamma.toFixed(5)}`,
+        `Θ ${greeks.theta.toFixed(2)}`,
+        `ν ${greeks.vega.toFixed(2)}`,
+      ].join("      ")
+    : `Net Mark ${formatSignedPrice(payoff.value.netPremium)}`;
+  const mixed = payoff.value.mixedMaturities;
+  return {
+    legs,
+    stats: {
+      lossLabel: mixed ? "Max Loss · shown range" : "Max Loss",
+      loss: payoff.value.maxLoss === Infinity ? "∞" : formatPrice(payoff.value.maxLoss),
+      breakEvenLabel: mixed ? "Estimated break-evens · shown range" : "Break-even prices",
+      breakEven: breakEvenText.value,
+      returnLabel: mixed ? "Max Return · shown range" : "Max Return",
+      return: payoff.value.maxReturn === Infinity ? "∞" : formatPrice(payoff.value.maxReturn),
+    },
+    greeks: greeksLine,
+  };
 });
 
 const isBootstrapping = ref(true);
@@ -1068,7 +1130,7 @@ const chartLoading = computed(
 );
 
 const handleSavePng = () => {
-  if (isPayoff.value) payoffChartRef.value?.exportPng();
+  if (isPayoff.value) payoffChartRef.value?.exportPng({ meta: payoffExportMeta.value });
   else chartRef.value?.exportPng({ filename: `payoff-${ui.chart}.png` });
 };
 
@@ -1287,7 +1349,7 @@ onUnmounted(() => {
 .payoffSummary div { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .payoffSummary div:nth-child(2) { text-align: center; }
 .payoffSummary div:last-child { text-align: right; }
-.payoffSummary span { font-size: 10px; color: #999; }
+.payoffSummary span { font-size: 9px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 500; }
 .payoffSummary strong { font-size: 13px; font-weight: 500; color: #fff; overflow-wrap: anywhere; }
 .payoffSummary .lossValue { color: #ff1654; }
 .payoffSummary .returnValue { color: #00bf8c; }

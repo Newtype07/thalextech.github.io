@@ -10,18 +10,148 @@ const props = defineProps({
 });
 const svgRef = ref(null);
 let resizeObserver;
-const DATA_LABEL_PX = 10; // Match the instrument selector's Greek values.
-const AXIS_TITLE_PX = 12;
+const DATA_LABEL_PX = 9;
+const AXIS_TITLE_PX = 10;
 
 const SVG_FONT_FAMILY = 'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"';
-const layout = { width: 1800, height: 900, margin: { top: 90, right: 220, bottom: 80, left: 90 } };
+const EXPORT_FONT_FAMILY = 'Helvetica, Arial, sans-serif';
+const SVG_NS = "http://www.w3.org/2000/svg";
+const layout = { width: 1800, height: 900, margin: { top: 90, right: 220, bottom: 80, left: 130 } };
 const money = d3.format(",.2f");
 const priceLabel = (value) => `$${d3.format(",.0f")(value)}`;
 const gradientId = `payoff-fill-${useId()}`;
 
-defineExpose({ exportPng: (options = {}) => exportChartToPng({
-  element: svgRef.value, filename: "payoff.png", scale: 4, padding: 24, ...options,
-}) });
+function decorateExportClone(clone, meta) {
+  clone.setAttribute("font-family", EXPORT_FONT_FAMILY);
+  if (!meta) return;
+  const vb = clone.getAttribute("viewBox");
+  if (!vb) return;
+  const [x0, y0, w, h] = vb.split(" ").map(Number);
+  const legs = meta.legs?.length ? meta.legs : [];
+  const hasStats = Boolean(meta.stats);
+  const greeks = meta.greeks || "";
+
+  const S = {
+    padTop: 32, padBottom: 24,
+    legSize: 18, legLineHeight: 24,
+    legsToRule: 26, ruleToLabel: 18, labelToValue: 8,
+    valueToGreeks: 20, greeksToRule: 20,
+    labelSize: 10, valueSize: 22, greeksSize: 14,
+  };
+
+  const legsBlockH = legs.length ? S.legSize + Math.max(0, legs.length - 1) * S.legLineHeight : 0;
+  const headerBlockH = legsBlockH + S.legsToRule;
+  const statsBlockH = hasStats
+    ? S.ruleToLabel + S.labelSize + S.labelToValue + S.valueSize
+    : 0;
+  const greeksBlockH = greeks ? (hasStats ? S.valueToGreeks : S.ruleToLabel) + S.greeksSize : 0;
+  const bottomRuleH = (hasStats || greeks) ? S.greeksToRule : 0;
+  const headerH = S.padTop + headerBlockH + statsBlockH + greeksBlockH + bottomRuleH + S.padBottom;
+
+  clone.setAttribute("viewBox", `${x0} ${y0 - headerH} ${w} ${h + headerH}`);
+  const chartLeft = x0 + layout.margin.left;
+  const chartRight = x0 + w - layout.margin.right;
+  const chartMid = (chartLeft + chartRight) / 2;
+
+  const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("font-family", EXPORT_FONT_FAMILY);
+
+  const addText = (text, x, y, fill, size, attrs = {}) => {
+    const el = document.createElementNS(SVG_NS, "text");
+    el.setAttribute("x", String(x));
+    el.setAttribute("y", String(y));
+    el.setAttribute("fill", fill);
+    el.setAttribute("font-size", String(size));
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    el.textContent = text;
+    g.appendChild(el);
+  };
+
+  const addRule = (y, opacity = 1) => {
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", String(chartLeft));
+    line.setAttribute("x2", String(chartRight));
+    line.setAttribute("y1", String(y));
+    line.setAttribute("y2", String(y));
+    line.setAttribute("stroke", "#2a2f3a");
+    line.setAttribute("stroke-width", "1");
+    line.setAttribute("stroke-opacity", String(opacity));
+    g.appendChild(line);
+  };
+
+  const addLegLine = (leg, y) => {
+    const el = document.createElementNS(SVG_NS, "text");
+    el.setAttribute("x", String(chartMid));
+    el.setAttribute("y", String(y));
+    el.setAttribute("text-anchor", "middle");
+    el.setAttribute("font-size", String(S.legSize));
+    el.setAttribute("font-weight", "700");
+    const dot = document.createElementNS(SVG_NS, "tspan");
+    dot.setAttribute("fill", leg.side === "sell" ? "#ff1654" : "#00bf8c");
+    dot.textContent = "●";
+    const label = document.createElementNS(SVG_NS, "tspan");
+    label.setAttribute("fill", "#f1f3f8");
+    label.setAttribute("dx", "10");
+    label.textContent = leg.label;
+    el.appendChild(dot);
+    el.appendChild(label);
+    g.appendChild(el);
+  };
+
+  const headerTop = y0 - headerH + S.padTop;
+  const firstLegBaseline = headerTop + S.legSize;
+  legs.forEach((leg, i) => addLegLine(leg, firstLegBaseline + i * S.legLineHeight));
+
+  const legsBottom = firstLegBaseline + Math.max(0, legs.length - 1) * S.legLineHeight;
+  const topRuleY = legsBottom + S.legsToRule;
+  addRule(topRuleY);
+
+  let cursorY = topRuleY;
+
+  if (hasStats) {
+    const s = meta.stats;
+    const labelY = cursorY + S.ruleToLabel + S.labelSize;
+    const valueY = labelY + S.labelToValue + S.valueSize;
+    const labelAttrs = { "letter-spacing": "0.14em", "font-weight": "500" };
+    addText(s.lossLabel.toUpperCase(), chartLeft, labelY, "#6b7280", S.labelSize, labelAttrs);
+    addText(s.breakEvenLabel.toUpperCase(), chartMid, labelY, "#6b7280", S.labelSize,
+      { ...labelAttrs, "text-anchor": "middle" });
+    addText(s.returnLabel.toUpperCase(), chartRight, labelY, "#6b7280", S.labelSize,
+      { ...labelAttrs, "text-anchor": "end" });
+    addText(s.loss, chartLeft, valueY, "#ff1654", S.valueSize, { "font-weight": "500" });
+    addText(s.breakEven, chartMid, valueY, "#f1f3f8", S.valueSize,
+      { "text-anchor": "middle", "font-weight": "500" });
+    addText(s.return, chartRight, valueY, "#00bf8c", S.valueSize,
+      { "text-anchor": "end", "font-weight": "500" });
+    cursorY = valueY;
+  }
+
+  if (greeks) {
+    const gap = hasStats ? S.valueToGreeks : S.ruleToLabel;
+    const baseline = cursorY + gap + S.greeksSize;
+    addText(greeks, chartMid, baseline, "#9ba1ad", S.greeksSize,
+      { "text-anchor": "middle", "letter-spacing": "0.04em" });
+    cursorY = baseline;
+  }
+
+  if (hasStats || greeks) {
+    addRule(cursorY + S.greeksToRule);
+  }
+
+  clone.insertBefore(g, clone.firstChild);
+}
+
+defineExpose({ exportPng: (options = {}) => {
+  const { meta, ...rest } = options;
+  exportChartToPng({
+    element: svgRef.value,
+    filename: "payoff.png",
+    scale: 4,
+    padding: 24,
+    prepareSvgClone: (clone) => decorateExportClone(clone, meta || null),
+    ...rest,
+  });
+}});
 
 function render() {
   if (!svgRef.value) return;
@@ -53,17 +183,17 @@ function render() {
     g.selectAll("line").remove();
   };
   svg.append("g").attr("transform", `translate(${margin.left},0)`)
-    .call(d3.axisLeft(y).ticks(4).tickSize(0).tickPadding(16).tickFormat(d3.format(",.0f")))
+    .call(d3.axisLeft(y).ticks(4).tickSize(0).tickPadding(22).tickFormat(d3.format(",.0f")))
     .call(axisStyle);
   svg.append("g").attr("transform", `translate(0,${bottom})`)
     .call(d3.axisBottom(x).ticks(renderedWidth < 650 ? 4 : 8).tickSize(0).tickPadding(16).tickFormat(d3.format(",.0f")))
     .call(axisStyle);
   svg.append("text").attr("x", (margin.left + right) / 2).attr("y", height - 15)
-    .attr("text-anchor", "middle").attr("fill", "#f7f8fb").attr("font-size", axisTitleSize).attr("font-weight", 500)
+    .attr("text-anchor", "middle").attr("fill", "#d4d7e2").attr("font-size", axisTitleSize).attr("font-weight", 500)
     .text(`${props.asset} Price`);
   svg.append("text").attr("transform", "rotate(-90)")
-    .attr("x", -height / 2).attr("y", 28).attr("text-anchor", "middle")
-    .attr("fill", "#f7f8fb").attr("font-size", axisTitleSize).attr("font-weight", 500).text("P&L (USD)");
+    .attr("x", -height / 2).attr("y", 22).attr("text-anchor", "middle")
+    .attr("fill", "#d4d7e2").attr("font-size", axisTitleSize).attr("font-weight", 500).text("P&L (USD)");
   const defs = svg.append("defs");
   for (const [name, top, h] of [["profit", margin.top, y(0) - margin.top], ["loss", y(0), bottom - y(0)]]) {
     defs.append("clipPath").attr("id", `payoff-${name}`).append("rect")
@@ -81,30 +211,41 @@ function render() {
     svg.append("path").datum(points).attr("d", area).attr("fill", `url(#${gradientId}-${name})`)
       .attr("clip-path", `url(#payoff-${name})`);
   }
-  const decayOpacity = [0.65, 0.48, 0.34, 0.22];
+  const decayOpacity = [0.6, 0.45, 0.3, 0.2];
+  const decayColor = "#b8c0d0";
   decayCurves.forEach((curve, i) => {
     svg.append("path").datum(curve.points).attr("class", "decay-curve")
-      .attr("d", line).attr("fill", "none").attr("stroke", "#fff")
-      .attr("stroke-width", 1.5).attr("stroke-opacity", decayOpacity[i] ?? 0.3)
+      .attr("d", line).attr("fill", "none").attr("stroke", decayColor)
+      .attr("stroke-width", 1.5).attr("stroke-opacity", decayOpacity[i] ?? 0.2)
       .attr("stroke-linejoin", "round");
   });
   for (const [name, color] of [["profit", "#00bf8c"], ["loss", "#ff1654"]]) {
     svg.append("path").datum(points).attr("d", line).attr("fill", "none").attr("stroke", color)
       .attr("stroke-width", 3).attr("stroke-linejoin", "round").attr("clip-path", `url(#payoff-${name})`);
   }
-  const forwardX = x(props.payoff.forward);
-  svg.append("line").attr("x1", forwardX).attr("x2", forwardX).attr("y1", margin.top).attr("y2", bottom)
-    .attr("stroke", "#ffffff").attr("stroke-width", 1);
-  svg.append("text").attr("x", Math.max(margin.left + 90, Math.min(right - 90, forwardX)))
-    .attr("y", margin.top - 15).attr("fill", "#ffffff").attr("text-anchor", "middle")
-    .attr("font-size", dataLabelSize).text(`Forward ${priceLabel(props.payoff.forward)}`);
+  const markerStroke = "#9ba1ad";
+  const markerOpacity = 0.35;
+  const markerLabelFill = "#8a92a3";
+  const labelClampX = (px) => Math.max(margin.left + 90, Math.min(right - 90, px));
+  const drawPriceMarker = (price, label) => {
+    const px = x(price);
+    svg.append("line").attr("x1", px).attr("x2", px).attr("y1", margin.top).attr("y2", bottom)
+      .attr("stroke", markerStroke).attr("stroke-width", 1).attr("stroke-opacity", markerOpacity);
+    svg.append("text").attr("x", labelClampX(px)).attr("y", margin.top - 15)
+      .attr("fill", markerLabelFill).attr("text-anchor", "middle")
+      .attr("font-size", dataLabelSize).text(label);
+  };
+  for (const bePrice of props.payoff.breakEvens?.points || []) {
+    drawPriceMarker(bePrice, priceLabel(bePrice));
+  }
+  drawPriceMarker(props.payoff.forward, `Forward ${priceLabel(props.payoff.forward)}`);
   if (decayCurves.length) {
     const legend = svg.append("g").attr("class", "decay-legend").attr("transform", `translate(${right + 28},${margin.top + 8})`);
     legend.append("text").attr("fill", "#d4d7e2").attr("font-size", dataLabelSize).attr("font-weight", 500).text("Elapsed");
     decayCurves.forEach((curve, i) => {
       const ly = dataLabelSize * 1.8 * (i + 1);
       legend.append("line").attr("x1", 0).attr("x2", dataLabelSize * 1.4).attr("y1", ly).attr("y2", ly)
-        .attr("stroke", "#fff").attr("stroke-width", 1.5).attr("stroke-opacity", decayOpacity[i] ?? 0.3);
+        .attr("stroke", decayColor).attr("stroke-width", 1.5).attr("stroke-opacity", decayOpacity[i] ?? 0.2);
       legend.append("text").attr("x", dataLabelSize * 2).attr("y", ly + dataLabelSize * 0.32).attr("fill", "#d4d7e2").attr("font-size", dataLabelSize)
         .text(curve.elapsedFraction === 0 ? "Now" : `${curve.elapsedFraction * 100}%`);
     });
