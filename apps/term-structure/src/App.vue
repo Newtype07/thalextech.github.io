@@ -29,6 +29,26 @@ import {
 } from "./forward-volatility.js";
 import { getThalexQueueStatus } from "./thalex-rest.js";
 import { buildTermSnapshots, SNAPSHOT_RESOLUTIONS } from "./term-snapshots.js";
+import StraddleSimulator from "./components/StraddleSimulator.vue";
+import { nearestListedStrike } from "./simulation/straddle-selection.js";
+
+const activeTab = ref("curve"),
+  simulationOpened = ref(false);
+function selectTab(tab) {
+  activeTab.value = tab;
+  if (tab === "simulate") simulationOpened.value = true;
+}
+function tabKey(event) {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const tab = event.key === "Home"
+    ? "curve"
+    : event.key === "End"
+      ? "simulate"
+      : activeTab.value === "curve" ? "simulate" : "curve";
+  selectTab(tab);
+  document.getElementById(`tab-${tab}`)?.focus();
+}
 
 const asset = ref("BTC"),
   slice = ref("atm");
@@ -68,8 +88,19 @@ const activeHistory = computed(() => historyActivity.value?.active || []);
 const chart = ref(null),
   historyReady = ref(false);
 let controller, historyController, statusTimer;
-let currentChain = [];
+const currentChain = shallowRef([]);
 const selectedLive = computed(() => selectLiveQuotes(live.value, source.value));
+// Simulation consumes a captured ATM curve, never the selected wing/display view.
+const simulationCurve = computed(() => buildCurrentSeries(live.value, "atm")
+  .map(point => ({
+    seconds: point.expiry - referenceTime.value,
+    expiry: point.expiry,
+    iv: point.iv,
+    strike: nearestListedStrike(currentChain.value, point.expiry, simulationSpot.value),
+  }))
+  .filter(point => point.seconds > 0));
+const simulationSpot = computed(() => live.value.reduce((latest, quote) =>
+  quote.spot > 0 && (!latest || quote.ts > latest.ts) ? quote : latest, null)?.spot ?? null);
 const bookFallbackCount = computed(
   () =>
     live.value.filter((q) => !(q.bookIv > 0 && Number.isFinite(q.bookIv)))
@@ -245,7 +276,7 @@ async function load(nextAsset = asset.value) {
   liveReceived.value = 0;
   error.value = "";
   warnings.value = [];
-  currentChain = [];
+  currentChain.value = [];
   if (switchingAsset) {
     live.value = [];
     history.value = [];
@@ -261,7 +292,7 @@ async function load(nextAsset = asset.value) {
     signal.throwIfAborted();
     if (!chain.length)
       throw new Error(`No live ${nextAsset} option expiries returned`);
-    currentChain = chain;
+    currentChain.value = chain;
     liveProgress.value = { checked: 0, total: chain.length };
     expiries.value = [...new Set(chain.map((i) => i.expiry))].sort(
       (a, b) => a - b,
@@ -338,8 +369,8 @@ onMounted(() => {
   }, 1000);
 });
 watch(slice, () => {
-  if (currentChain.length)
-    void loadHistory(currentChain, asset.value, referenceTime.value);
+  if (currentChain.value.length)
+    void loadHistory(currentChain.value, asset.value, referenceTime.value);
 });
 onBeforeUnmount(() => {
   controller?.abort();
@@ -367,60 +398,63 @@ onBeforeUnmount(() => {
             {{ coin }}
           </button>
         </div>
-        <div class="field">
-          <label for="volatility-view">Volatility</label>
-          <StyledSelectMenu
-            id="volatility-view"
-            v-model="volatilityView"
-            label="Volatility"
-            :options="VOLATILITY_VIEWS"
-          />
-        </div>
-        <div class="field">
-          <label for="slice">Slice</label>
-          <StyledSelectMenu
-            id="slice"
-            v-model="slice"
-            label="Slice"
-            :options="SLICES"
-          />
-        </div>
-        <div class="underlyingToggle" role="group" aria-label="Chart style">
-          <button
-            v-for="style in ['scatter', 'lines']"
-            :key="style"
-            type="button"
-            class="underlyingButton"
-            :class="{ underlyingButtonActive: chartStyle === style }"
-            :aria-pressed="chartStyle === style"
-            @click="chartStyle = style"
-          >{{ style === 'scatter' ? 'Scatter' : 'Lines' }}</button>
-        </div>
-        <div v-if="chartStyle === 'lines'" class="field">
-          <label for="snapshot-resolution">Resolution</label>
-          <StyledSelectMenu
-            id="snapshot-resolution"
-            v-model="snapshotResolution"
-            label="Snapshot resolution"
-            :options="SNAPSHOT_RESOLUTIONS"
-          />
-        </div>
-        <div v-if="chartStyle === 'scatter'" class="field">
-          <label for="source">Current</label>
-          <StyledSelectMenu
-            id="source"
-            v-model="source"
-            label="Current curve"
-            :options="[
-              { value: 'mark', label: 'Live marks' },
-              { value: 'book', label: 'Book mid / mark fallback' },
-            ]"
-          />
-        </div>
+        <template v-if="activeTab === 'curve'">
+          <div class="field">
+            <label for="volatility-view">Volatility</label>
+            <StyledSelectMenu
+              id="volatility-view"
+              v-model="volatilityView"
+              label="Volatility"
+              :options="VOLATILITY_VIEWS"
+            />
+          </div>
+          <div class="field">
+            <label for="slice">Slice</label>
+            <StyledSelectMenu
+              id="slice"
+              v-model="slice"
+              label="Slice"
+              :options="SLICES"
+            />
+          </div>
+          <div class="underlyingToggle" role="group" aria-label="Chart style">
+            <button
+              v-for="style in ['scatter', 'lines']"
+              :key="style"
+              type="button"
+              class="underlyingButton"
+              :class="{ underlyingButtonActive: chartStyle === style }"
+              :aria-pressed="chartStyle === style"
+              @click="chartStyle = style"
+            >{{ style === 'scatter' ? 'Scatter' : 'Lines' }}</button>
+          </div>
+          <div v-if="chartStyle === 'lines'" class="field">
+            <label for="snapshot-resolution">Resolution</label>
+            <StyledSelectMenu
+              id="snapshot-resolution"
+              v-model="snapshotResolution"
+              label="Snapshot resolution"
+              :options="SNAPSHOT_RESOLUTIONS"
+            />
+          </div>
+          <div v-if="chartStyle === 'scatter'" class="field">
+            <label for="source">Current</label>
+            <StyledSelectMenu
+              id="source"
+              v-model="source"
+              label="Current curve"
+              :options="[
+                { value: 'mark', label: 'Live marks' },
+                { value: 'book', label: 'Book mid / mark fallback' },
+              ]"
+            />
+          </div>
+        </template>
         <button class="saveButton" type="button" @click="load()">
           {{ loading || historyLoading ? "Restart fetch" : "Refresh" }}
         </button>
         <button
+          v-if="activeTab === 'curve'"
           class="saveButton"
           type="button"
           :disabled="!series.current.length && !series.history.length"
@@ -431,151 +465,192 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <section class="chartPanel" aria-label="Volatility term structure" :aria-busy="fetching">
-      <ChartSettings
-        v-model:show-realized="showRealized"
-        :forward="volatilityView === 'forward'"
-      />
-      <TermStructureChart
-        ref="chart"
-        :current="series.current"
-        :expiries="expiries"
-        :history="series.history"
-        :snapshots="snapshots"
-        :chart-style="chartStyle"
-        :snapshot-resolution="chartStyle === 'lines' ? snapshotResolution : ''"
-        :asset="asset"
-        :slice-label="sliceLabel"
-        :source-label="sourceLabel"
-        :view="volatilityView"
-        :snapshot-time="snapshotTime"
-        :rv-data-range="rvDataRange"
-        :loading="loading || historyLoading"
-        :realized="showRealized ? realized : []"
-      />
-    </section>
+    <nav
+      class="appTabs"
+      role="tablist"
+      aria-label="Term structure workspace"
+      @keydown="tabKey"
+    >
+      <button
+        v-for="tab in ['curve', 'simulate']"
+        :id="`tab-${tab}`"
+        :key="tab"
+        type="button"
+        role="tab"
+        :aria-selected="activeTab === tab"
+        :aria-controls="`panel-${tab}`"
+        :tabindex="activeTab === tab ? 0 : -1"
+        @click="selectTab(tab)"
+      >{{ tab === 'curve' ? 'Term structure' : 'Simulate' }}</button>
+    </nav>
+    <div
+      v-show="activeTab === 'curve'"
+      id="panel-curve"
+      role="tabpanel"
+      aria-labelledby="tab-curve"
+    >
+      <section class="chartPanel" aria-label="Volatility term structure" :aria-busy="fetching">
+        <ChartSettings
+          v-model:show-realized="showRealized"
+          :forward="volatilityView === 'forward'"
+        />
+        <TermStructureChart
+          ref="chart"
+          :current="series.current"
+          :expiries="expiries"
+          :history="series.history"
+          :snapshots="snapshots"
+          :chart-style="chartStyle"
+          :snapshot-resolution="chartStyle === 'lines' ? snapshotResolution : ''"
+          :asset="asset"
+          :slice-label="sliceLabel"
+          :source-label="sourceLabel"
+          :view="volatilityView"
+          :snapshot-time="snapshotTime"
+          :rv-data-range="rvDataRange"
+          :loading="loading || historyLoading"
+          :realized="showRealized ? realized : []"
+        />
+      </section>
 
-    <details v-if="series.current.length" class="expiryDetails">
-      <summary>
-        {{ detailLabel }} · {{ series.current.length }}
-        {{ volatilityView === "forward" ? "intervals" : "expiries" }} ·
-        {{ total.toLocaleString() }} historical observations
-      </summary>
-      <div class="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>
-                {{
-                  volatilityView === "forward"
-                    ? "INTERVAL (UTC)"
-                    : "EXPIRY (UTC)"
-                }}
-              </th>
-              <th>
-                {{
-                  volatilityView === "forward"
-                    ? "INTERVAL DAYS"
-                    : "DAYS TO EXPIRY"
-                }}
-              </th>
-              <th>
-                {{
-                  volatilityView === "forward" ? "LIVE FORWARD VOL" : "LIVE IV"
-                }}
-              </th>
-              <th v-if="showRealized">REALIZED VOL</th>
-              <th v-if="showRealized">RV COVERAGE</th>
-              <th v-if="showRealized">
-                {{ volatilityView === "forward" ? "FORWARD − RV" : "IV − RV" }}
-              </th>
-              <th>HISTORICAL PERCENTILE</th>
-              <th>HOURLY OBSERVATIONS</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="p in series.current" :key="p.expiry">
-              <td>{{ rowLabel(p) }}</td>
-              <td>
-                {{
-                  (
-                    (p.expiry -
-                      (volatilityView === "forward"
-                        ? (p.startExpiry ?? p.ts)
-                        : p.ts)) /
-                    86400
-                  ).toFixed(1)
-                }}
-              </td>
-              <td
-                class="iv-cell"
-                :title="
-                  p.clamped
-                    ? 'Spot outside available strikes; nearest strike used in at least one IV input'
-                    : undefined
-                "
-              >
-                {{ (p.iv * 100).toFixed(2) }}%
-              </td>
-              <td
-                v-if="showRealized"
-                :title="
-                  realizedByMaturity.get(p.expiry)?.count +
-                  ' of ' +
-                  realizedByMaturity.get(p.expiry)?.hours +
-                  ' hourly bars'
-                "
-              >
-                {{
-                  realizedByMaturity.get(p.expiry)?.iv == null
-                    ? "Unavailable"
-                    : (realizedByMaturity.get(p.expiry).iv * 100).toFixed(2) +
-                      "%"
-                }}
-              </td>
-              <td v-if="showRealized">
-                {{
-                  realizedByMaturity.has(p.expiry)
-                    ? (realizedByMaturity.get(p.expiry).coverage * 100).toFixed(
-                        2,
-                      ) + "%"
-                    : "—"
-                }}
-              </td>
-              <td v-if="showRealized">
-                {{
-                  realizedByMaturity.get(p.expiry)?.iv == null
-                    ? "—"
-                    : (
-                        (p.iv - realizedByMaturity.get(p.expiry).iv) *
-                        100
-                      ).toFixed(2) + " pp"
-                }}
-              </td>
-              <td>
-                <div class="rank-cell">
-                  <div class="rank-track">
-                    <i :style="{ width: (p.rank ?? 0) + '%' }"></i>
+      <details v-if="series.current.length" class="expiryDetails">
+        <summary>
+          {{ detailLabel }} · {{ series.current.length }}
+          {{ volatilityView === "forward" ? "intervals" : "expiries" }} ·
+          {{ total.toLocaleString() }} historical observations
+        </summary>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>
+                  {{
+                    volatilityView === "forward"
+                      ? "INTERVAL (UTC)"
+                      : "EXPIRY (UTC)"
+                  }}
+                </th>
+                <th>
+                  {{
+                    volatilityView === "forward"
+                      ? "INTERVAL DAYS"
+                      : "DAYS TO EXPIRY"
+                  }}
+                </th>
+                <th>
+                  {{
+                    volatilityView === "forward" ? "LIVE FORWARD VOL" : "LIVE IV"
+                  }}
+                </th>
+                <th v-if="showRealized">REALIZED VOL</th>
+                <th v-if="showRealized">RV COVERAGE</th>
+                <th v-if="showRealized">
+                  {{ volatilityView === "forward" ? "FORWARD − RV" : "IV − RV" }}
+                </th>
+                <th>HISTORICAL PERCENTILE</th>
+                <th>HOURLY OBSERVATIONS</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="p in series.current" :key="p.expiry">
+                <td>{{ rowLabel(p) }}</td>
+                <td>
+                  {{
+                    (
+                      (p.expiry -
+                        (volatilityView === "forward"
+                          ? (p.startExpiry ?? p.ts)
+                          : p.ts)) /
+                      86400
+                    ).toFixed(1)
+                  }}
+                </td>
+                <td
+                  class="iv-cell"
+                  :title="
+                    p.clamped
+                      ? 'Spot outside available strikes; nearest strike used in at least one IV input'
+                      : undefined
+                  "
+                >
+                  {{ (p.iv * 100).toFixed(2) }}%
+                </td>
+                <td
+                  v-if="showRealized"
+                  :title="
+                    realizedByMaturity.get(p.expiry)?.count +
+                    ' of ' +
+                    realizedByMaturity.get(p.expiry)?.hours +
+                    ' hourly bars'
+                  "
+                >
+                  {{
+                    realizedByMaturity.get(p.expiry)?.iv == null
+                      ? "Unavailable"
+                      : (realizedByMaturity.get(p.expiry).iv * 100).toFixed(2) +
+                        "%"
+                  }}
+                </td>
+                <td v-if="showRealized">
+                  {{
+                    realizedByMaturity.has(p.expiry)
+                      ? (realizedByMaturity.get(p.expiry).coverage * 100).toFixed(
+                          2,
+                        ) + "%"
+                      : "—"
+                  }}
+                </td>
+                <td v-if="showRealized">
+                  {{
+                    realizedByMaturity.get(p.expiry)?.iv == null
+                      ? "—"
+                      : (
+                          (p.iv - realizedByMaturity.get(p.expiry).iv) *
+                          100
+                        ).toFixed(2) + " pp"
+                  }}
+                </td>
+                <td>
+                  <div class="rank-cell">
+                    <div class="rank-track">
+                      <i :style="{ width: (p.rank ?? 0) + '%' }"></i>
+                    </div>
+                    <span>{{
+                      p.rank == null ? "—" : p.rank.toFixed(0) + "th"
+                    }}</span>
                   </div>
-                  <span>{{
-                    p.rank == null ? "—" : p.rank.toFixed(0) + "th"
-                  }}</span>
-                </div>
-              </td>
-              <td>
-                {{
-                  historyReady
-                    ? p.count.toLocaleString()
-                    : loading
-                      ? "Loading…"
-                      : "Unavailable"
-                }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </details>
+                </td>
+                <td>
+                  {{
+                    historyReady
+                      ? p.count.toLocaleString()
+                      : loading
+                        ? "Loading…"
+                        : "Unavailable"
+                  }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </details>
 
+    </div>
+    <div
+      v-if="simulationOpened"
+      v-show="activeTab === 'simulate'"
+      id="panel-simulate"
+      role="tabpanel"
+      aria-labelledby="tab-simulate"
+    >
+      <StraddleSimulator
+        :key="asset"
+        :asset="asset"
+        :live-curve="simulationCurve"
+        :live-spot="simulationSpot"
+        :as-of="referenceTime"
+        :market-loading="liveLoading"
+      />
+    </div>
   </main>
 </template>

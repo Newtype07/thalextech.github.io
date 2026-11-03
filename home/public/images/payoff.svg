@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" fill="none">
+  <rect width="1200" height="675" fill="#000"/>
+  <g font-family="Arial, sans-serif">
+    <text x="64" y="68" fill="#f8fafc" font-size="32" font-weight="600">Payoff</text>
+    <text x="64" y="100" fill="#94a3b8" font-size="17">Your combination. Every outcome.</text>
+    <rect x="64" y="130" width="1072" height="95" rx="12" fill="#0b0e13" stroke="#202630"/>
+    <g font-size="14" fill="#94a3b8">
+      <text x="88" y="161">Forward · first maturity</text>
+      <text x="455" y="161">Break-even prices</text>
+      <text x="895" y="161">Net debit</text>
+    </g>
+    <g font-size="23" fill="#f8fafc">
+      <text x="88" y="198" fill="#93c5fd">$100,000</text>
+      <text x="455" y="198">$90,000 / $110,000</text>
+      <text x="895" y="198">$10,000</text>
+    </g>
+    <g stroke="#1e293b">
+      <path d="M100 290H1100M100 370H1100M100 450H1100M100 530H1100"/>
+    </g>
+    <path d="M100 450V370L350 450Z M850 450L1100 370V450Z" fill="#34d399" fill-opacity=".1"/>
+    <path d="M350 450L600 530L850 450Z" fill="#fb7185" fill-opacity=".12"/>
+    <path d="M100 370L350 450M850 450L1100 370" stroke="#34d399" stroke-width="4"/>
+    <path d="M350 450L600 530L850 450" stroke="#fb7185" stroke-width="4" stroke-linejoin="round"/>
+    <path d="M100 450H1100" stroke="#64748b" stroke-dasharray="5 6"/>
+    <path d="M600 280V570" stroke="#60a5fa" stroke-dasharray="7 6"/>
+    <g fill="#000" stroke="#f8fafc" stroke-width="3">
+      <circle cx="350" cy="450" r="6"/><circle cx="850" cy="450" r="6"/>
+    </g>
+    <g fill="#e2e8f0" font-size="16" text-anchor="middle">
+      <text x="350" y="428">BE $90,000</text><text x="850" y="428">BE $110,000</text>
+      <text x="600" y="267" fill="#93c5fd">Forward $100,000</text>
+    </g>
+    <g fill="#94a3b8" font-size="14">
+      <text x="64" y="260">P/L (USD)</text>
+      <text x="80" y="455" text-anchor="end">0</text>
+      <text x="100" y="600" text-anchor="middle">80,000</text>
+      <text x="350" y="600" text-anchor="middle">90,000</text>
+      <text x="600" y="600" text-anchor="middle">100,000</text>
+      <text x="850" y="600" text-anchor="middle">110,000</text>
+      <text x="1100" y="600" text-anchor="middle">120,000</text>
+      <text x="600" y="638" text-anchor="middle">Price at first expiry (USD)</text>
+    </g>
+  </g>
+</svg>

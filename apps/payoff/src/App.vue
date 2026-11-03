@@ -2,6 +2,10 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import PositionBuilder from "../../simulator/src/components/PositionBuilder.vue";
 import Greeks from "./components/Greeks.vue";
+import PayoffChart from "./components/PayoffChart.vue";
+import { buildPayoff } from "./payoff.js";
+import { fetchPayoffQuotes } from "./payoff-market.js";
+import { requestThalex } from "../../../lib/thalex-rest.js";
 import { buildScenarioSpotGrid } from "./scenario-range.js";
 import {
   calcGreeks,
@@ -63,6 +67,7 @@ const FALLBACK_SPOT_BY_UNDERLYING = {
 };
 
 const ui = reactive({
+  view: "payoff",
   resolutionKey: "900",
   greek: "delta",
   maxPoints: DEFAULT_MAX_POINTS_PER_FETCH,
@@ -88,6 +93,40 @@ const simulationRows = ref([]);
 const simulationAnchorTs = ref(null);
 const simulationAnchorSpot = ref(null);
 const chartRef = ref(null);
+const payoffChartRef = ref(null);
+const payoffQuotes = ref({});
+let payoffController = null;
+const payoffState = computed(() => {
+  try {
+    const active = selectedOptionLegs.value.filter((leg) => clampQty(leg.qty) > 0);
+    if (hasUnsupportedLegs.value) return { error: "Only option legs are supported." };
+    if (active.length !== selectedLegInstruments.value.length) return { error: "Select a listed instrument for every active leg." };
+    const legs = selectedLegInstruments.value.map((leg) => {
+      const quote = payoffQuotes.value[leg.instrumentName];
+      if (!quote) throw new Error(`Current quote unavailable for ${leg.instrumentName}.`);
+      return {
+        optionType: leg.optionType, strike: leg.strike,
+        signedQty: leg.signedQty, expirationTs: leg.expirationTs,
+        premium: quote.premium, forward: quote.forward, iv: quote.iv,
+      };
+    });
+    return { data: buildPayoff(legs) };
+  } catch (error) {
+    return { error: error.message };
+  }
+});
+const payoff = computed(() => payoffState.value.data ?? null);
+const formatPrice = (value) => new Intl.NumberFormat("en-US", {
+  style: "currency", currency: "USD", maximumFractionDigits: 2,
+}).format(value);
+const breakEvenText = computed(() => {
+  if (!payoff.value) return "—";
+  const { points, ranges } = payoff.value.breakEvens;
+  return [
+    ...points.map(formatPrice),
+    ...ranges.map((r) => r.to === Infinity ? `${formatPrice(r.from)} and above` : `${formatPrice(r.from)} – ${formatPrice(r.to)}`),
+  ].join(" / ") || (payoff.value.mixedMaturities ? "None in shown range" : "None");
+});
 
 const isBootstrapping = ref(true);
 let loadRequestId = 0;
@@ -402,27 +441,11 @@ const getTimestampRange = () => {
 
 const loadInitialIndexSnapshot = async () => {
   const indexName = underlying.value;
-  const now = Math.floor(Date.now() / 1000);
-  const rows = await fetchIndexHistory({
-    index_name: indexName,
-    resolution: "1m",
-    from: now - 2 * 60 * 60,
-    to: now,
-  });
-  const sorted = sortRowsByTs(rows);
-  const latest = findLastRow(sorted);
-  const price = extractIndexClose(latest);
-  const ts = extractIndexTs(latest);
-  if (!latest || !Number.isFinite(price)) return;
+  const result = await requestThalex("index", { underlying: indexName });
+  const price = Number(result.price);
+  if (!Number.isFinite(price) || price <= 0) throw new Error("Current index is unavailable.");
   indexByName.value = {
-    [indexName]: {
-      data: {
-        ...latest,
-        index_price_close: price,
-        ts: Number.isFinite(ts) ? ts : latest.ts,
-      },
-      fetchedAt: Number.isFinite(ts) ? ts * 1000 : Date.now(),
-    },
+    [indexName]: { data: { index_price_close: price }, fetchedAt: Date.now() },
   };
 };
 
@@ -918,7 +941,41 @@ const recomputeSimulationFromCache = () => {
   }
 };
 
+const loadPayoff = async () => {
+  const requestId = ++loadRequestId;
+  payoffController?.abort();
+  payoffController = new AbortController();
+  payoffQuotes.value = {};
+  tickerByInstrument.value = {};
+  ui.error = "";
+  if (hasUnsupportedLegs.value || !selectedInstrumentNames.value.length) {
+    ui.loading = false;
+    return;
+  }
+  ui.loading = true;
+  const names = [...selectedInstrumentNames.value];
+  const indexName = activeIndexName.value;
+  try {
+    const quotes = await fetchPayoffQuotes(names, payoffController.signal);
+    if (requestId !== loadRequestId) return;
+    payoffQuotes.value = quotes;
+    tickerByInstrument.value = Object.fromEntries(Object.entries(quotes).map(([name, q]) => [name, {
+      data: { mark_price: q.premium, iv: q.iv, ts: q.timestamp }, fetchedAt: q.timestamp * 1000,
+    }]));
+    const quote = quotes[names[0]];
+    if (quote) indexByName.value = {
+      [indexName]: { data: { index_price_close: quote.spot }, fetchedAt: quote.timestamp * 1000 },
+    };
+  } catch (error) {
+    if (requestId === loadRequestId) ui.error = error.message;
+  } finally {
+    if (requestId === loadRequestId) ui.loading = false;
+  }
+};
+
 const loadSeries = async () => {
+  if (ui.view === "payoff") return loadPayoff();
+  payoffController?.abort();
   const requestId = ++loadRequestId;
 
   if (hasUnsupportedLegs.value) {
@@ -993,7 +1050,7 @@ const scheduleLoad = () => {
   }, LOAD_DEBOUNCE_MS);
 };
 
-const headerTitle = "Strategy Builder Greeks";
+const headerTitle = "Payoff";
 const timeSliderStyle = computed(() => {
   const progress = Math.max(0, Math.min(1, Number(ui.timeProgress) / 100));
   const tone = Math.round(244 - progress * 184);
@@ -1009,12 +1066,12 @@ const chartLoading = computed(
 );
 
 const handleSavePng = () => {
-  if (!chartRef.value) return;
-  chartRef.value.exportPng({ filename: `combo-greeks-${ui.greek}.png` });
+  if (ui.view === "payoff") payoffChartRef.value?.exportPng();
+  else chartRef.value?.exportPng({ filename: `payoff-${ui.greek}.png` });
 };
 
 watch(
-  () => [ui.resolutionKey, maxPointsPerFetch.value, positionLegs.value],
+  () => [ui.view, ui.resolutionKey, maxPointsPerFetch.value, positionLegs.value],
   () => {
     if (isBootstrapping.value) return;
     scheduleLoad();
@@ -1026,7 +1083,7 @@ watch(
   () => ui.timeProgress,
   () => {
     if (isBootstrapping.value) return;
-    if (ui.loading) return;
+    if (ui.loading || ui.view !== "greeks") return;
     recomputeSimulationFromCache();
   },
 );
@@ -1081,7 +1138,7 @@ watch(
     simulationAnchorTs.value,
   ],
   () => {
-    rebuildBuilderSnapshots(simulationAnchorTs.value);
+    if (ui.view === "greeks") rebuildBuilderSnapshots(simulationAnchorTs.value);
   },
   { deep: true },
 );
@@ -1089,6 +1146,9 @@ watch(
 const switchUnderlying = async (next) => {
   if (next === underlying.value) return;
   if (!UNDERLYING_OPTIONS.some((opt) => opt.value === next)) return;
+  ++loadRequestId;
+  payoffController?.abort();
+  payoffQuotes.value = {};
   underlying.value = next;
   positionLegs.value = [];
   indexByName.value = {};
@@ -1129,6 +1189,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  ++loadRequestId;
+  payoffController?.abort();
   if (loadTimer) clearTimeout(loadTimer);
 });
 </script>
@@ -1140,7 +1202,9 @@ onUnmounted(() => {
         <h1>{{ headerTitle }}</h1>
       </div>
 
-      <div v-if="ui.error" class="error">{{ ui.error }}</div>
+      <div v-if="ui.error || (ui.view === 'payoff' && !ui.loading && payoffState.error)" class="error" role="alert">
+        {{ ui.error || payoffState.error }}
+      </div>
     </header>
 
     <main class="workspaceShell">
@@ -1177,7 +1241,27 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="chartShell">
-        <div class="chartControlRow">
+        <div class="viewRow">
+          <div class="viewToggle" role="group" aria-label="Chart view">
+            <button type="button" :class="{ selected: ui.view === 'payoff' }" :aria-pressed="ui.view === 'payoff'" @click="ui.view = 'payoff'">Payoff</button>
+            <button type="button" :class="{ selected: ui.view === 'greeks' }" :aria-pressed="ui.view === 'greeks'" @click="ui.view = 'greeks'">Greeks</button>
+          </div>
+          <div class="viewActions">
+            <button type="button" class="saveButton" :disabled="ui.loading" @click="loadSeries">Refresh</button>
+            <button type="button" class="saveButton" :disabled="ui.loading || (ui.view === 'payoff' ? !payoff : !simulationRows.length)" @click="handleSavePng">Save PNG</button>
+          </div>
+        </div>
+        <div v-if="ui.view === 'payoff'" class="payoffSummary" aria-live="polite">
+          <div><span>Forward · {{ payoff ? formatExpiryFromTs(payoff.horizonTs) : 'first maturity' }}</span><strong class="forwardValue">{{ payoff ? formatPrice(payoff.forward) : '—' }}</strong></div>
+          <div><span>{{ payoff?.mixedMaturities ? 'Estimated break-evens · shown range' : 'Break-even prices' }}</span><strong>{{ breakEvenText }}</strong></div>
+          <div><span>Net {{ (payoff?.netPremium ?? 0) < 0 ? 'credit' : 'debit' }} at current marks</span><strong>{{ payoff ? formatPrice(Math.abs(payoff.netPremium)) : '—' }}</strong></div>
+        </div>
+        <PayoffChart v-if="ui.view === 'payoff'" ref="payoffChartRef" :payoff="payoff" :asset="underlying === 'ETHUSD' ? 'ETH' : 'BTC'" :loading="ui.loading" />
+        <p v-if="ui.view === 'payoff'" class="payoffNote">
+          Profit/loss at {{ payoff ? formatExpiryFromTs(payoff.horizonTs) : 'the first expiry' }} relative to current marks, before fees.
+          <template v-if="payoff?.mixedMaturities">Later legs retain estimated time value, with unchanged IV and relative forwards. Break-evens are estimates within the shown range.</template>
+        </p>
+        <div v-if="ui.view === 'greeks'" class="chartControlRow">
           <div class="greekBarRow">
             <div class="greekSymbolGrid" role="group" aria-label="Greek">
               <button
@@ -1205,18 +1289,9 @@ onUnmounted(() => {
               aria-label="Fast forward time to expiry"
             />
           </div>
-          <div class="savePngRow">
-            <button
-              class="saveButton"
-              type="button"
-              @click="handleSavePng"
-              :disabled="ui.loading || !simulationRows.length"
-            >
-              Save PNG
-            </button>
-          </div>
         </div>
         <Greeks
+          v-if="ui.view === 'greeks'"
           ref="chartRef"
           :data="simulationRows"
           title=""
@@ -1230,6 +1305,20 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.viewRow, .viewActions { display: flex; align-items: center; gap: 8px; }
+.viewRow { justify-content: space-between; flex-wrap: wrap; }
+.viewToggle { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: #0f1318; }
+.viewToggle button { background: transparent; border: 0; border-radius: 8px; color: #94a3b8; padding: 9px 18px; cursor: pointer; }
+.viewToggle button.selected { color: #fff; background: #273241; }
+.payoffSummary { display: grid; grid-template-columns: 1fr 1.5fr 1fr; gap: 16px; padding: 18px 20px; border: 1px solid #202630; border-radius: 12px; background: #0b0e13; }
+.payoffSummary div { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.payoffSummary span { font-size: 11px; color: #94a3b8; }
+.payoffSummary strong { font-size: 17px; font-weight: 500; overflow-wrap: anywhere; }
+.payoffSummary .forwardValue { color: #93c5fd; }
+.payoffNote { margin: 0 14px; color: #94a3b8; font-size: 11px; line-height: 1.6; }
+button:disabled { opacity: 0.5; cursor: default; }
+@media (max-width: 650px) { .payoffSummary { grid-template-columns: 1fr; } }
+
 .appRoot {
   max-width: 1320px;
   margin: 0 auto;

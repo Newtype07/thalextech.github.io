@@ -569,7 +569,8 @@ test("a failed bracket request does not widen or get remembered as empty", async
     archive,
     asOf: end,
   });
-  assert.deepEqual(calls, ["90", "100"]);
+  // Both brackets are requested concurrently; dispatch order is not a contract.
+  assert.deepEqual([...calls].sort(), ["100", "90"]);
   assert.equal(result.failures.length, 1);
   assert.equal(archive.checked.has("90"), false);
   fail = false;
@@ -577,7 +578,7 @@ test("a failed bracket request does not widen or get remembered as empty", async
     archive,
     asOf: end,
   });
-  assert.deepEqual(calls, ["90", "100", "90"]);
+  assert.deepEqual(calls.slice(2), ["90"]);
   assert.equal(retry.failures.length, 0);
 });
 

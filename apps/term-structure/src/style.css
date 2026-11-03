@@ -59,6 +59,26 @@ body {
   color: var(--color-text);
 }
 
+.appTabs {
+  display: flex;
+  gap: 24px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+.appTabs button {
+  padding: 13px 0 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: #9299a4;
+  font-size: 12px;
+  cursor: pointer;
+}
+.appTabs button[aria-selected="true"] {
+  color: #e8eaed;
+  border-bottom-color: #b5c4e2;
+}
+
 .divider {
   flex: none;
   width: 1px;

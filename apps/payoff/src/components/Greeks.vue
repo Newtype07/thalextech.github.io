@@ -61,7 +61,7 @@ const normalizeGreekValue = (key, value) => {
   return Number(value);
 };
 
-function exportPng({ filename = "combo-greeks.png", scale = 4, padding = 24 } = {}) {
+function exportPng({ filename = "payoff-greeks.png", scale = 4, padding = 24 } = {}) {
   const exportSvg = svgRef.value?.cloneNode(true);
   if (!exportSvg) return;
 
@@ -205,7 +205,7 @@ const render = () => {
     .range([chartBottom, margin.top]);
 
   const mainGroup = svg.append("g");
-  const clipId = "combo-greeks-plot-clip";
+  const clipId = "payoff-greeks-plot-clip";
 
   svg
     .append("defs")
