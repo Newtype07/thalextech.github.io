@@ -156,3 +156,67 @@ test("missing IV omits time curves without fabricating it or blocking an intrins
   assert.ok(result.points.every(point => Number.isFinite(point.pnl)));
   assert.throws(() => buildPayoff([leg(), leg({ expirationTs: EXPIRY + 86400, iv: -0.1 })], NOW), /IV is required/);
 });
+
+const YEAR = 365.25 * 86400;
+const annualLeg = (overrides = {}) => leg({ expirationTs: NOW + YEAR, forward: 100, iv: 0.2, ...overrides });
+const withProbability = (legs, iv = 0.2) => buildPayoff(legs, NOW, { probabilityIv: iv });
+
+test("P-win uses the forward lognormal distribution at break-even, independently of leg IV", () => {
+  // At a break-even equal to the forward, the standard-normal threshold is σ√T/2.
+  const call = annualLeg({ strike: 90, premium: 10, iv: 0.8 });
+  close(withProbability([call]).probabilityOfProfit, 0.460172162722971);
+  close(withProbability([{ ...call, signedQty: -1 }]).probabilityOfProfit, 0.539827837277029);
+  const medianForward = 100 * Math.exp(0.2 ** 2 / 2);
+  close(withProbability([{ ...call, forward: medianForward }]).probabilityOfProfit, 0.5);
+});
+
+test("long and short straddle P-win are complements over both tails and the middle", () => {
+  const legs = [annualLeg(), annualLeg({ optionType: "put" })];
+  const long = withProbability(legs).probabilityOfProfit;
+  const short = withProbability(legs.map((l) => ({ ...l, signedQty: -1 }))).probabilityOfProfit;
+  assert.ok(long > 0 && long < 1);
+  close(long + short, 1);
+});
+
+test("P-win sums disjoint profitable intervals and excludes flat break-even regions", () => {
+  const priceAtZ = (z) => 100 * Math.exp(0.2 * z - 0.2 ** 2 / 2);
+  const butterfly = (a, b) => [
+    annualLeg({ strike: a, premium: 0 }),
+    annualLeg({ strike: (a + b) / 2, signedQty: -2, premium: 0 }),
+    annualLeg({ strike: b, premium: 0 }),
+  ];
+  const wings = [...butterfly(priceAtZ(-2), priceAtZ(-1)), ...butterfly(priceAtZ(1), priceAtZ(2))];
+  // P(-2 < Z < -1) + P(1 < Z < 2), from standard-normal tables.
+  close(withProbability(wings).probabilityOfProfit, 0.271810243966556);
+  assert.equal(withProbability([annualLeg(), annualLeg({ signedQty: -1 })]).probabilityOfProfit, 0);
+  assert.equal(withProbability([annualLeg({ premium: 5 }), annualLeg({ signedQty: -1 })]).probabilityOfProfit, 1);
+  assert.equal(withProbability([annualLeg(), annualLeg({ signedQty: -1, premium: 5 })]).probabilityOfProfit, 0);
+});
+
+test("P-win handles zero volatility deterministically and missing ATM IV stays unavailable", () => {
+  assert.equal(withProbability([annualLeg({ premium: 0, strike: 90 })], 0).probabilityOfProfit, 1);
+  assert.equal(withProbability([annualLeg({ premium: 10, strike: 90 })], 0).probabilityOfProfit, 0);
+  for (const iv of [null, NaN, -0.1]) {
+    const result = withProbability([annualLeg()], iv);
+    assert.equal(result.probabilityOfProfit, null);
+    assert.ok(result.points.length > 0, "missing probability input must not block payoff");
+  }
+});
+
+test("mixed-expiry P-win uses first-expiry time value and includes profit beyond the viewport", () => {
+  const first = annualLeg({ signedQty: -1, premium: 1, iv: 0.05 });
+  const later = annualLeg({ expirationTs: NOW + 2 * YEAR, forward: 105, premium: 50, iv: 0.05 });
+  const result = withProbability([first, later], 1);
+  assert.ok(result.points.every((p) => p.pnl < 0), "profits lie beyond the plotted range in this calendar");
+  // Independent Gaussian midpoint quadrature of the first-expiry valuation.
+  const step = 0.0005;
+  let expected = 0;
+  for (let z = -8 + step / 2; z < 8; z += step) {
+    const price = 100 * Math.exp(z - 0.5);
+    if (payoffAtPrice([first, later], price, first.expirationTs, 100) > 0)
+      expected += Math.exp(-z * z / 2) / Math.sqrt(2 * Math.PI) * step;
+  }
+  assert.ok(expected > 0.001 && expected < 0.01);
+  assert.ok(Math.abs(result.probabilityOfProfit - expected) < 0.00001);
+  close(withProbability([later, first], 1).probabilityOfProfit, result.probabilityOfProfit);
+});

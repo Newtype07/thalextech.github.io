@@ -1,4 +1,4 @@
-import { calcOptionPrice } from "../../../lib/thalex.js";
+import { calcOptionPrice, normalCdf } from "../../../lib/thalex.js";
 
 const YEAR = 365.25 * 86400;
 const ZERO = 1e-7;
@@ -55,7 +55,24 @@ function zeroCrossings(prices, fn, linear) {
   return { points: points.filter((p) => !ranges.some((r) => p >= r.from && p <= r.to)), ranges };
 }
 
-export function buildPayoff(legs, nowTs = Date.now() / 1000) {
+function winProbability(valueAt, breakEvens, forward, deviation) {
+  if (deviation === 0) return valueAt(forward) > ZERO ? 1 : 0;
+  const cdf = (price) => price <= 0 ? 0 : price === Infinity ? 1
+    : normalCdf((Math.log(price / forward) + deviation ** 2 / 2) / deviation);
+  const boundaries = [...new Set([
+    0, ...breakEvens.points,
+    ...breakEvens.ranges.flatMap(({ from, to }) => [from, to]), Infinity,
+  ])].sort((a, b) => a - b);
+  let probability = 0;
+  for (let i = 1; i < boundaries.length; i++) {
+    const left = boundaries[i - 1], right = boundaries[i];
+    const midpoint = right === Infinity ? left + Math.max(left, forward) : left + (right - left) / 2;
+    if (valueAt(midpoint) > ZERO) probability += cdf(right) - cdf(left);
+  }
+  return Math.max(0, Math.min(1, probability));
+}
+
+export function buildPayoff(legs, nowTs = Date.now() / 1000, { probabilityIv = null } = {}) {
   if (!legs.length) return null;
   for (const leg of legs) {
     if (![leg.strike, leg.signedQty, leg.expirationTs, leg.premium, leg.forward].every(Number.isFinite) ||
@@ -99,6 +116,22 @@ export function buildPayoff(legs, nowTs = Date.now() / 1000) {
     const scan = Array.from({ length: 4097 }, (_, i) => minPrice + (maxPrice - minPrice) * i / 4096);
     breakEvens = zeroCrossings([...new Set([...scan, ...strikes])].sort((a, b) => a - b), valueAt, false);
   }
+  let probabilityOfProfit = null;
+  if (Number.isFinite(probabilityIv) && probabilityIv >= 0) {
+    const deviation = probabilityIv * Math.sqrt((horizonTs - nowTs) / YEAR);
+    let probabilityBreakEvens = breakEvens;
+    if (mixedMaturities && deviation > 0) {
+      // Scan the distribution independently of the visible chart. Nine standard
+      // deviations leave negligible tail mass; strikes preserve narrow features.
+      const scan = Array.from({ length: 2049 }, (_, i) =>
+        forward * Math.exp(deviation * (-9 + 18 * i / 2048) - deviation ** 2 / 2));
+      probabilityBreakEvens = zeroCrossings([...new Set([
+        0, ...scan, ...strikes, ...breakEvens.points,
+        ...breakEvens.ranges.flatMap(({ from, to }) => [from, to]).filter(Number.isFinite),
+      ])].sort((a, b) => a - b), valueAt, false);
+    }
+    probabilityOfProfit = winProbability(valueAt, probabilityBreakEvens, forward, deviation);
+  }
   const prices = [...new Set([
     ...Array.from({ length: 401 }, (_, i) => minPrice + (maxPrice - minPrice) * i / 400),
     ...strikes, ...breakEvens.points, forward,
@@ -122,7 +155,7 @@ export function buildPayoff(legs, nowTs = Date.now() / 1000) {
   const maxLoss = !mixedMaturities && tailSlope < -1e-12 ? Infinity : Math.max(0, -Math.min(...bounds));
   const maxReturn = !mixedMaturities && tailSlope > 1e-12 ? Infinity : Math.max(0, Math.max(...bounds));
   return {
-    forward, horizonTs, mixedMaturities, breakEvens,
+    forward, horizonTs, mixedMaturities, breakEvens, probabilityOfProfit,
     maxLoss, maxReturn,
     decayCurves,
     decayUnavailableReason: hasValuationVol ? "" : "Time curves require a current IV for every leg.",

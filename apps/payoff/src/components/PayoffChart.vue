@@ -33,8 +33,8 @@ function decorateExportClone(clone, meta) {
   const stats = Array.isArray(meta.stats) ? meta.stats : [];
 
   const availableTitleWidth = (x0 + w - layout.margin.right) - (x0 + layout.margin.left);
-  const titleMaxSize = 32;
-  const titleMinSize = 18;
+  const titleMaxSize = 28;
+  const titleMinSize = 16;
   const titleEst = title ? Math.max(titleMinSize, Math.min(titleMaxSize, availableTitleWidth / Math.max(1, title.length * 0.56))) : titleMaxSize;
   const S = {
     padTop: 40, padBottom: 24,
@@ -99,15 +99,15 @@ function decorateExportClone(clone, meta) {
   if (stats.length) {
     cursorY += (subtitle ? S.subtitleToRule : (title ? S.titleToRule : 0));
     addRule(cursorY);
-    const colWidth = (chartRight - chartLeft) / stats.length;
     const labelY = cursorY + S.ruleToLabel + S.labelSize;
     const valueY = labelY + S.labelToValue + S.valueSize;
     const labelAttrs = { "letter-spacing": "0.16em", "font-weight": "500" };
     stats.forEach((stat, i) => {
-      const x = chartLeft + colWidth * i;
-      addText(String(stat.label).toUpperCase(), x, labelY, "#8A8A8A", S.labelSize, labelAttrs);
+      const x = stats.length === 1 ? chartMid : chartLeft + (chartRight - chartLeft) * i / (stats.length - 1);
+      const anchor = stats.length === 1 ? "middle" : i === 0 ? "start" : i === stats.length - 1 ? "end" : "middle";
+      addText(stat.preserveCase ? String(stat.label) : String(stat.label).toUpperCase(), x, labelY, "#8A8A8A", S.labelSize, { ...labelAttrs, "text-anchor": anchor });
       addText(String(stat.value), x, valueY, stat.fill || "#f1f3f8", S.valueSize,
-        { "font-weight": "300", "letter-spacing": "-0.01em" });
+        { "font-weight": "300", "letter-spacing": "-0.01em", "text-anchor": anchor });
     });
     addRule(valueY + S.statsToRule);
   }
@@ -139,12 +139,12 @@ function render() {
   const svg = d3.select(svgRef.value).attr("viewBox", `0 0 ${width} ${height}`);
   svg.selectAll("*").remove();
   svg.attr("font-family", SVG_FONT_FAMILY);
-  svg.append("title").text(`${props.asset} combination payoff with forward and break-even prices`);
+  svg.append("title").text(`${props.asset} combination payoff with break-even prices`);
   const points = props.payoff?.points || [];
   if (!points.length) {
     svg.append("text").attr("x", width / 2).attr("y", height / 2)
       .attr("fill", "#999999").attr("text-anchor", "middle")
-      .text(props.loading ? "Loading current marks and forward…" : "Add option legs to see their payoff.");
+      .text(props.loading ? "Loading current marks…" : "Add option legs to see their payoff.");
     return;
   }
   const x = d3.scaleLinear().domain(d3.extent(points, (p) => p.price)).range([margin.left, right]);
@@ -223,22 +223,6 @@ function render() {
       .attr("font-size", markerLabelSize).text(m.label);
     labelRows[row].lastRight = centerX + halfW;
   }
-  const forwardX = x(props.payoff.forward);
-  const forwardPoint = points.reduce((best, p) =>
-    Math.abs(p.price - props.payoff.forward) < Math.abs(best.price - props.payoff.forward) ? p : best);
-  const curveGap = 22;
-  const forwardY1 = Math.min(bottom - 14, y(forwardPoint.pnl) + curveGap);
-  const forwardY2 = bottom;
-  svg.append("line")
-    .attr("x1", forwardX).attr("x2", forwardX)
-    .attr("y1", forwardY1).attr("y2", forwardY2)
-    .attr("stroke", "#5a5a5a").attr("stroke-width", 1).attr("stroke-opacity", 1);
-  svg.append("text")
-    .attr("x", forwardX + 8).attr("y", (forwardY1 + forwardY2) / 2)
-    .attr("fill", "#8A8A8A").attr("text-anchor", "start")
-    .attr("dominant-baseline", "middle")
-    .attr("font-size", markerLabelSize * 0.85)
-    .text(`Fwd ${priceLabel(props.payoff.forward)}`);
   if (decayCurves.length) {
     const legend = svg.append("g").attr("class", "decay-legend").attr("transform", `translate(${right + 28},${margin.top + 8})`);
     legend.append("text").attr("fill", "#d4d7e2").attr("font-size", dataLabelSize).attr("font-weight", 500).text("Elapsed");
