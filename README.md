@@ -5,6 +5,16 @@ To build all apps, run `./build_apps.sh`
 
 If you want to build an individual app, `cd` into the app directory and execute npm commands following the app's README.
 
+### Shared instrument selection
+
+`lib/components/PositionBuilder.vue` owns the option-leg inputs used by Payoff, Simulator, Term Structure's position simulator, and Combo P&L. Its default layout includes the combination heading, shared or per-leg maturities, inline controls, and aggregate Greeks. Apps supply their instruments, quotes or valuations, and leg state.
+
+The builder uses the shared select menu and the position, option-pricing, instrument-contract, and combination-title modules in `lib/`; it has no dependency on app source. The simulator's former position and pricing modules re-export those shared modules to preserve existing imports.
+
+The app's central chart container owns the editor width. The builder fills that container without its own maximum width, border, or background; chart and editor should share a grid column or parent width, with sidebars outside that column.
+
+For charts with internal SVG margins, align the editor to the plotted content using the chart's layout values. Simulator shares its chart width and margins between the renderer and the editor's responsive insets.
+
 
 ## Automated Secrets Scanning
 
