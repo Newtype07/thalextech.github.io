@@ -399,6 +399,9 @@ function exportPng({
     filename,
     scale,
     padding: exportPadding,
+    prepareSvgClone: (clone) => {
+      clone.querySelectorAll("[data-export-exclude]").forEach((node) => node.remove());
+    },
     drawBefore: ({ ctx, width, padding: resolvedPadding }) => {
       drawExportPageTitle({
         ctx,
@@ -446,6 +449,7 @@ const drawResolutionControl = (svg) => {
 
   const trigger = svg
     .append("g")
+    .attr("data-export-exclude", "")
     .attr(
       "transform",
       `translate(${RESOLUTION_TOGGLE_X},${RESOLUTION_TOGGLE_Y})`,
@@ -488,6 +492,7 @@ const drawResolutionControl = (svg) => {
 
   const menu = svg
     .append("g")
+    .attr("data-export-exclude", "")
     .attr(
       "transform",
       `translate(${RESOLUTION_TOGGLE_X},${RESOLUTION_TOGGLE_Y + menuY})`,
@@ -570,6 +575,7 @@ const drawResolutionControl = (svg) => {
 const drawLowerModeToggle = (group) => {
   const toggleGroup = group
     .append("g")
+    .attr("data-export-exclude", "")
     .attr("transform", `translate(${LOWER_MODE_TOGGLE_X},6)`);
 
   let xOffset = 0;
@@ -2050,7 +2056,7 @@ const render = () => {
       emitTimeAnchorIfChanged(index, brushedDomain, true);
     });
 
-  const brushGroup = topGroup.append("g").attr("class", "brush");
+  const brushGroup = topGroup.append("g").attr("class", "brush").attr("data-export-exclude", "");
   brushGroup.call(brush);
   brushGroup.selectAll(".selection").attr("fill-opacity", 0.2);
 

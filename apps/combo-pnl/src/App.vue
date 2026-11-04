@@ -1321,6 +1321,7 @@ watch(
     <div class="builderRow">
       <div class="builderMain">
         <PositionBuilder
+          class="comboPositionBuilder"
           :legs="positionLegs"
           :spot="spot"
           :vol="DEFAULT_VOL"
@@ -1331,37 +1332,38 @@ watch(
           :index-price="indexDisplay?.price ?? null"
           :index-fetched-at="indexDisplay?.fetchedAt ?? null"
           @update:legs="positionLegs = $event"
-        >
-          <template #footer-actions>
-            <button
-              type="button"
-              class="deltaHedgeButton"
-              :class="{ deltaHedgeButtonActive: ui.deltaHedgeEnabled }"
-              :title="hedgeFrequencyControlTitle"
-              @click="ui.deltaHedgeEnabled = !ui.deltaHedgeEnabled"
-            >
-              {{ ui.deltaHedgeEnabled ? "− Delta hedge" : "+ Delta hedge" }}
-            </button>
-            <label
-              class="hedgeFrequencyControl"
-              :class="{ hedgeFrequencyControlDisabled: !ui.deltaHedgeEnabled }"
-              :title="hedgeFrequencyControlTitle"
-            >
-              <span class="hedgeFrequencyLabel">Every</span>
-              <input
-                v-model.number="ui.hedgeFrequencyHours"
-                class="hedgeFrequencySlider"
-                type="range"
-                :min="minSupportedHedgeFrequencyHours"
-                :max="MAX_HEDGE_FREQUENCY_HOURS"
-                step="1"
-                :disabled="!ui.deltaHedgeEnabled"
-              />
-              <span class="hedgeFrequencyValue">{{ activeHedgeFrequencyLabel }}</span>
-            </label>
-          </template>
-        </PositionBuilder>
+        />
+
       </div>
+    </div>
+
+    <div class="hedgeControls" role="group" aria-label="Delta hedging">
+      <button
+        type="button"
+        class="deltaHedgeButton"
+        :class="{ deltaHedgeButtonActive: ui.deltaHedgeEnabled }"
+        :title="hedgeFrequencyControlTitle"
+        @click="ui.deltaHedgeEnabled = !ui.deltaHedgeEnabled"
+      >
+        {{ ui.deltaHedgeEnabled ? "− Delta hedge" : "+ Delta hedge" }}
+      </button>
+      <label
+        class="hedgeFrequencyControl"
+        :class="{ hedgeFrequencyControlDisabled: !ui.deltaHedgeEnabled }"
+        :title="hedgeFrequencyControlTitle"
+      >
+        <span class="hedgeFrequencyLabel">Every</span>
+        <input
+          v-model.number="ui.hedgeFrequencyHours"
+          class="hedgeFrequencySlider"
+          type="range"
+          :min="minSupportedHedgeFrequencyHours"
+          :max="MAX_HEDGE_FREQUENCY_HOURS"
+          step="1"
+          :disabled="!ui.deltaHedgeEnabled"
+        />
+        <span class="hedgeFrequencyValue">{{ activeHedgeFrequencyLabel }}</span>
+      </label>
     </div>
 
     <div class="statusRow" v-if="ui.loading || ui.error">
@@ -1749,9 +1751,28 @@ watch(
   min-width: 0;
 }
 
+.builderMain > .comboPositionBuilder {
+  padding-bottom: 0;
+}
+
+.hedgeControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin: 0;
+  padding: 20px 12px;
+}
+
 .deltaHedgeButton {
-  align-self: flex-start;
-  padding: 3px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0;
+  margin: 0;
+  line-height: 1;
   border-radius: 999px;
   border: none;
   background: transparent;
@@ -1770,8 +1791,12 @@ watch(
 }
 
 .hedgeFrequencyControl {
+  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
+  height: 28px;
+  margin: 0;
+  line-height: 1;
   gap: 6px;
   min-width: 150px;
   color: rgba(226, 232, 240, 0.72);
@@ -1800,6 +1825,10 @@ watch(
   flex: 1 1 auto;
   min-width: 64px;
   height: 14px;
+  display: block;
+  margin: 0;
+  padding: 0;
+  border: 0;
   background: transparent;
   cursor: pointer;
 }
@@ -1846,7 +1875,7 @@ watch(
 
 
 .chartBlock {
-  margin-top: 28px;
+  margin-top: 0;
   width: calc(var(--selector-section-width) - 8px);
   margin-left: 8px;
   display: flex;
