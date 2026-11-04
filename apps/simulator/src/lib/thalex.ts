@@ -4,18 +4,8 @@ import {
   fetchLatestMarkPrice as fetchLatestMarkPriceRaw,
 } from "../../../../lib/thalex.js";
 
-export type ThalexInstrument = {
-  instrument_name: string;
-  index_name?: string;
-  option_type?: string;
-  strike_price?: number;
-  expiration_timestamp?: number;
-  create_time?: number | string;
-  create_time_ms?: number | string;
-  kind?: string;
-  type?: string;
-  underlying?: string;
-};
+import type { ThalexInstrument } from "../../../../lib/thalex-instrument.ts";
+export type { ThalexInstrument } from "../../../../lib/thalex-instrument.ts";
 
 export type IndexPriceRow = {
   ts: number;

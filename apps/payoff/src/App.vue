@@ -1,9 +1,10 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
-import PositionBuilder from "../../simulator/src/components/PositionBuilder.vue";
+import PositionBuilder from "../../../lib/components/PositionBuilder.vue";
 import Greeks from "./components/Greeks.vue";
 import PayoffChart from "./components/PayoffChart.vue";
 import { buildPayoff } from "./payoff.js";
+import { formatCombinationTitle } from "../../../lib/combination-title.js";
 import { fetchAtmVolatility, fetchPayoffQuotes } from "./payoff-market.js";
 import { requestThalex } from "../../../lib/thalex-rest.js";
 import { buildScenarioSpotGrid } from "./scenario-range.js";
@@ -144,38 +145,10 @@ const maxReturnDisplay = computed(() => {
   return formatPrice(payoff.value.maxReturn);
 });
 
-const exportInstrumentTitle = computed(() => {
-  const legs = selectedLegInstruments.value;
-  if (!legs.length) return "";
-  const groups = new Map();
-  for (const leg of legs) {
-    const key = `${leg.expirationTs}:${leg.strike}:${leg.optionType}`;
-    const g = groups.get(key) || {
-      expirationTs: leg.expirationTs,
-      strike: leg.strike,
-      type: leg.optionType,
-      qty: 0,
-    };
-    g.qty += leg.signedQty;
-    groups.set(key, g);
-  }
-  const sorted = [...groups.values()]
-    .filter((g) => g.qty !== 0)
-    .sort((a, b) => a.expirationTs - b.expirationTs || a.strike - b.strike || (a.type === "call" ? -1 : 1));
-  const strikeFmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 });
-  const maturityFmt = new Intl.DateTimeFormat("en-GB", {
-    day: "2-digit", month: "short", year: "numeric", timeZone: "UTC",
-  });
-  const formatMaturity = (ts) => maturityFmt.format(new Date(Number(ts) * 1000));
-  const sharedMaturity = legs.every((leg) => leg.expirationTs === legs[0].expirationTs);
-  const parts = sorted.map((g) => {
-    const sign = g.qty < 0 ? "−" : "";
-    const maturity = sharedMaturity ? "" : `${formatMaturity(g.expirationTs)} `;
-    return `${sign}${Math.abs(g.qty)} × ${maturity}${strikeFmt.format(g.strike / 1000)}K ${g.type === "put" ? "Put" : "Call"}`;
-  });
-  const asset = underlying.value === "ETHUSD" ? "ETH" : "BTC";
-  return [asset, ...(sharedMaturity ? [formatMaturity(legs[0].expirationTs)] : []), parts.join("\u2002")].join(" · ");
-});
+const exportInstrumentTitle = computed(() => formatCombinationTitle(
+  selectedLegInstruments.value,
+  underlying.value === "ETHUSD" ? "Ethereum" : "Bitcoin",
+));
 
 const payoffExportMeta = computed(() => {
   if (!payoff.value) return null;
@@ -1333,6 +1306,7 @@ onUnmounted(() => {
       <div class="builderRow">
         <div class="builderMain">
           <PositionBuilder
+            :title="exportInstrumentTitle"
             :legs="positionLegs"
             :spot="spot"
             :vol="DEFAULT_VOL"
@@ -1512,8 +1486,7 @@ button:disabled { opacity: 0.5; cursor: default; }
   align-items: flex-start;
   gap: 16px;
   width: 100%;
-  padding-left: var(--chart-left-inset);
-  padding-right: var(--chart-right-inset);
+  padding: 0;
   box-sizing: border-box;
 }
 
@@ -1523,54 +1496,6 @@ button:disabled { opacity: 0.5; cursor: default; }
   width: 100%;
 }
 
-.builderMain :deep(.side-pill),
-.builderMain :deep(.qty-spinner),
-.builderMain :deep(.qty-input),
-.builderMain :deep(.type-pill),
-.builderMain :deep(.leg-select .styled-select-trigger) {
-  border-radius: var(--control-radius);
-}
-
-.builderMain :deep(.legs-section) {
-  --row-pad-x: var(--instrument-row-padding);
-  --layout-gap: 8px;
-  --leg-row-gap-total: 32px;
-  --leg-greeks-gap-total: 44px;
-  --strike-greeks-gap: 10px;
-}
-
-.builderMain :deep(.index-summary) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.index-label) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.index-value) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.index-time) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.leg-greek-header) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.leg-greek-value) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.leg-greeks) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.total-greeks) {
-  font-size: 10px;
-  font-weight: 700;
-}
 
 .chartShell {
   margin-top: 28px;

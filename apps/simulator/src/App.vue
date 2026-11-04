@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import CloudChart from "./components/CloudChart.vue";
-import PositionBuilder from "./components/PositionBuilder.vue";
+import PositionBuilder from "../../../lib/components/PositionBuilder.vue";
 import StopLossSimulator from "./components/StopLossSimulator.vue";
+import { CLOUD_CHART_WIDTH, CLOUD_CHART_MARGIN } from "./lib/cloudChartLayout";
 import type { AtmOptionExpiryQuote } from "./lib/atmOptionChain";
 import type { GBMParams } from "./lib/gbm";
 import {
@@ -19,6 +20,11 @@ import {
   fetchLatestMarkPrice,
   type ThalexInstrument,
 } from "./lib/thalex";
+
+const strategyChartInsets = {
+  "--chart-content-left": `${100 * CLOUD_CHART_MARGIN.left / CLOUD_CHART_WIDTH}%`,
+  "--chart-content-right": `${100 * CLOUD_CHART_MARGIN.right / CLOUD_CHART_WIDTH}%`,
+};
 
 const defaultParams: GBMParams = {
   s0: 95_000,
@@ -1346,6 +1352,11 @@ const indexDisplay = computed(() => {
   };
 });
 
+const indexPriceLabel = computed(() => indexDisplay.value
+  ? new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(indexDisplay.value.price)
+  : "—",
+);
+
 type AtmExpiryInstruments = {
   callStrikes: number[];
   putStrikes: number[];
@@ -2214,7 +2225,7 @@ watch(
         'workspace-container--stop-loss': activeSimulatorTab === 'stop-loss',
       }"
     >
-      <div v-if="activeSimulatorTab === 'strategy'" class="simulation-main">
+      <div v-if="activeSimulatorTab === 'strategy'" class="simulation-main" :style="strategyChartInsets">
         <aside class="metrics-column" aria-label="Strategy outcome summary">
             <div v-if="strategyStatsRow" class="outcome-summary">
               <div class="outcome-metric outcome-metric--primary">
@@ -2278,6 +2289,7 @@ watch(
               :instruments="instruments"
               :tickerByInstrument="tickerByInstrument"
               :indexName="activeIndexName"
+              :show-index-summary="false"
               :indexPrice="indexDisplay?.price ?? null"
               :indexFetchedAt="activeIndexSnapshot?.fetchedAt ?? null"
             />
@@ -2288,7 +2300,10 @@ watch(
           <div class="chart-header">
             <div class="chart-detail-row">
               <div class="chart-meta">
-                <span class="chart-meta-heading">Model</span>
+                <span class="chart-meta-index">
+                  <span class="chart-meta-key">{{ activeIndexName ?? underlying }}</span>
+                  <span class="chart-meta-value">{{ indexPriceLabel }}</span>
+                </span>
                 <label class="chart-meta-assumption">
                   <span class="chart-meta-key">Drift</span>
                   <input
@@ -2533,11 +2548,8 @@ watch(
 }
 
 .app-main {
-  /*
-   * Scale continuously from 1080px to 1920px of usable content. Avoid a
-   * breakpoint jump when browser zoom changes the CSS viewport width.
-   */
-  --workspace-max-width: clamp(1136px, calc(100vw - 584px), 1976px);
+  /* One centered workspace for the editor and the complete chart group. */
+  --workspace-max-width: 1976px;
   --text-primary: var(--color-text);
   --text-muted: var(--color-text-muted);
   display: flex;
@@ -2590,7 +2602,6 @@ watch(
   font-size: 13px;
 }
 
-.app-main.is-exporting-strategy .chart-meta-heading,
 .app-main.is-exporting-strategy .chart-meta-key,
 .app-main.is-exporting-strategy .chart-horizon-label {
   font-size: 12px;
@@ -2609,7 +2620,6 @@ watch(
   font-size: 12px;
 }
 
-.app-main.is-exporting-strategy .builder-section :deep(.index-time),
 .app-main.is-exporting-strategy .builder-section :deep(.tte-cell) {
   font-size: 12px;
 }
@@ -2661,12 +2671,11 @@ watch(
 }
 
 .builder-section {
+  box-sizing: border-box;
   grid-area: selector;
   width: 100%;
   min-width: 0;
-  /* Place the first fixed-width combo control on the shared workspace grid. */
-  padding: 20px 0 8px max(0px, calc(3.035714% - 8px));
-  overflow-x: auto;
+  padding: 16px var(--chart-content-right) 8px var(--chart-content-left);
 }
 
 .top-bar {
@@ -2689,8 +2698,9 @@ watch(
 }
 
 .workspace-container {
+  box-sizing: border-box;
   width: 100%;
-  max-width: none;
+  max-width: var(--workspace-max-width);
   margin: 0 auto;
   padding: 0 36px 28px 28px;
 }
@@ -2943,12 +2953,12 @@ watch(
   pointer-events: auto;
 }
 
-.chart-meta-heading {
-  color: #70767d;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
+.chart-meta-index {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-right: 4px;
+  flex-shrink: 0;
 }
 
 .chart-meta-key {
@@ -3730,10 +3740,6 @@ watch(
     gap: 12px;
   }
 
-  .builder-section {
-    padding-left: max(0px, calc(3.035714% - 8px));
-  }
-
   .workspace-container {
     padding-right: 16px;
     padding-left: 16px;
@@ -3776,11 +3782,6 @@ watch(
   .workspace-container {
     display: block;
     padding: 0 16px 28px;
-  }
-
-  .builder-section {
-    padding-right: 0;
-    padding-left: max(0px, calc(3.035714% - 8px));
   }
 
   .simulation-main {
@@ -3847,7 +3848,6 @@ watch(
     overflow: hidden;
   }
 
-  .chart-meta-heading,
   .chart-horizon-label {
     display: none;
   }

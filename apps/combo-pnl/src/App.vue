@@ -8,7 +8,7 @@ import {
   ref,
   watch,
 } from "vue";
-import PositionBuilder from "../../simulator/src/components/PositionBuilder.vue";
+import PositionBuilder from "../../../lib/components/PositionBuilder.vue";
 import IndexMarkComboChart from "./components/Chart.vue";
 import {
   calcGreeks,
@@ -1843,45 +1843,7 @@ watch(
   background: #f5f5f7;
 }
 
-.builderMain :deep(.legs-section) {
-  width: var(--selector-section-width);
-  --layout-gap: 8px;
-  --leg-row-gap-total: 32px;
-  --leg-greeks-gap-total: 44px;
-  --strike-greeks-gap: 10px;
-}
 
-.builderMain :deep(.index-summary) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.index-label) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.index-value) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.index-time) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.leg-greek-header) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.leg-greek-value) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.leg-greeks) {
-  font-size: 10px;
-}
-
-.builderMain :deep(.total-greeks) {
-  font-size: 10px;
-}
 
 .chartBlock {
   margin-top: 28px;

@@ -2,7 +2,7 @@
 import { computed, ref, shallowRef, watch, onBeforeUnmount } from "vue";
 import SimulationChart from "./SimulationChart.vue";
 import SimulationPathsChart from "./SimulationPathsChart.vue";
-import PositionBuilder from "../../../simulator/src/components/PositionBuilder.vue";
+import PositionBuilder from "../../../../lib/components/PositionBuilder.vue";
 import { simulatePosition } from "../simulation/position-simulation.js";
 import { runPositionEnsemble } from "../simulation/ensemble-worker-client.js";
 import { builderInstruments, defaultShortStraddle, resolvePosition, entryValuations } from "../simulation/position-selection.js";
@@ -519,7 +519,7 @@ function download() {
 .sim-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 280px;
-  grid-template-areas: "builder builder" "divider divider" "toolbar settings" "main settings";
+  grid-template-areas: "builder ." "divider ." "toolbar settings" "main settings";
   grid-template-rows: auto auto auto 1fr;
   gap: 0 28px;
   align-items: start;
@@ -531,12 +531,8 @@ function download() {
 .sim-position-builder {
   grid-area: builder;
   min-width: 0;
-  overflow-x: auto;
   margin: 18px 0;
   padding-bottom: 8px;
-}
-.sim-position-builder :deep(.payoff-builder) {
-  min-width: 1120px;
 }
 .sim-position-builder :deep(.total-greeks .leg-greek-value) {
   font-weight: 700;

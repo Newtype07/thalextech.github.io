@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import * as d3 from "d3";
 import { findPriceBinIndex } from "../lib/terminalHistogram";
+import { CLOUD_CHART_WIDTH, CLOUD_CHART_MARGIN } from "../lib/cloudChartLayout";
 import type { GBMParams } from "../lib/gbm";
 import {
   sanitizePathModel,
@@ -120,11 +121,11 @@ const HISTOGRAM_BIN_COUNT = 100;
 const COLOR_T_MIN = 0.15;
 const COLOR_T_MAX = 0.85;
 const COLOR_T_MID = 0.5;
-const CHART_WIDTH = 1200;
+const CHART_WIDTH = CLOUD_CHART_WIDTH;
 const CHART_HEIGHT = 520;
 const CUMUL_CHART_HEIGHT = 520;
 const TERMINAL_CHART_HEIGHT = 720;
-const CHART_MARGIN = { top: 18, right: 112, bottom: 38, left: 46 };
+const CHART_MARGIN = CLOUD_CHART_MARGIN;
 const HISTOGRAM_WIDTH = 210;
 const HISTOGRAM_INNER_GAP = 28;
 // Two-column histogram gutter: left = price frequency (heatmap), right = payoff.

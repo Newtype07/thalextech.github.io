@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { computed, watch } from "vue";
-import type { PositionLeg, OptionLeg, OptionType } from "../lib/position";
-import type { ThalexInstrument } from "../lib/thalex";
-import { blackScholesGreeks } from "../lib/blackScholes";
+import { computed, ref, watch } from "vue";
+import type { PositionLeg, OptionLeg, OptionType } from "../position.ts";
+import type { ThalexInstrument } from "../thalex-instrument.ts";
+import { blackScholesGreeks } from "../black-scholes.ts";
 import StyledSelectMenu from "./StyledSelectMenu.vue";
+import { formatCombinationTitle } from "../combination-title.js";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
+  appearance?: "default" | "minimal";
+  title?: string;
   legs: PositionLeg[];
   spot: number;
   vol: number;
@@ -14,6 +17,7 @@ const props = defineProps<{
   instruments?: ThalexInstrument[];
   tickerByInstrument?: Record<string, { data: unknown; fetchedAt: number }>;
   indexName?: string | null;
+  showIndexSummary?: boolean;
   indexPrice?: number | null;
   indexFetchedAt?: number | null;
   valuationByLeg?: Record<string, {
@@ -21,7 +25,7 @@ const props = defineProps<{
     iv: number;
     greeks: ReturnType<typeof blackScholesGreeks>;
   }>;
-}>();
+}>(), { showIndexSummary: true });
 
 const emit = defineEmits<{
   (event: "update:legs", value: PositionLeg[]): void;
@@ -51,6 +55,8 @@ const newLegId = (): string => {
   const uuid = globalThis.crypto?.randomUUID?.();
   return uuid ?? `leg_${Math.random().toString(36).slice(2, 10)}`;
 };
+
+const builderId = newLegId();
 
 const roundToStep = (value: number, step: number): number => {
   if (!Number.isFinite(value) || !Number.isFinite(step) || step <= 0) return value;
@@ -289,6 +295,31 @@ const optionLegs = computed(() =>
   legsModel.value.filter((leg): leg is OptionLeg => leg.kind === "option"),
 );
 
+const isMinimal = computed(() => props.appearance !== "default");
+const perLegMaturities = ref(false);
+const sharedExpiry = computed(() => {
+  const expiry = optionLegs.value[0]?.expiry;
+  return optionLegs.value.every((leg) => leg.expiry === expiry) ? expiry : undefined;
+});
+const showRowMaturity = computed(() => !isMinimal.value || perLegMaturities.value
+  || (optionLegs.value.length > 0 && !sharedExpiry.value));
+const maturitySelectOptions = computed(() => [
+  ...(optionLegs.value.length && !sharedExpiry.value ? [{ label: "Mixed maturities", value: "mixed" }] : []),
+  ...expirySelectOptions.value,
+  { label: "Per-leg maturities", value: "per-leg" },
+]);
+const selectMaturity = (value: string | number): void => {
+  if (value === "mixed") return;
+  perLegMaturities.value = value === "per-leg";
+  if (perLegMaturities.value) return;
+  legsModel.value = legsModel.value.map((leg) => leg.kind === "option"
+    ? { ...leg, expiry: String(value) } : leg);
+};
+const singleMaturity = computed(() => sharedExpiry.value ?? optionLegs.value[0]?.expiry ?? defaultExpiry());
+const useSingleMaturity = (): void => {
+  if (singleMaturity.value) selectMaturity(singleMaturity.value);
+};
+
 const resolveInstrumentForLeg = (leg: OptionLeg): NormalizedOptionInstrument | null => {
   const expirySeconds = parseExpiryToSeconds(leg.expiry);
   if (!expirySeconds) return null;
@@ -304,6 +335,18 @@ const resolveInstrumentForLeg = (leg: OptionLeg): NormalizedOptionInstrument | n
   });
   return candidates[0] ?? null;
 };
+
+const combinationTitle = computed(() => props.title ?? formatCombinationTitle(
+  optionLegs.value.flatMap((leg) => {
+    const expirationTs = resolveInstrumentForLeg(leg)?.expiration_timestamp ?? parseExpiryToSeconds(leg.expiry);
+    return expirationTs == null ? [] : [{
+      expirationTs, strike: leg.strike, optionType: leg.optionType,
+      signedQty: (leg.side === "sell" ? -1 : 1) * leg.qty,
+    }];
+  }),
+  props.indexName?.startsWith("BTC") ? "Bitcoin"
+    : props.indexName?.startsWith("ETH") ? "Ethereum" : props.indexName ?? "Position",
+));
 
 const getTickerForLeg = (leg: OptionLeg): Record<string, unknown> | null => {
   const instrument = resolveInstrumentForLeg(leg);
@@ -441,7 +484,7 @@ const removeLeg = (id: string): void => {
 const addOptionLeg = (): void => {
   if (legsModel.value.length >= MAX_LEGS) return;
   const id = newLegId();
-  const expiry = defaultExpiry();
+  const expiry = (isMinimal.value && sharedExpiry.value) || defaultExpiry();
   const strikes = strikeOptionsFor("call", expiry);
   const strike = defaultStrikeFor(strikes);
   legsModel.value = [
@@ -494,20 +537,6 @@ const formatMarkPrice = (
 const formatIvPercent = (value: number | null): string =>
   Number.isFinite(value) ? `${(Number(value) * 100).toFixed(2)}%` : "--";
 
-const indexDateTimeFormatter = new Intl.DateTimeFormat("en-GB", {
-  day: "2-digit",
-  month: "short",
-  year: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hour12: false,
-  timeZone: "UTC",
-});
-
-const formatDateTime = (timestampMs: number): string =>
-  `${indexDateTimeFormatter.format(new Date(timestampMs))} UTC`;
-
 const strikeOptionsFor = (
   optionType: OptionType | undefined,
   expiry: string | undefined,
@@ -557,6 +586,17 @@ const strikeSelectOptionsForLeg = (leg: OptionLeg) =>
     label: formatNumber(strike),
     value: strike,
   }));
+
+const canStepStrike = (leg: OptionLeg, direction: number): boolean => {
+  const strikes = strikeOptionsForLeg(leg);
+  const index = strikes.indexOf(leg.strike);
+  return index >= 0 && index + direction >= 0 && index + direction < strikes.length;
+};
+const stepStrike = (leg: OptionLeg, direction: number): void => {
+  if (!canStepStrike(leg, direction)) return;
+  const strikes = strikeOptionsForLeg(leg);
+  updateLeg(leg.id, (current) => ({ ...current, strike: strikes[strikes.indexOf(leg.strike) + direction] }));
+};
 
 const formatSignedNumber = (value: number, decimals: number = 2): string => {
   if (!Number.isFinite(value)) return "--";
@@ -610,35 +650,61 @@ const totalMarkPrice = computed<number | null>(() => {
 </script>
 
 <template>
-  <div class="payoff-builder" :class="{ 'payoff-builder--tte': Boolean(props.showTte) }">
-    <div v-if="indexName" class="index-summary">
-      <span class="index-label">{{ indexName }}</span>
-      <span class="index-value">
-        {{ indexPrice != null ? formatNumber(indexPrice) : "loading" }}
-      </span>
-      <span v-if="indexFetchedAt != null" class="index-time">
-        {{ formatDateTime(indexFetchedAt) }}
-      </span>
-      <span v-else class="index-time">fetching…</span>
+  <div class="payoff-builder" :class="{
+    'payoff-builder--tte': Boolean(props.showTte) && !isMinimal,
+    'payoff-builder--minimal': isMinimal,
+    'payoff-builder--per-leg': isMinimal && showRowMaturity,
+  }">
+    <div v-if="isMinimal" class="builder-heading">
+      <div class="combination-heading">
+        <h1>{{ combinationTitle }}</h1>
+        <div class="maturity-summary">
+          <StyledSelectMenu
+            class="maturity-select"
+            :id="`maturity-${builderId}`"
+            label="Combination maturity"
+            :model-value="sharedExpiry ?? (optionLegs.length ? 'mixed' : defaultExpiry() ?? '')"
+            :options="maturitySelectOptions"
+            @update:model-value="selectMaturity"
+          />
+          <span v-if="sharedExpiry && optionLegs.length" class="maturity-tte">{{ formatTteForLeg(optionLegs[0]) }}</span>
+          <button
+            v-if="!showRowMaturity && optionLegs.length"
+            type="button"
+            class="maturity-mode-button"
+            aria-label="Edit maturities per leg"
+            @click="selectMaturity('per-leg')"
+          >Per-leg maturities</button>
+          <button
+            v-else-if="showRowMaturity && optionLegs.length"
+            type="button"
+            class="maturity-mode-button"
+            aria-label="Use a single maturity"
+            :title="`Set every leg to ${singleMaturity}`"
+            @click="useSingleMaturity"
+          >Single maturity</button>
+        </div>
+      </div>
     </div>
     <div class="legs-section">
       <div v-if="optionLegs.length" class="leg-greeks-header-row">
-        <span></span>
-        <span></span>
-        <span></span>
-        <span v-if="props.showTte" class="field-header maturity-header">Maturity</span>
-        <span v-else></span>
+        <div v-if="indexName && props.showIndexSummary !== false" class="index-summary">
+          <span class="index-label">{{ indexName }}</span>
+          <span class="index-value">{{ indexPrice != null ? formatNumber(indexPrice) : "loading" }}</span>
+        </div>
+        <span v-else class="index-summary-spacer"></span>
+        <span v-if="showRowMaturity" class="field-header maturity-header">{{ props.showTte || isMinimal ? "Maturity" : "" }}</span>
         <div class="strike-greeks-header">
-          <span v-if="props.showTte" class="field-header strike-header">Strike</span>
+          <span v-if="props.showTte || isMinimal" class="field-header strike-header">Strike</span>
           <span v-else class="strike-spacer"></span>
-          <span v-if="props.showTte" class="field-header tte-header">TTE</span>
+          <span v-if="props.showTte && !isMinimal" class="field-header tte-header">TTE</span>
           <div class="leg-greeks leg-greeks--header">
             <span class="leg-greek-header leg-greek-header--text">IV</span>
             <span class="leg-greek-header leg-greek-header--text">Mark</span>
             <span class="leg-greek-header">Δ</span>
-            <span class="leg-greek-header">Γ</span>
-            <span class="leg-greek-header">Θ</span>
-            <span class="leg-greek-header">ν</span>
+            <span class="leg-greek-header">{{ isMinimal ? "Γ / $1K" : "Γ" }}</span>
+            <span class="leg-greek-header">{{ isMinimal ? "Θ / day" : "Θ" }}</span>
+            <span class="leg-greek-header">{{ isMinimal ? "ν / vol pt" : "ν" }}</span>
             <span class="leg-greek-header leg-greek-header--empty"></span>
           </div>
         </div>
@@ -649,15 +715,17 @@ const totalMarkPrice = computed<number | null>(() => {
           type="button"
           class="side-pill"
           :class="leg.side === 'buy' ? 'side-pill--buy' : 'side-pill--sell'"
+          :aria-label="`${leg.side === 'buy' ? 'Buy' : 'Sell'} leg; switch to ${leg.side === 'buy' ? 'sell' : 'buy'}`"
           @click="toggleSide(leg)"
         >
-          {{ leg.side === 'buy' ? 'Buy' : 'Sell' }}
+          {{ isMinimal ? (leg.side === 'buy' ? '+' : '−') : (leg.side === 'buy' ? 'Buy' : 'Sell') }}
         </button>
 
-        <div class="qty-spinner">
+        <div class="qty-spinner" :class="{ 'qty-spinner--sell': leg.side === 'sell' }">
           <input
             type="number"
             class="qty-input"
+            aria-label="Leg quantity"
             :name="`leg-qty-${leg.id}`"
             :value="leg.qty"
             min="1"
@@ -693,6 +761,7 @@ const totalMarkPrice = computed<number | null>(() => {
           <button
             type="button"
             class="type-pill"
+            aria-label="Toggle call or put"
             @click="
               updateLeg(leg.id, (l) => {
                 const current = l as OptionLeg;
@@ -712,7 +781,9 @@ const totalMarkPrice = computed<number | null>(() => {
         </div>
 
         <StyledSelectMenu
+          v-if="showRowMaturity"
           class="leg-select"
+          :id="`expiry-${builderId}-${leg.id}`"
           label="Option expiry"
           :model-value="leg.expiry ?? defaultExpiry()"
           :options="expirySelectOptions"
@@ -725,28 +796,34 @@ const totalMarkPrice = computed<number | null>(() => {
         />
 
         <div class="strike-greeks">
-          <StyledSelectMenu
-            class="leg-select"
-            label="Option strike"
-            :model-value="leg.strike"
-            :options="strikeSelectOptionsForLeg(leg)"
-            @update:model-value="
-              updateLeg(leg.id, (l) => ({
-                ...(l as OptionLeg),
-                strike: Number($event),
-              }))
-            "
-          />
+          <div class="strike-control">
+            <button v-if="isMinimal" type="button" class="strike-step" aria-label="Previous strike" :disabled="!canStepStrike(leg, -1)" @click="stepStrike(leg, -1)">‹</button>
+            <StyledSelectMenu
+              class="leg-select"
+              :id="`strike-${builderId}-${leg.id}`"
+              label="Option strike"
+              :model-value="leg.strike"
+              :options="strikeSelectOptionsForLeg(leg)"
+              @update:model-value="
+                updateLeg(leg.id, (l) => ({
+                  ...(l as OptionLeg),
+                  strike: Number($event),
+                }))
+              "
+            />
 
-          <span v-if="props.showTte" class="tte-cell">{{ formatTteForLeg(leg) }}</span>
+            <button v-if="isMinimal" type="button" class="strike-step" aria-label="Next strike" :disabled="!canStepStrike(leg, 1)" @click="stepStrike(leg, 1)">›</button>
+          </div>
+
+          <span v-if="props.showTte && !isMinimal" class="tte-cell">{{ formatTteForLeg(leg) }}</span>
 
           <div class="leg-greeks">
             <span class="leg-greek">
               <span class="leg-greek-value">{{ formatIvPercent(legDisplay(leg).iv) }}</span>
             </span>
-            <span class="leg-greek">
+            <span class="leg-greek leg-greek--mark">
               <span class="leg-greek-value">
-                {{ formatMarkPrice(legDisplay(leg).mark, leg.side, false, leg.qty) }}
+                {{ isMinimal ? formatMarkPrice(legDisplay(leg).mark) : formatMarkPrice(legDisplay(leg).mark, leg.side, false, leg.qty) }}
               </span>
             </span>
             <span class="leg-greek">
@@ -756,7 +833,7 @@ const totalMarkPrice = computed<number | null>(() => {
             </span>
             <span class="leg-greek">
               <span class="leg-greek-value">
-                {{ formatSignedNumber(signedGreek(leg, legDisplay(leg).greeks.gamma), 4) }}
+                {{ formatSignedNumber(signedGreek(leg, legDisplay(leg).greeks.gamma) * (isMinimal ? 1000 : 1), isMinimal ? 3 : 4) }}
               </span>
             </span>
             <span class="leg-greek">
@@ -769,7 +846,7 @@ const totalMarkPrice = computed<number | null>(() => {
                 {{ formatSignedNumber(signedGreek(leg, legDisplay(leg).greeks.vega), 2) }}
               </span>
             </span>
-            <button type="button" class="remove-btn" @click="removeLeg(leg.id)">−</button>
+            <button type="button" class="remove-btn" aria-label="Remove leg" @click="removeLeg(leg.id)">{{ isMinimal ? "×" : "−" }}</button>
           </div>
         </div>
       </div>
@@ -787,18 +864,19 @@ const totalMarkPrice = computed<number | null>(() => {
           <slot name="footer-actions" :legs-count="legsModel.length" :max-legs="MAX_LEGS" />
         </div>
         <div class="total-greeks">
+          <span v-if="isMinimal" class="net-cost-label">{{ totalMarkPrice == null ? "Net premium" : totalMarkPrice < 0 ? "Net credit" : "Net debit" }}</span>
           <span class="strike-spacer"></span>
           <span class="tte-spacer"></span>
           <div class="leg-greeks">
             <span class="leg-greek leg-greek--spacer"></span>
             <span class="leg-greek">
-              <span class="leg-greek-value">{{ formatMarkPrice(totalMarkPrice, undefined, true, 1) }}</span>
+              <span class="leg-greek-value total-mark">{{ formatMarkPrice(isMinimal && totalMarkPrice != null ? Math.abs(totalMarkPrice) : totalMarkPrice, undefined, !isMinimal, 1) }}</span>
             </span>
             <span class="leg-greek">
               <span class="leg-greek-value">{{ formatSignedNumber(totalGreeks.delta) }}</span>
             </span>
             <span class="leg-greek">
-              <span class="leg-greek-value">{{ formatSignedNumber(totalGreeks.gamma, 4) }}</span>
+              <span class="leg-greek-value">{{ formatSignedNumber(totalGreeks.gamma * (isMinimal ? 1000 : 1), isMinimal ? 3 : 4) }}</span>
             </span>
             <span class="leg-greek">
               <span class="leg-greek-value">{{ formatSignedNumber(totalGreeks.theta, 2) }}</span>
@@ -828,11 +906,15 @@ const totalMarkPrice = computed<number | null>(() => {
 .index-summary {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  grid-column: 1 / 4;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
   font-size: 12px;
   color: #70767d;
-  margin-left: 8px;
 }
+
+.index-summary-spacer { grid-column: 1 / 4; }
 
 .index-label {
   text-transform: uppercase;
@@ -844,11 +926,6 @@ const totalMarkPrice = computed<number | null>(() => {
 .index-value {
   font-weight: 500;
   color: #e8eaed;
-}
-
-.index-time {
-  color: #70767d;
-  font-size: 11px;
 }
 
 .legs-section {
@@ -1044,7 +1121,8 @@ const totalMarkPrice = computed<number | null>(() => {
   min-height: var(--control-height);
 }
 
-.leg-select :deep(.styled-select-trigger) {
+.leg-select :deep(.styledSelectTrigger) {
+  width: 100%;
   height: var(--control-height);
   font-size: 10px;
   font-family: inherit;
@@ -1087,6 +1165,8 @@ const totalMarkPrice = computed<number | null>(() => {
 .payoff-builder--tte .strike-greeks {
   grid-template-columns: var(--strike-width) var(--col-tte) 1fr;
 }
+
+.strike-control { min-width: 0; }
 
 .strike-greeks .leg-select {
   width: var(--strike-width);
@@ -1266,5 +1346,125 @@ const totalMarkPrice = computed<number | null>(() => {
   .leg-greeks {
     justify-content: space-between;
   }
+}
+/* The app's chart container owns the width; the editor fills that same space. */
+.payoff-builder--minimal {
+  box-sizing: border-box; width: 100%; min-width: 0; margin: 0;
+  padding: 16px 0 12px; gap: 16px; color: #fff; font-size: 13px;
+}
+.combination-heading { min-width: 0; }
+.combination-heading h1 {
+  margin: 0 0 4px; font-size: 16px; font-weight: 500;
+  line-height: 1.25; letter-spacing: -0.035em; overflow-wrap: anywhere; text-wrap: balance;
+}
+.maturity-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.maturity-select :deep(.styledSelectTrigger) {
+  height: 26px; padding: 0; gap: 12px; border: 0; border-radius: 0;
+  background: transparent; font-size: 13px; color: #fff; cursor: pointer;
+}
+
+.maturity-tte { color: #8a8a8a; font-size: 11px; }
+.maturity-mode-button {
+  padding: 2px 0; border: 0; border-bottom: 1px dashed #444;
+  background: transparent; color: #8a8a8a; font: inherit; font-size: 11px; cursor: pointer;
+}
+.maturity-mode-button:hover { color: #fff; border-color: #8a8a8a; }
+.payoff-builder--minimal .index-label { font-size: 10px; font-weight: 400; color: #8a8a8a; letter-spacing: 0; }
+.payoff-builder--minimal .index-value { font-size: 11px; color: #fff; }
+.payoff-builder--minimal .legs-section {
+  --selection-columns: 16px 38px 72px minmax(0, 1fr);
+  --layout-gap: 10px;
+  --strike-width: 126px;
+  --strike-greeks-gap: 16px;
+  --greek-iv: minmax(76px, 1fr);
+  --greek-mark: minmax(96px, 1.15fr);
+  --greek-delta: minmax(72px, 1fr);
+  --greek-gamma: minmax(82px, 1fr);
+  --greek-theta: minmax(90px, 1fr);
+  --greek-vega: minmax(90px, 1fr);
+  --greek-remove: 32px;
+  --control-height: 32px;
+  --row-pad-x: 12px;
+  width: 100%; gap: 0; overflow-x: auto; padding-bottom: 4px;
+}
+.payoff-builder--per-leg .legs-section {
+  --selection-columns: 16px 38px 64px 104px minmax(0, 1fr);
+  --strike-width: 114px;
+}
+.payoff-builder--minimal .leg-row,
+.payoff-builder--minimal .leg-greeks-header-row,
+.payoff-builder--minimal .total-greeks {
+  grid-template-columns: var(--selection-columns); gap: var(--layout-gap);
+  min-width: 920px; box-sizing: border-box;
+}
+.payoff-builder--per-leg .leg-row,
+.payoff-builder--per-leg .leg-greeks-header-row,
+.payoff-builder--per-leg .total-greeks { min-width: 1020px; }
+.payoff-builder--minimal .leg-greeks-header-row { padding: 0 12px 6px; }
+.payoff-builder--minimal .leg-row {
+  min-height: 40px; padding: 4px 12px; border-radius: 8px; transition: background 120ms ease;
+}
+.payoff-builder--minimal .leg-row:hover,
+.payoff-builder--minimal .leg-row:focus-within { background: #0e0e0e; }
+.payoff-builder--minimal .side-pill,
+.payoff-builder--minimal .qty-input,
+.payoff-builder--minimal .type-pill,
+.payoff-builder--minimal .leg-select :deep(.styledSelectTrigger) {
+  border: 0; background: transparent; border-radius: 0; box-shadow: none;
+  font-size: 14px; font-weight: 400; padding: 0; cursor: pointer;
+}
+.payoff-builder--minimal .side-pill { font-size: 18px; }
+.payoff-builder--minimal .side-pill--buy,
+.payoff-builder--minimal .qty-input { color: #00bf9a; }
+.payoff-builder--minimal .side-pill--sell,
+.payoff-builder--minimal .qty-spinner--sell .qty-input { color: #ff4970; }
+.payoff-builder--minimal .qty-spinner { border-radius: 0; }
+.payoff-builder--minimal .qty-input { text-align: left; font-size: 16px; }
+.payoff-builder--minimal .type-pill { justify-content: flex-start; color: #fff; }
+.payoff-builder--minimal .leg-select :deep(.styledSelectTrigger) { color: #fff; font-weight: 500; }
+.payoff-builder--per-leg .leg-row > .leg-select :deep(.styledSelectTrigger) { font-size: 12px; justify-content: flex-start; }
+.payoff-builder--minimal .strike-greeks,
+.payoff-builder--minimal .strike-greeks-header {
+  grid-template-columns: var(--strike-width) minmax(0, 1fr); gap: var(--strike-greeks-gap);
+}
+.payoff-builder--minimal .strike-control {
+  display: grid; grid-template-columns: 18px minmax(0, 1fr) 18px;
+  align-items: center; height: var(--control-height); border-bottom: 1px solid transparent;
+}
+.payoff-builder--minimal .strike-control:hover,
+.payoff-builder--minimal .strike-control:focus-within { border-color: #00bf9a; }
+.payoff-builder--minimal .strike-control .leg-select { width: 100%; }
+.payoff-builder--minimal .strike-control :deep(.styledSelectChevron) { display: none; }
+.strike-step { border: 0; background: transparent; color: #8a8a8a; font: inherit; font-size: 14px; padding: 0; height: 32px; cursor: pointer; }
+.strike-step:disabled { opacity: .2; cursor: default; }
+.payoff-builder--minimal .leg-greeks {
+  grid-template-columns: var(--greek-iv) var(--greek-mark) var(--greek-delta) var(--greek-gamma) var(--greek-theta) var(--greek-vega) var(--greek-remove);
+  justify-self: stretch; justify-content: start; column-gap: var(--layout-gap); row-gap: 0;
+}
+.payoff-builder--minimal .field-header,
+.payoff-builder--minimal .leg-greek-header { color: #8a8a8a; font-size: 9px; font-weight: 400; letter-spacing: 1px; text-transform: uppercase; }
+.payoff-builder--minimal .strike-header { text-align: left; padding-left: 18px; box-sizing: border-box; }
+.payoff-builder--minimal .leg-greek-value { font-size: 13px; color: #8a8a8a; }
+.payoff-builder--minimal .leg-greek--mark .leg-greek-value { font-size: 13px; font-weight: 500; color: #fff; }
+.payoff-builder--minimal .remove-btn { background: transparent; font-size: 18px; border-radius: 4px; opacity: 0; }
+.payoff-builder--minimal .leg-row:hover .remove-btn,
+.payoff-builder--minimal .leg-row:focus-within .remove-btn { opacity: 1; }
+.payoff-builder--minimal .legs-footer { display: block; min-width: 920px; padding: 0; }
+.payoff-builder--per-leg .legs-footer { min-width: 1020px; }
+.payoff-builder--minimal .footer-actions { min-height: 34px; padding: 0 12px 4px; box-sizing: border-box; }
+.payoff-builder--minimal .add-leg-btn { padding: 6px 0; font-size: 12px; color: #8a8a8a; }
+.payoff-builder--minimal .add-leg-btn:hover { color: #fff; }
+.payoff-builder--minimal .total-greeks { border-top: 1px solid #242427; padding: 10px 12px 4px; }
+.payoff-builder--minimal .total-greeks > .strike-spacer,
+.payoff-builder--minimal .total-greeks > .tte-spacer { display: none; }
+.payoff-builder--minimal .net-cost-label { grid-column: 1 / -2; font-size: 9px; color: #8a8a8a; letter-spacing: 1px; text-transform: uppercase; white-space: nowrap; }
+.payoff-builder--minimal .total-greeks > .leg-greeks { grid-column: -2 / -1; margin-left: calc(var(--strike-width) + var(--strike-greeks-gap)); }
+.payoff-builder--minimal .total-greeks .leg-greek-value { color: #fff; }
+.payoff-builder--minimal .total-greeks .total-mark { font-size: 13px; font-weight: 500; }
+.payoff-builder--minimal button:focus-visible,
+.payoff-builder--minimal .qty-input:focus-visible { outline: 1px solid #00bf9a; outline-offset: 3px; }
+@media (hover: none) { .payoff-builder--minimal .remove-btn { opacity: 1; } }
+@media (max-width: 650px) {
+  .payoff-builder--minimal { padding: 12px 0; gap: 14px; }
 }
 </style>

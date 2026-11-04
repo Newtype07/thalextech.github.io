@@ -139,6 +139,10 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
     const chain = (asOf, days = [1, 7]) => days.flatMap(day => [90000, 92000].flatMap(strike =>
       ["C", "P"].map(side => ({ name: `BTC-${day}-${strike}-${side}`, expiry: asOf + day * 86400, strike, side }))));
     const selectLeg = async (index, label, text) => {
+      if (label === "Option expiry" && !root().querySelector('[aria-label="Option expiry"]')) {
+        root().querySelector('[aria-label="Edit maturities per leg"]').click();
+        await nextTick();
+      }
       root().querySelectorAll(".leg-row")[index].querySelector(`[aria-label="${label}"]`).click();
       await nextTick();
       const option = [...window.document.querySelectorAll('[role="option"]')]
@@ -164,10 +168,13 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
       "ready market data starts a default run without submitting the form",
     );
     assert.equal(root().querySelectorAll(".leg-row").length, 2);
+    assert.match(root().querySelector(".combination-heading h1").textContent, /^Bitcoin · /);
+    assert.equal(root().querySelector('[aria-label="Combination maturity"]').textContent.trim(), builderExpiry(1793700000 + 7 * 86400));
+    assert.equal(root().querySelectorAll('[aria-label="Option expiry"]').length, 0);
+    assert.ok(root().querySelector('[aria-label="Edit maturities per leg"]'));
     for (const row of root().querySelectorAll(".leg-row")) {
-      assert.equal(row.querySelector(".side-pill").textContent.trim(), "Sell");
+      assert.match(row.querySelector(".side-pill").getAttribute("aria-label"), /^Sell leg/);
       assert.equal(row.querySelector(".qty-input").value, "1");
-      assert.equal(row.querySelector('[aria-label="Option expiry"]').textContent.trim(), builderExpiry(1793700000 + 7 * 86400));
       assert.equal(row.querySelector('[aria-label="Option strike"]').textContent.trim(), "90,000");
     }
     assert.equal(input("Realized / forward volatility").value, "100");
@@ -177,6 +184,38 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
     const callGreeks = root().querySelector(".leg-row").querySelectorAll(".leg-greek-value");
     assert.equal(callGreeks[0].textContent.trim(), "60.00%");
     assert.equal(callGreeks[2].textContent.trim(), (-calcGreeks(91000, 90000, 7 * 86400, 0.6, "call").delta).toFixed(2));
+    // Opening per-leg editing preserves the shared date metadata; the mode is reversible.
+    button("Edit maturities per leg").click();
+    await nextTick();
+    assert.equal(root().querySelectorAll('[aria-label="Option expiry"]').length, 2);
+    assert.equal(button("Combination maturity").textContent.trim(), builderExpiry(1793700000 + 7 * 86400));
+    assert.ok(root().querySelector(".maturity-tte"));
+    button("Use a single maturity").click();
+    await nextTick();
+    assert.equal(root().querySelectorAll('[aria-label="Option expiry"]').length, 0);
+    // A mixed position can return to the first leg's date, then bulk-change from the dropdown.
+    await selectLeg(0, "Option expiry", builderExpiry(1793700000 + 86400));
+    assert.equal(button("Combination maturity").textContent.trim(), "Mixed maturities");
+    button("Use a single maturity").click();
+    await settle();
+    assert.equal(root().querySelectorAll('[aria-label="Option expiry"]').length, 0);
+    assert.equal(button("Combination maturity").textContent.trim(), builderExpiry(1793700000 + 86400));
+    button("Edit maturities per leg").click();
+    await nextTick();
+    for (const row of root().querySelectorAll(".leg-row"))
+      assert.equal(row.querySelector('[aria-label="Option expiry"]').textContent.trim(), builderExpiry(1793700000 + 86400));
+    button("Combination maturity").click();
+    await nextTick();
+    [...window.document.querySelectorAll('[role="option"]')]
+      .find(node => node.querySelector("span").textContent.trim() === builderExpiry(1793700000 + 7 * 86400)).click();
+    await settle();
+    assert.equal(root().querySelectorAll('[aria-label="Option expiry"]').length, 0);
+    button("Edit maturities per leg").click();
+    await nextTick();
+    for (const row of root().querySelectorAll(".leg-row"))
+      assert.equal(row.querySelector('[aria-label="Option expiry"]').textContent.trim(), builderExpiry(1793700000 + 7 * 86400));
+    button("Use a single maturity").click();
+    await nextTick();
     const sidebar = root().querySelector('aside[aria-label="Hedge settings"]');
     assert.ok(sidebar);
     assert.notEqual(sidebar.style.display, "none", "hedge settings are open by default");
@@ -513,7 +552,7 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
     }
     await settle();
     for (const row of root().querySelectorAll(".leg-row"))
-      assert.equal(row.querySelector(".side-pill").textContent.trim(), "Buy");
+      assert.match(row.querySelector(".side-pill").getAttribute("aria-label"), /^Buy leg/);
     // Build a short near call / long far call calendar through the shared controls.
     root().querySelectorAll(".leg-row")[0].querySelector(".side-pill").click();
     await nextTick();
