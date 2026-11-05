@@ -1,7 +1,9 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import DeltaHedgeControls from "../../../lib/components/DeltaHedgeControls.vue";
+import { createMinuteHistoryLoader } from "../../../lib/minute-history.js";
 import HedgingChart from "./components/HedgingChart.vue";
-import { buildHedgingSimulation, HEDGE_TRADING_COST_RATE } from "./hedgingSimulation.js";
+import { buildHedgingSimulation } from "./hedgingSimulation.js";
 import {
   fetchIndexHistory,
   fetchInstruments,
@@ -37,7 +39,12 @@ const ui = reactive({
   threshold: 0.02,
   tolerance: 0.16,
   showOptionPrice: false,
-  includeTradingCosts: false,
+  includeTradingCosts: true,
+  hedgeBps: 1.5,
+  hedgeEnabled: true,
+  hedgeTiming: "timer",
+  hedgeEntry: "neutralize",
+  hedgeExit: "hold",
   loading: false,
   error: "",
 });
@@ -52,6 +59,9 @@ const data = reactive({
   index: {},
 });
 const chartRef = ref(null);
+const loadMinuteIndex = createMinuteHistoryLoader(fetchIndexHistory);
+const loadMinuteMarks = createMinuteHistoryLoader(fetchMarkHistory);
+const historyTo = Math.floor(Date.now() / 60000) * 60 - 60;
 const initialized = ref(false);
 let loadRequestId = 0;
 let loadTimer = null;
@@ -136,7 +146,7 @@ const effectivePointCount = computed(
       selectedHorizonSeconds.value / activeResolutionEntry.value.intervalSeconds,
     ) + 1,
 );
-const activeDataKey = computed(() => activeResolutionKey.value);
+const activeDataKey = computed(() => "60");
 const effectiveResolutionSummary = computed(() => {
   const summary = `${activeResolutionLabel.value}, ${effectivePointCount.value} pts`;
   if (activeResolutionKey.value === String(ui.resolutionKey)) return summary;
@@ -144,14 +154,13 @@ const effectiveResolutionSummary = computed(() => {
 });
 
 const getTimestampRange = () => {
-  const now = Math.floor(Date.now() / 1000);
-  const config = activeResolutionEntry.value;
+  const config = { key: "60", ...RESOLUTION_CONFIG[60] };
   const horizonSeconds = selectedHorizonSeconds.value;
   const maxPoints = Math.min(
     MAX_POINTS_PER_FETCH,
     Math.floor(horizonSeconds / config.intervalSeconds) + 1,
   );
-  const to = now - (now % config.intervalSeconds);
+  const to = historyTo;
   return {
     resolutionKey: config.key,
     resolution: config.resolution,
@@ -288,27 +297,35 @@ const slugValue = (value) =>
     .replace(/[^a-zA-Z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
 
-const simulation = computed(() =>
-  buildHedgingSimulation({
-    indexRows: data.index[activeDataKey.value] || [],
-    targets: targetInstruments.value.map((instrument) => ({
-      instrument,
-      rows:
-        data.targetMark[activeDataKey.value]?.[instrument.instrument_name] || [],
-    })),
-    hedgeRows: data.hedgeMark[activeDataKey.value] || [],
-    hedge: hedgeInstrument.value,
-    settings: {
-      targetAmount: signedTargetAmount.value,
-      tradingCostRate: ui.includeTradingCosts ? HEDGE_TRADING_COST_RATE : 0,
-      threshold: ui.threshold,
-      tolerance: ui.tolerance,
-      period: ui.period,
-    },
-  }),
-);
+const hedgePolicy = computed({
+  get: () => ({ enabled: ui.hedgeEnabled, threshold: ui.threshold, tolerance: ui.tolerance, period: ui.period,
+    timing: ui.hedgeTiming, hedgeBps: ui.hedgeBps, entry: ui.hedgeEntry, exit: ui.hedgeExit }),
+  set: value => {
+    Object.assign(ui, { hedgeEnabled: value.enabled, threshold: value.threshold, tolerance: value.tolerance,
+      period: value.period, hedgeTiming: value.timing, hedgeBps: value.hedgeBps,
+      includeTradingCosts: value.hedgeBps > 0, hedgeEntry: value.entry, hedgeExit: value.exit });
+  },
+});
+const simulation = computed(() => {
+  try {
+    return buildHedgingSimulation({
+      indexRows: data.index[activeDataKey.value] || [],
+      targets: targetInstruments.value.map(instrument => ({ instrument,
+        rows: data.targetMark[activeDataKey.value]?.[instrument.instrument_name] || [] })),
+      hedgeRows: data.hedgeMark[activeDataKey.value] || [], hedge: hedgeInstrument.value,
+      settings: { ...hedgePolicy.value, targetAmount: signedTargetAmount.value,
+        tradingCostRate: ui.hedgeBps / 10000, observationSeconds: 60 },
+    });
+  } catch (error) { return { rows: [], trades: [], error: error.message }; }
+});
 
-const simulationRows = computed(() => simulation.value.rows);
+const simulationRows = computed(() => {
+  const rows = simulation.value.rows;
+  if (rows.length < 2 || activeResolutionEntry.value.intervalSeconds <= 60) return rows;
+  const buckets = new Map();
+  for (const row of rows.slice(1)) buckets.set(Math.floor(row.ts / activeResolutionEntry.value.intervalSeconds), row);
+  return [rows[0], ...buckets.values()];
+});
 const trades = computed(() => simulation.value.trades);
 
 const canSavePng = computed(() => simulationRows.value.length > 0);
@@ -429,7 +446,7 @@ async function loadSimulation() {
   const { resolutionKey, resolution, from, to, maxPoints } = getTimestampRange();
   try {
     const [indexRows, targetMarkRows, hedgeMarkRows] = await Promise.all([
-      fetchIndexHistory({
+      loadMinuteIndex({
         index_name: targets[0].underlying || underlying.value,
         resolution,
         from,
@@ -438,7 +455,7 @@ async function loadSimulation() {
       }),
       Promise.all(
         targets.map((target) =>
-          fetchMarkHistory({
+          loadMinuteMarks({
             instrument_name: target.instrument_name,
             resolution,
             from,
@@ -447,7 +464,7 @@ async function loadSimulation() {
           }),
         ),
       ),
-      fetchMarkHistory({
+      loadMinuteMarks({
         instrument_name: hedge.instrument_name,
         resolution,
         from,
@@ -502,7 +519,7 @@ onMounted(async () => {
     const { resolutionKey, resolution, from, to, maxPoints } = getTimestampRange();
     const [instruments, indexRows] = await Promise.all([
       fetchInstruments(),
-      fetchIndexHistory({
+      loadMinuteIndex({
         index_name: underlying.value,
         resolution,
         from,
@@ -526,9 +543,7 @@ onMounted(async () => {
 
 watch(
   () => [
-    ui.resolutionKey,
     ui.horizonHours,
-    activeResolutionKey.value,
     ui.targetMaturity,
     ui.targetStrike,
     ui.targetType,
@@ -736,52 +751,8 @@ onBeforeUnmount(() => {
           </div>
         </label>
 
-        <label class="panelField">
-          <span>Period</span>
-          <input
-            v-model.number="ui.period"
-            class="rangeInput"
-            type="range"
-            min="60"
-            max="86400"
-            step="60"
-          />
-          <div class="rangeLabels">
-            <span>1m</span>
-            <strong>{{ periodHours }}</strong>
-            <span>24h</span>
-          </div>
-        </label>
-
-        <label class="panelField">
-          <span>
-            Threshold
-            <span
-              class="infoDot infoDotTooltip"
-              tabindex="0"
-              data-tooltip="The bot allows the deltas to stay outside of [target_delta - threshold, target_delta + threshold] for period seconds before making any adjustments to the portfolio."
-            >i</span>
-          </span>
-          <input v-model.number="ui.threshold" type="number" min="0" step="0.01" />
-        </label>
-
-        <label class="panelField">
-          <span>
-            Tolerance
-            <span
-              class="infoDot infoDotTooltip"
-              tabindex="0"
-              data-tooltip="If the deltas are outside of [target_delta - tolerance, target_delta + tolerance], the bot will hedge them immediately, without waiting period seconds. Set to 0 to disable immediate hedging."
-            >i</span>
-          </span>
-          <input v-model.number="ui.tolerance" type="number" min="0" step="0.01" />
-        </label>
-
-        <label class="toolbarSwitch tradingCostSwitch" title="Charges 1.5 bps of traded perpetual notional on every hedge adjustment, including the initial hedge.">
-          <span>Trading costs (1.5 bps)</span>
-          <input v-model="ui.includeTradingCosts" type="checkbox" />
-          <span class="toolbarSwitchTrack" aria-hidden="true"></span>
-        </label>
+        <DeltaHedgeControls v-model="hedgePolicy" :asset="underlying.slice(0, 3)" :observation-seconds="60" />
+        <p v-if="simulation.error" class="error" role="alert">{{ simulation.error }}</p>
 
         <div v-if="ui.error" class="error">{{ ui.error }}</div>
       </aside>

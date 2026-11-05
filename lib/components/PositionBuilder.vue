@@ -657,7 +657,7 @@ const totalMarkPrice = computed<number | null>(() => {
   }">
     <div v-if="isMinimal" class="builder-heading">
       <div class="combination-heading">
-        <h1>{{ combinationTitle }}</h1>
+        <h1 v-if="combinationTitle">{{ combinationTitle }}</h1>
         <div class="maturity-summary">
           <StyledSelectMenu
             class="maturity-select"
@@ -1352,12 +1352,13 @@ const totalMarkPrice = computed<number | null>(() => {
   box-sizing: border-box; width: 100%; min-width: 0; margin: 0;
   padding: 16px 0 12px; gap: 16px; color: #fff; font-size: 13px;
 }
-.combination-heading { min-width: 0; }
+.builder-heading { min-width: 0; }
+.combination-heading { display: flex; align-items: center; gap: 16px; min-width: 0; overflow-x: auto; }
 .combination-heading h1 {
-  margin: 0 0 4px; font-size: 16px; font-weight: 500;
-  line-height: 1.25; letter-spacing: -0.035em; overflow-wrap: anywhere; text-wrap: balance;
+  flex-shrink: 0; margin: 0; font-size: 13px; font-weight: 500;
+  line-height: 26px; white-space: nowrap;
 }
-.maturity-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.maturity-summary { display: flex; flex-shrink: 0; align-items: center; gap: 12px; white-space: nowrap; }
 .maturity-select :deep(.styledSelectTrigger) {
   height: 26px; padding: 0; gap: 12px; border: 0; border-radius: 0;
   background: transparent; font-size: 13px; color: #fff; cursor: pointer;

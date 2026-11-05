@@ -2,6 +2,10 @@
 import { computed, ref, shallowRef, watch, onBeforeUnmount } from "vue";
 import SimulationChart from "./SimulationChart.vue";
 import SimulationPathsChart from "./SimulationPathsChart.vue";
+import MarketAssumptions from "../../../../lib/components/MarketAssumptions.vue";
+import DeltaHedgeControls from "../../../../lib/components/DeltaHedgeControls.vue";
+import DeltaHedgeToggle from "../../../../lib/components/DeltaHedgeToggle.vue";
+import { DEFAULT_HEDGE_POLICY } from "../../../../lib/delta-hedging/index.js";
 import PositionBuilder from "../../../../lib/components/PositionBuilder.vue";
 import { simulatePosition } from "../simulation/position-simulation.js";
 import { runPositionEnsemble } from "../simulation/ensemble-worker-client.js";
@@ -25,15 +29,13 @@ const instruments = computed(() => builderInstruments(market.value?.instruments 
 const settings = ref({
   runs: 1,
   exitAt: "first",
-  rvPercent: 100,
   driftPercent: 0,
-  threshold: 0.05,
-  tolerance: 0.15,
-  periodMinutes: 30,
-  timing: "timer",
-  hedgeBps: 1,
+  hedge: { ...DEFAULT_HEDGE_POLICY },
   optionBps: 1,
 });
+const marketSettings = ref({ shape: "forward", dynamics: "constant", rv: .5, rvMultiplier: 1, lookbackDays: 90, profile: null });
+const rvPercent = computed({ get: () => marketSettings.value.rvMultiplier * 100,
+  set: value => { marketSettings.value = { ...marketSettings.value, rvMultiplier: value / 100 }; } });
 const result = shallowRef(null),
   error = ref(""),
   running = ref(false),
@@ -41,9 +43,11 @@ const result = shallowRef(null),
   runFingerprint = ref(""),
   form = ref(null);
 const completed = ref(0);
+const pathSeed = ref(crypto.getRandomValues(new Uint32Array(1))[0]);
+function newPaths() { pathSeed.value = crypto.getRandomValues(new Uint32Array(1))[0]; run(); }
 let runController;
 const fingerprint = computed(() =>
-  JSON.stringify({ settings: settings.value, legs: positionLegs.value, market: market.value }),
+  JSON.stringify({ settings: settings.value, marketSettings: marketSettings.value, legs: positionLegs.value, market: market.value }),
 );
 const dirty = computed(
   () => result.value && fingerprint.value !== runFingerprint.value,
@@ -86,6 +90,7 @@ const timestamp = (seconds) =>
   }) + " UTC";
 function useLive() {
   if (!canCapture.value) return;
+  if (market.value) pathSeed.value = crypto.getRandomValues(new Uint32Array(1))[0];
   market.value = {
     spot: props.liveSpot,
     asOf: props.asOf,
@@ -161,16 +166,20 @@ async function run() {
       spot: entrySpot.value,
       legs: preview.value.legs,
       horizon: preview.value.horizon,
-      rvMultiplier: s.rvPercent / 100,
+      rvMultiplier: marketSettings.value.rvMultiplier,
       drift: s.driftPercent / 100,
-      threshold: s.threshold,
-      tolerance: s.tolerance,
-      period: s.periodMinutes * 60,
-      timing: s.timing,
+      threshold: s.hedge.threshold,
+      tolerance: s.hedge.tolerance,
+      period: s.hedge.period,
+      timing: s.hedge.timing,
+      hedgeEnabled: s.hedge.enabled,
+      hedgeEntry: s.hedge.entry,
+      hedgeExit: s.hedge.exit,
+      marketModel: JSON.parse(JSON.stringify(marketSettings.value)),
       step: 60,
-      hedgeBps: s.hedgeBps,
+      hedgeBps: s.hedge.hedgeBps,
       optionBps: s.optionBps,
-      seed: crypto.getRandomValues(new Uint32Array(1))[0],
+      seed: pathSeed.value,
       nodes: nodeInputs.value,
       curveSource,
       curveTime: curveTime.value,
@@ -235,7 +244,7 @@ function download() {
       ref="form"
       class="sim-layout"
       :class="{ 'sim-layout-collapsed': !settingsOpen }"
-      @submit.prevent="run()"
+      @submit.prevent="newPaths()"
     >
       <div v-if="market" class="sim-position-builder">
         <PositionBuilder
@@ -278,20 +287,10 @@ function download() {
             </button>
           </div>
         </div>
-        <div class="field sim-rv-control">
+        <div v-if="marketSettings.shape === 'forward'" class="field sim-rv-control">
           <label for="sim-rv-ratio">RV / forward IV</label>
-          <input
-            id="sim-rv-ratio"
-            v-model.number="settings.rvPercent"
-            type="range"
-            min="50"
-            max="200"
-            step="1"
-            aria-label="Realized / forward volatility"
-          />
-          <output for="sim-rv-ratio"
-            >{{ (settings.rvPercent / 100).toFixed(2) }}×</output
-          >
+          <input id="sim-rv-ratio" v-model.number="rvPercent" type="range" min="50" max="200" step="1" aria-label="Realized / forward volatility" />
+          <output for="sim-rv-ratio">{{ marketSettings.rvMultiplier.toFixed(2) }}×</output>
         </div>
         <div class="field sim-drift-control">
           <label for="sim-drift">Annual drift</label>
@@ -330,15 +329,22 @@ function download() {
           </svg>
         </button>
 
+        <div class="sim-hedge-actions">
+        <DeltaHedgeToggle :model-value="settings.hedge.enabled" @update:model-value="settings.hedge = { ...settings.hedge, enabled: $event }" />
         <button
-          class="saveButton"
+          class="saveButton sim-settings-toggle"
           type="button"
           :aria-expanded="settingsOpen"
+          :aria-label="settingsOpen ? 'Hide hedge settings' : 'Show hedge settings'"
+          :title="settingsOpen ? 'Hide hedge settings' : 'Show hedge settings'"
           aria-controls="sim-hedge-settings"
           @click="settingsOpen = !settingsOpen"
         >
-          {{ settingsOpen ? "Hide hedge settings" : "Show hedge settings" }}
+          <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <path d="m5 7.5 5 5 5-5" />
+          </svg>
         </button>
+        </div>
       </div>
       <div class="sim-main">
         <div class="sim-trade-facts">
@@ -383,6 +389,7 @@ function download() {
             }}
           </div>
         </div>
+
         <footer class="sim-footer">
           <details class="sim-method">
             <summary>Model assumptions</summary>
@@ -400,8 +407,8 @@ function download() {
             <p>
               Hedges fill at the simulated spot and are checked at the selected time
               step. Option and hedge P&L each include their own execution costs,
-              including the initial hedge and final unwind. Each run generates a new
-              random price path. In 100 runs mode, the same assumptions are used
+              as selected in hedge settings. Settings changes reuse the same random
+              price path; Refresh simulation generates new paths. In 100 runs mode, the same assumptions are used
               for 100 independent paths. The highlighted line is their median
               total P&L at each time, after all option and hedge costs.
             </p>
@@ -418,64 +425,9 @@ function download() {
         <p class="sim-settings-intro">
           Changes update the simulation automatically.
         </p>
+        <DeltaHedgeControls v-model="settings.hedge" :asset="asset" :observation-seconds="60" />
+        <MarketAssumptions v-model="marketSettings" :asset="asset" :forward-available="!!market" />
         <div class="sim-settings-panel">
-          <label
-            >Threshold · {{ asset
-            }}<input
-              v-model.number="settings.threshold"
-              type="number"
-              min="0"
-              step="any"
-              required
-          /></label>
-          <label
-            >Tolerance · {{ asset
-            }}<input
-              v-model.number="settings.tolerance"
-              type="number"
-              min="0"
-              step="any"
-              required
-          /></label>
-          <label class="sim-wide"
-            >Timer behaviour<select
-              v-model="settings.timing"
-              aria-describedby="sim-timer-help"
-            >
-              <option value="timer">Wait for a sustained breach</option>
-              <option value="scheduled">Check at regular intervals</option>
-            </select></label
-          >
-          <p
-            v-if="settings.timing === 'timer'"
-            id="sim-timer-help"
-            class="sim-wide sim-timer-help"
-          >
-            Hedge after net delta stays outside ±{{ settings.threshold }} {{ asset }}
-            for {{ settings.periodMinutes }} minutes. Returning inside the threshold
-            resets the timer. Breaches are observed every minute.
-          </p>
-          <p v-else id="sim-timer-help" class="sim-wide sim-timer-help">
-            Check net delta every {{ settings.periodMinutes }} minutes and hedge
-            only if it is outside ±{{ settings.threshold }} {{ asset }}.
-            Use a whole number of minutes for scheduled checks.
-          </p>
-          <label
-            >Period · minutes<input
-              v-model.number="settings.periodMinutes"
-              type="number"
-              min="1"
-              step="any"
-              required
-          /></label>
-          <label
-            >Hedge cost · bps<input
-              v-model.number="settings.hedgeBps"
-              type="number"
-              min="0"
-              step="any"
-              required
-          /></label>
           <label
             >Option cost · bps / leg<input
               v-model.number="settings.optionBps"
@@ -484,12 +436,6 @@ function download() {
               step="any"
               required
           /></label>
-          <p class="sim-wide">
-            Path step is fixed at 1 minute.
-            Each hedge resets net delta to zero. If absolute net delta exceeds
-            the tolerance, hedge at the next one-minute check without waiting for the
-            timer or schedule. Set tolerance to 0 to disable this override.
-          </p>
           <p v-if="settings.exitAt === 'first'" class="sim-wide">
             Exit at the first option expiry. Later legs close at model marks;
             only those later legs incur option closing costs.
@@ -556,6 +502,9 @@ function download() {
 .sim-toolbar > .saveButton {
   height: 36px;
 }
+.sim-settings-toggle { display: inline-flex; align-items: center; justify-content: center; width: 28px; padding: 6px; border: 0; }
+.sim-settings-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.sim-hedge-actions { display: inline-flex; align-items: center; gap: 4px; }
 .sim-exit-control {
   display: flex;
   flex: 0 0 auto;
@@ -624,12 +573,16 @@ function download() {
   }
 }
 .sim-settings {
+  --color-bg: #141417;
   grid-area: settings;
   position: sticky;
   top: 16px;
   min-width: 0;
   padding: 4px 0 16px 20px;
   border-left: 1px solid var(--color-border);
+  background: var(--color-bg);
+  isolation: isolate;
+  z-index: 2;
 }
 .sim-settings h2 {
   margin: 0 0 8px;

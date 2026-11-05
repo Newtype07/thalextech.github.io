@@ -1,5 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import MarketAssumptions from "../../../lib/components/MarketAssumptions.vue";
+import { fetchForwardSnapshot } from "../../../lib/market-model/live-curve.js";
+import type { MarketModel } from "../../../lib/market-model/path.js";
+import SettingsSidePanel from "../../../lib/components/SettingsSidePanel.vue";
+import DeltaHedgeControls from "../../../lib/components/DeltaHedgeControls.vue";
+import DeltaHedgeToggle from "../../../lib/components/DeltaHedgeToggle.vue";
+import { DEFAULT_HEDGE_POLICY, type HedgePolicy } from "../../../lib/delta-hedging/index.js";
 import CloudChart from "./components/CloudChart.vue";
 import PositionBuilder from "../../../lib/components/PositionBuilder.vue";
 import StopLossSimulator from "./components/StopLossSimulator.vue";
@@ -59,7 +66,7 @@ const SETTINGS_TOOLTIPS = {
   correlation:
     "Correlation between spot-price and volatility shocks. Negative values make volatility tend to rise when spot falls.",
   timeSteps:
-    "Number of simulation intervals in each path. More steps improve time resolution but take longer to calculate.",
+    "Number of points shown per simulated path. Strategy paths and hedge decisions use a separate one-minute clock.",
   pathLimit:
     "Maximum sampled paths rendered in the cloud. This changes visual density, not the number of outcomes used for statistics.",
   binsMultiplier:
@@ -79,6 +86,38 @@ const EXPORT_HTML_FONT_SCALE = 1.05;
 
 const generateSeed = (): number => Math.floor(Math.random() * 1_000_000_000);
 const seed = ref(generateSeed());
+const strategyRunning = ref(false), strategyError = ref("");
+const hedgePolicy = ref<HedgePolicy>({ ...DEFAULT_HEDGE_POLICY, enabled: false });
+const marketSettings = ref<MarketModel>({ shape: "flat", dynamics: "stochastic", rv: .4, rvMultiplier: 1, lookbackDays: 90, profile: null });
+const forwardSnapshot = ref<Awaited<ReturnType<typeof fetchForwardSnapshot>> | null>(null);
+const forwardLoading = ref(false), forwardError = ref("");
+let forwardController: AbortController | null = null;
+async function refreshForwardCurve() {
+  forwardController?.abort(); const controller = new AbortController(); forwardController = controller;
+  forwardLoading.value = true; forwardError.value = "";
+  try {
+    const snapshot = await fetchForwardSnapshot({ instruments: instruments.value, spot: appliedParams.s0,
+      asset: underlying.value.slice(0, 3), signal: controller.signal });
+    if (!controller.signal.aborted) forwardSnapshot.value = snapshot;
+  } catch (error) { if (!controller.signal.aborted) forwardError.value = error instanceof Error ? error.message : String(error); }
+  finally { if (forwardController === controller) forwardLoading.value = false; }
+}
+function exportScenario() {
+  const data = { version: 1, seed: seed.value, asset: underlying.value, params: { ...appliedParams },
+    hedgePolicy: hedgePolicy.value, marketModel: effectiveMarketModel.value, forwardSnapshot: forwardSnapshot.value,
+    legs: positionLegs.value, pricing: optionPricingByLegId.value, valuationTs: quoteValuationTs.value,
+    modelVersion: "variance-schedule-v1", executionModel: "observed-price-v1" };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+  const link = document.createElement("a"); link.href = url; link.download = `${underlying.value}-simulation-settings.json`; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+const effectiveMarketModel = computed<MarketModel>(() => ({ ...marketSettings.value,
+  manual: { volOfVol: pathModel.volOfVol, correlation: pathModel.correlation,
+    jumpIntensity: pathModel.jumpIntensity, jumpMean: pathModel.jumpMean, jumpVol: pathModel.jumpVol, ...marketSettings.value.manual } }));
+watch(() => marketSettings.value.rv, value => {
+  if (Number.isFinite(value) && value >= 0) { appliedParams.vol = value; pendingParams.vol = value; }
+});
+watch(() => appliedParams.vol, value => { marketSettings.value.rv = value; });
 const activeSimulatorTab = ref<"strategy" | "stop-loss">("strategy");
 const appMainRef = ref<HTMLElement | null>(null);
 const workspaceRef = ref<HTMLElement | null>(null);
@@ -126,6 +165,15 @@ const formatProbability = (value: number | null | undefined): string => {
 const settingsOpen = ref(false);
 const pathModel = reactive<PathModelParams>(defaultPathModelForUnderlying("BTCUSD", appliedParams.T));
 const pathModelDraft = reactive<PathModelParams>({ ...pathModel });
+watch(() => marketSettings.value.dynamics, value => {
+  pathModel.kind = value === "constant" ? "gbm" : "bates";
+  pathModel.jumpsEnabled = value === "jumps";
+  Object.assign(pathModelDraft, pathModel);
+});
+watch(() => [pathModel.kind, pathModel.jumpsEnabled], () => {
+  marketSettings.value.dynamics = pathModel.kind === "gbm" ? "constant" : pathModel.jumpsEnabled ? "jumps" : "stochastic";
+});
+
 const exportInProgress = ref(false);
 const cloudPathLimit = ref(5_000);
 const colorMinPercent = ref(15);
@@ -817,13 +865,13 @@ const horizonVolMovePoints = (): number =>
 
 const modelVolMovePoints = computed(() =>
   horizonVolMovePointsFromVolOfVol(
-    pathModel.volOfVol,
+    marketSettings.value.profile?.variance?.sigma ?? marketSettings.value.manual?.volOfVol ?? pathModel.volOfVol,
     appliedParams.T,
   ).toFixed(1),
 );
 
 const modelSpotVolCorrelation = computed(() =>
-  pathModel.correlation.toFixed(2),
+  (marketSettings.value.profile?.variance?.rho ?? marketSettings.value.manual?.correlation ?? pathModel.correlation).toFixed(2),
 );
 
 const setHorizonVolMovePoints = (movePoints: number): void => {
@@ -866,6 +914,11 @@ const setDraftBinsMultiplier = (value: number): void => {
 };
 
 const confirmSimSettings = (): void => {
+  if (pathModelDraft.volOfVol !== pathModel.volOfVol || pathModelDraft.correlation !== pathModel.correlation) {
+    marketSettings.value = { ...marketSettings.value, profile: null, manual: {
+      ...marketSettings.value.manual, volOfVol: pathModelDraft.volOfVol, correlation: pathModelDraft.correlation,
+    } };
+  }
   Object.assign(pathModel, pathModelDraft);
   priceScaleMode.value = graphSettingsDraft.priceScale;
   if (graphSettingsDraft.timeSteps !== simTimeSteps.value) {
@@ -1316,6 +1369,7 @@ const switchUnderlying = (next: UnderlyingValue): void => {
   if (next === underlying.value) return;
   if (!UNDERLYING_OPTIONS.some((opt) => opt.value === next)) return;
   underlying.value = next;
+  forwardController?.abort(); forwardSnapshot.value = null; marketSettings.value.profile = null; marketSettings.value.manual = undefined;
   Object.assign(pathModel, defaultPathModelForUnderlying(next, appliedParams.T));
   Object.assign(pathModelDraft, pathModel);
   positionLegs.value = [];
@@ -1657,7 +1711,14 @@ const strategyStatsRow = computed(() => {
   };
 });
 
+watch(() => [marketSettings.value.shape, instruments.value.length, underlying.value], () => {
+  if (marketSettings.value.shape === "forward" && instruments.value.length && !forwardSnapshot.value && !forwardLoading.value)
+    refreshForwardCurve();
+});
+onUnmounted(() => forwardController?.abort());
+
 const strategySimulationReady = computed(() => {
+  if (marketSettings.value.shape === "forward" && !forwardSnapshot.value) return false;
   if (!defaultTradeInitialized.value) return false;
   if (optionLegs.value.length > 0 && instruments.value.length === 0) {
     return false;
@@ -1865,6 +1926,7 @@ watch(
 </script>
 
 <template>
+  <div class="settings-workspace">
   <main ref="appMainRef" class="app-main">
     <header class="top-bar">
       <div class="top-bar-content">
@@ -1994,9 +2056,9 @@ watch(
                 </button>
               </div>
               <p class="settings-model-note">
-                Variance starts at RV². The 1σ move is converted to vol-of-vol
-                for the selected horizon. Spot/vol correlation controls the skew;
-                there is no mean-reversion or separate long-run volatility target.
+                Manual dynamics use the entered vol-of-vol and realized correlation.
+                Historical estimates in Market assumptions supply the full fitted variance process, including mean reversion.
+                RV or the live forward curve sets the variance budget.
               </p>
 
               <div
@@ -2295,6 +2357,28 @@ watch(
             />
           </section>
 
+      <div class="sim-shared-hedge">
+      <DeltaHedgeToggle :model-value="hedgePolicy.enabled" @update:model-value="hedgePolicy = { ...hedgePolicy, enabled: $event }" />
+      <SettingsSidePanel target="#simulator-settings-dock" title="Hedging & market assumptions">
+        <div class="shared-settings-panels">
+        <DeltaHedgeControls v-model="hedgePolicy" :asset="underlying.slice(0, 3)" :observation-seconds="60" />
+        <MarketAssumptions v-model="marketSettings" :asset="underlying.slice(0, 3)" :forward-available="true" :manual-defaults="effectiveMarketModel.manual">
+          <template v-if="marketSettings.shape === 'forward'">
+            <button type="button" :disabled="forwardLoading" @click="refreshForwardCurve">{{ forwardLoading ? 'Loading live curve…' : 'Refresh live curve' }}</button>
+            <p v-if="forwardSnapshot">Captured {{ new Date(forwardSnapshot.asOf * 1000).toISOString() }} · {{ forwardSnapshot.nodes.length }} expiries.</p>
+            <p v-if="forwardError" role="alert">{{ forwardError }}</p>
+          </template>
+        </MarketAssumptions>
+        </div>
+        <button class="scenario-export" type="button" @click="exportScenario">Export scenario settings</button>
+        <p v-if="strategyError" role="alert">{{ strategyError }}</p>
+        <p v-else-if="strategyRunning" role="status">Updating the one-minute simulation… Larger path counts and longer horizons take more time. Previous results remain visible.</p>
+        <p v-else-if="hedgePolicy.enabled && strategyStats">Mean modeled hedge execution costs {{ strategyStats.meanHedgeFees?.toFixed(2) }} USD ·
+          Mean fills {{ strategyStats.meanHedgeTrades?.toFixed(1) }} per path. Policy edits reuse the same market paths.</p>
+      </SettingsSidePanel>
+      <span v-if="strategyRunning" class="hedge-compute-status" role="status">Updating minute simulation…</span>
+      </div>
+
           <section ref="chartSectionRef" class="chart-section">
 
           <div class="chart-header">
@@ -2437,8 +2521,12 @@ watch(
           <span>{{ ROWS_MAX }}</span>
         </div>
       </div>
+
           <CloudChart
         v-if="strategySimulationReady"
+        :hedge-policy="hedgePolicy"
+        :market-model="effectiveMarketModel"
+        :forward-nodes="forwardSnapshot?.nodes"
         :priceScale="priceScaleMode"
         :seed="seed"
         :params="appliedParams"
@@ -2459,7 +2547,9 @@ watch(
         @set-mu="setMuFromChart"
         @set-vol="setVolFromChart"
         @guide-update="updateGuide"
-        @stats-update="strategyStats = $event"
+        @simulation-start="strategyRunning = true; strategyError = ''"
+        @simulation-error="strategyError = $event; strategyRunning = false"
+        @stats-update="strategyStats = $event; strategyRunning = false"
           />
           <div v-else class="strategy-chart-loading">
             Loading selected option quotes…
@@ -2520,9 +2610,18 @@ watch(
       />
     </div>
   </main>
+  <div id="simulator-settings-dock" class="settings-dock"></div>
+  </div>
 </template>
 
 <style scoped>
+.sim-shared-hedge { grid-area: hedge; display: flex; align-items: center; gap: 4px; min-width: 0; margin: 0; padding: 4px var(--chart-content-right) 8px var(--chart-content-left); font-size: 12px; }
+.shared-settings-panels { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; }
+.hedge-compute-status { margin-left: 8px; color: #999; font-size: 11px; }
+.shared-settings-panels :deep(.market-assumptions) { margin-top: 0; }
+.scenario-export { color: #bbb; background: transparent; border: 1px solid #333; border-radius: 4px; padding: 7px; margin: 12px 0 0; cursor: pointer; font: inherit; }
+.app-main.is-exporting-strategy .sim-shared-hedge { display: none; }
+.sim-shared-hedge p { color: #999; line-height: 1.6; }
 :global(:root) {
   --color-bg: #0a0b0e;
   --color-surface: #131316;
@@ -2548,6 +2647,8 @@ watch(
 }
 
 .app-main {
+  container-type: inline-size;
+  container-name: simulator-workspace;
   /* One centered workspace for the editor and the complete chart group. */
   --workspace-max-width: 1976px;
   --text-primary: var(--color-text);
@@ -2820,6 +2921,7 @@ watch(
   grid-template-columns: 170px minmax(0, 1fr);
   grid-template-areas:
     ". selector"
+    ". hedge"
     "metrics chart";
   align-items: start;
   gap: 8px;
@@ -3746,7 +3848,7 @@ watch(
   }
 }
 
-@media (max-width: 640px) {
+@container simulator-workspace (max-width: 640px) {
   .top-bar-content {
     flex-wrap: wrap;
     height: auto;
@@ -3788,6 +3890,7 @@ watch(
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       "selector"
+      "hedge"
       "metrics"
       "chart";
   }

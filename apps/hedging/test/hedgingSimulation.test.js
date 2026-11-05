@@ -48,11 +48,12 @@ test("disabled costs preserve gross P&L", () => {
   }
 });
 
-test("no hedge adjustments incur no costs", () => {
+test("entry is neutralized immediately even with a wide threshold", () => {
   const result = simulate({ threshold: 2, tolerance: 0, tradingCostRate: HEDGE_TRADING_COST_RATE });
-  assert.equal(result.trades.length, 0);
+  assert.equal(result.trades.length, 1);
+  assert.equal(result.trades[0].trigger, "entry");
   for (const row of result.rows) {
-    assert.equal(row.cumulativeTradingCosts, 0);
-    assert.equal(row.pnlAfterCosts, row.cumulativePnl);
+    close(row.cumulativeTradingCosts, result.trades[0].tradingCost);
+    close(row.pnlAfterCosts, row.cumulativePnl - result.trades[0].tradingCost);
   }
 });

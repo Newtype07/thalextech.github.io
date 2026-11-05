@@ -1,3 +1,5 @@
+import { createMarketProcess, type MarketModel } from "../../../../lib/market-model/path.js";
+import { createDeltaHedge, normalizeHedgePolicy, type HedgePolicy } from "../../../../lib/delta-hedging/index.js";
 import { blackScholesGreeks } from "../lib/blackScholes.ts";
 import { inferOptionStop, hitsOptionStop, type OptionStopComparison } from "../lib/optionStopComparison.ts";
 import { buildTerminalPriceBins, findPriceBinIndex } from "../lib/terminalHistogram.ts";
@@ -28,6 +30,10 @@ type SimWorkerRequest = {
   seed: number;
   params: GBMParams;
   pathModel: PathModelParams;
+  hedgePolicy?: Partial<HedgePolicy>;
+  hedgeObservationSeconds?: number;
+  marketModel?: MarketModel;
+  forwardNodes?: { seconds: number; iv: number }[];
   legs: PositionLeg[];
   optionPricingByLegId: Record<string, OptionPricingInput>;
   valuationTs: number;
@@ -96,6 +102,8 @@ type SimWorkerSuccess = {
   p95Payoff: number;
   maxLossRate: number;
   opportunityCost: number;
+  meanHedgeFees: number;
+  meanHedgeTrades: number;
 };
 
 type SimWorkerError = {
@@ -426,6 +434,7 @@ const positionPnlAt = ({
   futureLegs,
   stopHit,
   stopHitStep,
+  settledOptionPnl,
   dt,
 }: {
   spot: number;
@@ -435,10 +444,16 @@ const positionPnlAt = ({
   futureLegs: PreparedFuturePathLeg[];
   stopHit: Uint8Array | null;
   stopHitStep: Int32Array | null;
+  settledOptionPnl?: Float64Array;
   dt: number;
 }): number => {
   let total = 0;
-  for (const leg of optionLegs) {
+  for (let i = 0; i < optionLegs.length; i++) {
+    const leg = optionLegs[i];
+    if (settledOptionPnl && Number.isFinite(settledOptionPnl[i])) {
+      total += settledOptionPnl[i];
+      continue;
+    }
     const modelPrice = blackScholesGreeks(
       spot,
       leg.strike,
@@ -471,10 +486,27 @@ const positionPnlAt = ({
   return total;
 };
 
+const positionDeltaAt = (spot: number, elapsedYears: number, options: PreparedOptionLeg[], futures: PreparedFuturePathLeg[], stopped: Uint8Array | null): number => {
+  let delta = 0;
+  for (const leg of options) {
+    const remaining = leg.entryRemainingYears - elapsedYears;
+    if (remaining > 1e-12) delta += leg.sign * leg.qty * blackScholesGreeks(spot, leg.strike, remaining, leg.iv, RISK_FREE_RATE, leg.optionType).delta;
+  }
+  for (let i = 0; i < futures.length; i++) if (!stopped?.[i]) delta += futures[i].sign * futures[i].qty;
+  return delta;
+};
+
 export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
-  const steps = Math.max(1, Math.floor(request.params.T / request.params.dt));
+  const sampleSteps = Math.max(1, Math.floor(request.params.T / request.params.dt));
+  // The strategy's price evolution and hedge decisions share a minute clock.
+  // Graph density changes only the sampled output, including with hedging off.
+  const steps = request.hedgeObservationSeconds
+    ? Math.max(1, Math.ceil(request.params.T * SECONDS_PER_YEAR / Math.min(60, request.hedgeObservationSeconds)))
+    : sampleSteps;
+  if (request.hedgeObservationSeconds) request = { ...request, params: { ...request.params, dt: request.params.T / steps } };
   const rows = Math.max(1, Math.floor(request.params.rows));
   const baseline = request.params.s0;
+  const hedgePolicy = request.hedgePolicy?.enabled ? normalizeHedgePolicy(request.hedgePolicy) : null;
   const histBinsCap = clamp(Math.round(request.histBins), 10, 400);
   const histBinsMultiplier = clamp(
     Number(request.histBinsMultiplier ?? 1),
@@ -494,12 +526,14 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
 
   const rng = mulberry32(request.seed);
   const randn = makeRandn(rng);
-  const batesProcess = prepareBatesProcess(request);
+  const marketProcess = request.marketModel ? createMarketProcess({ ...request.marketModel,
+    horizon: steps * request.params.dt * SECONDS_PER_YEAR, nodes: request.forwardNodes }) : null;
+  const batesProcess = marketProcess ? null : prepareBatesProcess(request);
 
   const { hasPositionLegs, optionLegs, futureLegs } = prepareLegs(request);
   // Long call/put combinations compare each exposure independently. Keep
   // spreads with short legs together so their hedge is not discarded.
-  const stopLegGroups = futureLegs.length ? [] : optionLegs.every((leg) => leg.sign > 0)
+  const stopLegGroups = futureLegs.length || hedgePolicy ? [] : optionLegs.every((leg) => leg.sign > 0)
     ? optionLegs.map((leg) => [leg]) : [optionLegs];
   const optionStopGroups = stopLegGroups.flatMap((legs) => {
     const stop = inferOptionStop(baseline,
@@ -516,6 +550,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
   const lowTailPool: TailCandidate[] = [];
   const highTailPool: TailCandidate[] = [];
 
+  let hedgeFeesSum = 0, hedgeTradesSum = 0;
   let pathMin = baseline;
   let pathMax = baseline;
   let finalPriceMin = Number.POSITIVE_INFINITY;
@@ -541,6 +576,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
   for (let r = 0; r < rows; r += 1) {
     const inferredStopHits = new Uint8Array(optionStopGroups.length);
     let s = baseline;
+    const marketState = marketProcess?.createState(baseline);
     const batesState = batesProcess
       ? createBatesState(baseline, batesProcess)
       : null;
@@ -554,7 +590,28 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
       futureLegs.length > 0
         ? new Int32Array(futureLegs.length).fill(-1)
         : null;
-    const pnlAtStep = (elapsedSteps: number): number => hasPositionLegs
+    const settledOptionPnl = new Float64Array(optionLegs.length).fill(NaN);
+    const settleOptions = (years: number) => {
+      for (let i = 0; i < optionLegs.length; i++) {
+        const leg = optionLegs[i];
+        if (leg.entryRemainingYears <= years + 1e-12 && !Number.isFinite(settledOptionPnl[i])) {
+          const intrinsic = leg.optionType === "call" ? Math.max(0, s - leg.strike) : Math.max(0, leg.strike - s);
+          settledOptionPnl[i] = leg.sign * leg.qty * (intrinsic - leg.entryPrice);
+        }
+      }
+    };
+    settleOptions(0);
+    const hedge = hedgePolicy ? createDeltaHedge(hedgePolicy, { observationSeconds: request.params.dt * SECONDS_PER_YEAR }) : null;
+    let hedgeNetPnl = 0;
+    const advanceHedge = (elapsedSteps: number, phase: "entry" | "observe" | "exit") => {
+      if (!hedge) return;
+      const elapsedYears = Math.min(request.params.T, elapsedSteps * request.params.dt);
+      const delta = phase === "exit" && hedgePolicy?.exit === "unwind" ? 0 : hasPositionLegs
+        ? positionDeltaAt(s, elapsedYears, optionLegs, futureLegs, stopHit) : 1;
+      hedgeNetPnl = hedge.observe({ time: elapsedYears * SECONDS_PER_YEAR, price: s, delta, phase }).netPnl ?? 0;
+    };
+    advanceHedge(0, "entry");
+    const pnlAtStep = (elapsedSteps: number): number => (hasPositionLegs
       ? positionPnlAt({
           spot: s,
           elapsedYears: Math.min(request.params.T, elapsedSteps * request.params.dt),
@@ -563,9 +620,10 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
           futureLegs,
           stopHit,
           stopHitStep,
+          settledOptionPnl,
           dt: request.params.dt,
         })
-      : s - baseline;
+      : s - baseline) + hedgeNetPnl;
     let peakPnl = pnlAtStep(0);
 
     for (let c = 0; c < steps; c += 1) {
@@ -587,7 +645,10 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
       const substepVol = request.params.vol * Math.sqrt(substepDt);
 
       for (let substep = 0; substep < substeps; substep += 1) {
-        if (batesProcess && batesState) {
+        if (marketProcess && marketState) {
+          s = marketProcess.advance(marketState, (c * request.params.dt + substep * substepDt) * SECONDS_PER_YEAR,
+            substepDt * SECONDS_PER_YEAR, randn, rng, request.params.mu);
+        } else if (batesProcess && batesState) {
           s = advanceBatesState(
             batesState,
             batesProcess,
@@ -620,6 +681,8 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
         }
       }
       squaredLogReturns += Math.log(s / stepStartPrice) ** 2;
+      settleOptions((c + 1) * request.params.dt);
+      advanceHedge(c + 1, c + 1 === steps ? "exit" : "observe");
       if (c + 1 < steps) peakPnl = Math.max(peakPnl, pnlAtStep(c + 1));
     }
 
@@ -631,7 +694,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
     if (s < finalPriceMin) finalPriceMin = s;
     if (s > finalPriceMax) finalPriceMax = s;
 
-    const total = hasPositionLegs
+    const total = (hasPositionLegs
       ? positionPnlAt({
           spot: s,
           elapsedYears: request.params.T,
@@ -640,9 +703,12 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
           futureLegs,
           stopHit,
           stopHitStep,
+          settledOptionPnl,
           dt: request.params.dt,
         })
-      : s - baseline;
+      : s - baseline) + hedgeNetPnl;
+    hedgeFeesSum += hedge?.ledger.fees ?? 0;
+    hedgeTradesSum += hedge?.ledger.tradeCount ?? 0;
 
     for (let i = 0; i < futureLegs.length; i += 1) {
       const leg = futureLegs[i];
@@ -836,7 +902,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
   const sampleRows = sampleIndices.length;
   const returnSamplePaths = request.returnSamplePaths !== false;
   const sampledPathRows = returnSamplePaths ? sampleRows : 0;
-  const sampledPaths = new Float64Array(sampledPathRows * steps);
+  const sampledPaths = new Float64Array(sampledPathRows * sampleSteps);
   const sampledFinalPrices = new Float64Array(sampleRows);
   const sampledPayoffs = new Float64Array(sampleRows);
 
@@ -851,6 +917,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
     const replayRandn = makeRandn(replayRng);
     for (let r = 0; r < rows; r += 1) {
       let s = baseline;
+      const marketState = marketProcess?.createState(baseline);
       const batesState = batesProcess
         ? createBatesState(baseline, batesProcess)
         : null;
@@ -862,7 +929,8 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
         futureLegs.length > 0
           ? new Int32Array(futureLegs.length).fill(-1)
           : null;
-      const writeOffset = sampleRow != null ? sampleRow * steps : -1;
+      const writeOffset = sampleRow != null ? sampleRow * sampleSteps : -1;
+      let outputIndex = 0;
       for (let c = 0; c < steps; c += 1) {
         const substeps = adaptiveStopSubsteps(
           s,
@@ -880,7 +948,10 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
           (request.params.mu - 0.5 * request.params.vol ** 2) * substepDt;
         const substepVol = request.params.vol * Math.sqrt(substepDt);
         for (let substep = 0; substep < substeps; substep += 1) {
-          if (batesProcess && batesState) {
+          if (marketProcess && marketState) {
+            s = marketProcess.advance(marketState, (c * request.params.dt + substep * substepDt) * SECONDS_PER_YEAR,
+              substepDt * SECONDS_PER_YEAR, replayRandn, replayRng, request.params.mu);
+          } else if (batesProcess && batesState) {
             s = advanceBatesState(
               batesState,
               batesProcess,
@@ -900,7 +971,9 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
           }
         }
         if (writeOffset >= 0) {
-          sampledPaths[writeOffset + c] = s;
+          while (outputIndex < sampleSteps && Math.max(0, Math.ceil((outputIndex + 1) * steps / sampleSteps) - 1) <= c) {
+            sampledPaths[writeOffset + outputIndex++] = s;
+          }
         }
       }
     }
@@ -908,7 +981,7 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
 
   return {
     id: request.id,
-    steps,
+    steps: sampleSteps,
     rows,
     sampleRows,
     sampledPathRows,
@@ -938,6 +1011,8 @@ export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
     p95Payoff,
     maxLossRate,
     opportunityCost,
+    meanHedgeFees: hedgeFeesSum / rows,
+    meanHedgeTrades: hedgeTradesSum / rows,
   };
 };
 

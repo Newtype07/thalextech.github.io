@@ -7,6 +7,7 @@ apps_deployment
 dist
 node_modules
 .vite/
+/DELTA_HEDGING_PLAN.md
 
 # Generated backtest runtime shards; rebuild from the tracked Parquet source.
 /apps/backtest/public/runtime-data/thalex/prepared_1h_h*utc.json
@@ -20,3 +21,7 @@ node_modules
 # Market history caches are rebuilt from the canonical backtest Parquet files.
 /apps/term-structure/public/history-cache/
 /apps/skew/public/history-cache/
+
+# Shared historical calibration profiles are rebuilt from tracked index Parquet.
+/apps/simulator/public/calibration/
+/apps/term-structure/public/calibration/

@@ -1,11 +1,15 @@
 <script setup>
 import * as d3 from "d3";
 import { onMounted, ref, watch } from "vue";
+import { snapTradeWindow } from "../trade-window.js";
 import { exportChartToPng } from "../../../../lib/export-png.js";
 
 const props = defineProps({
   indexData: { type: Array, default: () => [] },
+  observationData: { type: Array, default: () => [] },
+  timeRangeTs: { type: Array, default: null },
   comboData: { type: Array, default: () => [] },
+  hedgeTrades: { type: Array, default: () => [] },
   deltaHedgeEnabled: { type: Boolean, default: false },
   showHigherOrderGreeks: { type: Boolean, default: false },
   optionInstrumentName: { type: String, default: "" },
@@ -49,13 +53,12 @@ let brushedDomain = null;
 let hiddenDetailSeriesKeys = new Set();
 let bottomMode = "mark";
 let resolutionMenuOpen = false;
-let lastResolutionKey = null;
 let lastEmittedTimeAnchorTs = null;
 let lastEmittedTimeRangeKey = null;
 
 const layout = {
   width: 1200,
-  headerHeight: 38,
+  headerHeight: 76,
   topPanelHeight: 300,
   bottomPanelHeight: 420,
   greekEvolutionPanelHeight: 860,
@@ -188,6 +191,7 @@ const normalizeComboPoints = (rows, useHedgedMark = false) =>
         hedge_cumulative_PL: Number(row?.hedge_cumulative_PL),
         hedge_realized_cumulative: Number(row?.hedge_realized_cumulative),
         hedge_unrealized: Number(row?.hedge_unrealized),
+        hedge_fill: row?.hedge_fill ?? null,
       };
     })
     .filter(Boolean)
@@ -280,6 +284,7 @@ const buildMarkTrendSegments = (points, baselineMark) => {
 };
 
 const formatDate = d3.utcFormat("%d %b %y %H:%M");
+const formatBoundaryTime = d3.utcFormat("%H:%M UTC");
 const formatPnl = d3.format("$,.0f");
 const formatMarkAxis = d3.format(",.0f");
 const formatMarkDelta = d3.format("+,.0f");
@@ -536,15 +541,6 @@ const drawResolutionControl = (svg) => {
         resolutionMenuOpen = false;
         const nextKey = String(option?.key ?? "");
         if (nextKey && nextKey !== String(props.resolutionKey)) {
-          brushedDomain = null;
-          if (lastEmittedTimeAnchorTs !== null) {
-            emit("update:timeAnchorTs", null);
-            lastEmittedTimeAnchorTs = null;
-          }
-          if (lastEmittedTimeRangeKey !== null) {
-            emit("update:timeRangeTs", null);
-            lastEmittedTimeRangeKey = null;
-          }
           emit("update:resolutionKey", nextKey);
           return;
         }
@@ -642,41 +638,15 @@ const emitTimeAnchorIfChanged = (
     return;
   }
 
-  let startPoint = points[0];
-  let endPoint = points[points.length - 1];
-  if (Array.isArray(domain) && domain.length === 2 && domain[0] instanceof Date) {
-    const domainStartMs = domain[0].getTime();
-    const domainEndMs = domain[1].getTime();
-    const firstInsideDomain = points.find(
-      (point) => point?.date instanceof Date && point.date.getTime() >= domainStartMs,
-    );
-    const lastInsideDomain = points
-      .slice()
-      .reverse()
-      .find(
-        (point) =>
-          point?.date instanceof Date && point.date.getTime() <= domainEndMs,
-      );
-    startPoint = firstInsideDomain ?? endPoint ?? points[0];
-    endPoint = lastInsideDomain ?? startPoint;
-  }
-
-  const nextAnchorTs = Number.isFinite(Number(startPoint?.ts))
-    ? Number(startPoint.ts)
-    : null;
+  const observations = props.observationData.length ? props.observationData : points;
+  const nextRange = domain ? snapTradeWindow(observations, domain.map(date => date.getTime() / 1000)) : null;
+  const nextAnchorTs = nextRange?.[0] ?? observations[0]?.ts ?? null;
   if (nextAnchorTs !== lastEmittedTimeAnchorTs) {
     emit("update:timeAnchorTs", nextAnchorTs);
     lastEmittedTimeAnchorTs = nextAnchorTs;
   }
-
   if (emitRange) {
-    const startTs = Number(startPoint?.ts);
-    const endTs = Number(endPoint?.ts);
-    const nextRange =
-      Number.isFinite(startTs) && Number.isFinite(endTs)
-        ? [startTs, endTs]
-        : null;
-    const nextRangeKey = nextRange ? `${startTs}:${endTs}` : null;
+    const nextRangeKey = nextRange?.join(":") ?? null;
     if (nextRangeKey !== lastEmittedTimeRangeKey) {
       emit("update:timeRangeTs", nextRange);
       lastEmittedTimeRangeKey = nextRangeKey;
@@ -973,14 +943,15 @@ const render = () => {
   const svgEl = svgRef.value;
   if (!svgEl) return;
 
-  const currentResolutionKey = String(props.resolutionKey ?? "");
-  if (lastResolutionKey != null && currentResolutionKey !== lastResolutionKey) {
-    brushedDomain = null;
-  }
-  lastResolutionKey = currentResolutionKey;
+  brushedDomain = props.timeRangeTs?.map(ts => new Date(ts * 1000)) ?? null;
+  lastEmittedTimeRangeKey = props.timeRangeTs?.join(":") ?? null;
 
   const index = normalizeSeriesPoints(props.indexData, "index_price_close");
   const combo = normalizeComboPoints(props.comboData, props.deltaHedgeEnabled);
+  const executions = (props.hedgeTrades.length
+    ? props.hedgeTrades.map(fill => ({ date: new Date((fill.barTs ?? fill.time) * 1000), hedge_fill: fill }))
+    : combo.filter(point => point.hedge_fill))
+    .filter(point => Number.isFinite(point.date.getTime()) && Number.isFinite(point.hedge_fill?.price) && point.hedge_fill.price > 0);
 
   const innerWidth = layout.width - layout.margin.left - layout.margin.right;
   const topInnerHeight =
@@ -1008,7 +979,10 @@ const render = () => {
     .style("display", "block")
     .style("height", "auto")
     .style("font-family", SVG_FONT_FAMILY)
-    .attr("role", "img");
+    .attr("role", "img")
+    .attr("aria-label", props.deltaHedgeEnabled
+      ? "Index price and combination analytics. Green circles mark hedge buys; red circles mark hedge sells."
+      : "Index price and combination analytics.");
 
   svg.selectAll("*").remove();
   svg.on("click.resolution-menu", () => {
@@ -1059,7 +1033,10 @@ const render = () => {
     .text(props.subtitle || "");
 
   const xDomain = d3.extent(index, (point) => point.date);
-  const yDomain = d3.extent(index, (point) => point.value);
+  const yDomain = d3.extent([
+    ...index.map(point => point.value),
+    ...(props.deltaHedgeEnabled ? executions.filter(point => point.date >= xDomain[0] && point.date <= xDomain[1]).map(point => point.hedge_fill.price) : []),
+  ]);
 
   const xTop = d3.scaleUtc().domain(xDomain).range([0, innerWidth]);
   const yTop = d3
@@ -1187,39 +1164,11 @@ const render = () => {
     }
 
     if (bottomMode === "mark") {
-      const firstVisibleHedgeBaseline = props.deltaHedgeEnabled
-        ? (() => {
-            const baselinePoint = combo
-              .filter((point) => point.date < domainStart)
-              .sort((a, b) => b.date - a.date)
-              .find((point) =>
-                Number.isFinite(point.option_mark_price_close) &&
-                Number.isFinite(point.hedge_cumulative_PL),
-              );
-            return Number.isFinite(baselinePoint?.hedge_cumulative_PL)
-              ? Number(baselinePoint.hedge_cumulative_PL)
-              : 0;
-          })()
-        : 0;
-      const markPoints = comboFiltered
-        .map((point) => {
-          if (!props.deltaHedgeEnabled) return point;
-          const optionMark = Number(point.option_mark_price_close);
-          const hedgeCumulative = Number(point.hedge_cumulative_PL);
-          if (!Number.isFinite(optionMark)) return point;
-          const rebasedHedgePnl = Number.isFinite(hedgeCumulative)
-            ? hedgeCumulative - firstVisibleHedgeBaseline
-            : 0;
-          return {
-            ...point,
-            mark_price_close: optionMark + rebasedHedgePnl,
-          };
-        })
-        .filter((point) => Number.isFinite(point.mark_price_close));
+      const markPoints = comboFiltered.filter(point => Number.isFinite(point.mark_price_close));
       const firstMarkPoint = markPoints[0];
       const lastVisibleMarkPoint = markPoints[markPoints.length - 1];
       const markRoi = formatRoi(
-        lastVisibleMarkPoint?.mark_price_close - firstMarkPoint?.mark_price_close,
+        lastVisibleMarkPoint?.mark_price_close - firstMarkPoint?.option_mark_price_close,
         firstMarkPoint?.option_mark_price_close,
       );
 
@@ -1315,7 +1264,7 @@ const render = () => {
       const firstFinitePoint = markPoints.find((point) =>
         Number.isFinite(point.mark_price_close),
       );
-      const initialMark = Number(firstFinitePoint?.mark_price_close);
+      const initialMark = Number(firstFinitePoint?.option_mark_price_close);
       const baselineMark = Number.isFinite(initialMark) ? initialMark : 0;
 
       const gradientIdSuffix = Math.random().toString(36).slice(2, 9);
@@ -1479,47 +1428,9 @@ const render = () => {
           total,
         };
       });
-      const priorHedgePoint = combo
-        .filter((point) => point.date < domainStart)
-        .sort((a, b) => b.date - a.date)
-        .find(
-          (point) =>
-            Number.isFinite(point.hedge_realized_cumulative) ||
-            Number.isFinite(point.hedge_unrealized) ||
-            Number.isFinite(point.hedge_cumulative_PL),
-        );
-      const baselinePoint = priorHedgePoint
-        ? {
-            realized: Number.isFinite(priorHedgePoint.hedge_realized_cumulative)
-              ? priorHedgePoint.hedge_realized_cumulative
-              : 0,
-            unrealized: Number.isFinite(priorHedgePoint.hedge_unrealized)
-              ? priorHedgePoint.hedge_unrealized
-              : 0,
-            total: Number.isFinite(priorHedgePoint.hedge_cumulative_PL)
-              ? priorHedgePoint.hedge_cumulative_PL
-              : 0,
-          }
-        : {
-            realized: 0,
-            unrealized: 0,
-            total: 0,
-          };
-      const baselineRealized = Number.isFinite(baselinePoint.realized)
-        ? baselinePoint.realized
-        : 0;
-      const baselineUnrealized = Number.isFinite(baselinePoint.unrealized)
-        ? baselinePoint.unrealized
-        : 0;
-      const baselineTotal = Number.isFinite(baselinePoint.total)
-        ? baselinePoint.total
-        : baselineRealized + baselineUnrealized;
-      const rebasedHedgePoints = hedgePoints.map((point) => ({
-        date: point.date,
-        realized: point.realized - baselineRealized,
-        unrealized: point.unrealized - baselineUnrealized,
-        total: point.total - baselineTotal,
-      }));
+      // The replay already starts with a fresh ledger at trade entry. Rebasing
+      // against an older hedge would hide entry costs and inherit old exposure.
+      const rebasedHedgePoints = hedgePoints;
 
       bottomPanelGroup
         .append("text")
@@ -1720,8 +1631,11 @@ const render = () => {
     comboFiltered.forEach((point, indexPoint) => {
       const date = point.date;
       if (indexPoint === 0) {
-        seriesByKey.total.push({ date, value: 0 });
-        seriesByKey.delta.push({ date, value: 0 });
+        const entryHedgePnl = Number.isFinite(point.hedge_cumulative_PL) ? point.hedge_cumulative_PL : 0;
+        cumulative.total = entryHedgePnl;
+        cumulative.delta = entryHedgePnl;
+        seriesByKey.total.push({ date, value: entryHedgePnl });
+        seriesByKey.delta.push({ date, value: entryHedgePnl });
         seriesByKey.gammaTheta.push({ date, value: 0 });
         seriesByKey.vega.push({ date, value: 0 });
         seriesByKey.vanna.push({ date, value: 0 });
@@ -2033,49 +1947,117 @@ const render = () => {
     ])
     .filter((event) => !event.ctrlKey && !event.button && event.detail < 2)
     .on("brush", (event) => {
-      if (!event.selection) {
-        drawBottom(null);
-        emitTimeAnchorIfChanged(index, null, false);
-        return;
-      }
-      const [from, to] = event.selection.map(xTop.invert);
-      const domain = from <= to ? [from, to] : [to, from];
+      if (!event.sourceEvent) return;
+      const domain = event.selection?.map(xTop.invert) ?? null;
+      drawTradeSpotlight(domain);
       drawBottom(domain);
-      emitTimeAnchorIfChanged(index, domain, false);
     })
     .on("end", (event) => {
-      if (!event.selection) {
-        brushedDomain = null;
-        drawBottom(null);
-        emitTimeAnchorIfChanged(index, null, true);
-        return;
-      }
-      const [from, to] = event.selection.map(xTop.invert);
-      brushedDomain = from <= to ? [from, to] : [to, from];
-      drawBottom(brushedDomain);
-      emitTimeAnchorIfChanged(index, brushedDomain, true);
+      if (!event.sourceEvent) return;
+      const domain = event.selection?.map(xTop.invert) ?? null;
+      emitTimeAnchorIfChanged(index, domain, true);
     });
 
   const brushGroup = topGroup.append("g").attr("class", "brush").attr("data-export-exclude", "");
   brushGroup.call(brush);
-  brushGroup.selectAll(".selection").attr("fill-opacity", 0.2);
+  // The trade is the bright area; the brush itself must not darken it.
+  brushGroup.selectAll(".selection").attr("fill", "transparent").attr("stroke", "none");
+  // Keep the resize hit areas without drawing vertical bars over the chart.
+  brushGroup.selectAll(".handle").attr("fill", "transparent").attr("stroke", "none");
+  brushGroup.on("dblclick", () => {
+    brushGroup.call(brush.move, null);
+    emitTimeAnchorIfChanged(index, null, true);
+  });
+  if (brushedDomain) brushGroup.call(brush.move, brushedDomain.map(xTop));
 
-  if (Array.isArray(brushedDomain) && brushedDomain.length === 2) {
-    brushGroup.call(brush.move, [
-      xTop(brushedDomain[0]),
-      xTop(brushedDomain[1]),
-    ]);
+  if (props.deltaHedgeEnabled) {
+    // History points use bar-start timestamps. Place each execution on the
+    // corresponding closing-price observation, and show its actual fill time.
+    const hedgeTrades = executions.filter((point) => {
+      const fill = point.hedge_fill;
+      return fill && Number.isFinite(fill.amount) && fill.amount !== 0 &&
+        Number.isFinite(fill.price) && fill.price > 0 && Number.isFinite(fill.time) &&
+        point.date >= xDomain[0] && point.date <= xDomain[1];
+    });
+    const asset = props.optionInstrumentName.replace(/USD$/, "");
+    const fillTime = d3.utcFormat("%Y-%m-%d %H:%M:%S UTC");
+    topGroup.append("g")
+      .attr("class", "hedge-trades")
+      .selectAll("circle")
+      .data(hedgeTrades)
+      .join("circle")
+      .attr("class", "hedge-trade-dot")
+      .attr("data-side", (point) => point.hedge_fill.amount > 0 ? "buy" : "sell")
+      .attr("cx", (point) => xTop(point.date))
+      .attr("cy", (point) => yTop(point.hedge_fill.price))
+      .attr("r", 4.5)
+      .attr("fill", (point) => point.hedge_fill.amount > 0 ? CHART_COLORS.positive : CHART_COLORS.negative)
+      .attr("stroke", "#000")
+      .attr("stroke-width", .8)
+      .append("title")
+      .text((point) => {
+        const fill = point.hedge_fill;
+        return `${fill.amount > 0 ? "Buy" : "Sell"} ${d3.format(".6~f")(Math.abs(fill.amount))} ${asset}` +
+          ` · ${fillTime(new Date(fill.time * 1000))} · $${d3.format(",.2f")(fill.price)} · ${fill.reason}`;
+      });
+
+    const legend = topGroup.append("g")
+      .attr("class", "hedge-trade-legend")
+      .attr("transform", `translate(${innerWidth - 190},-42)`);
+    [{ label: "Hedge buy", color: CHART_COLORS.positive },
+      { label: "Hedge sell", color: CHART_COLORS.negative }].forEach((item, i) => {
+      legend.append("circle").attr("cx", i * 100).attr("cy", 0).attr("r", 4).attr("fill", item.color);
+      legend.append("text").attr("x", i * 100 + 9).attr("y", 3)
+        .attr("fill", CHART_COLORS.secondaryText).style("font-size", "10px").text(item.label);
+    });
   }
 
+  const tradeBackground = topGroup.insert("rect", ":first-child")
+    .attr("class", "trade-window-background").attr("pointer-events", "none")
+    .attr("y", 0).attr("height", topInnerHeight).attr("fill", "#202020")
+    .attr("display", "none");
+  const spotlight = topGroup.append("g").attr("class", "trade-window-spotlight").attr("pointer-events", "none");
+  function drawTradeSpotlight(domain) {
+    spotlight.selectAll("*").remove();
+    tradeBackground.attr("display", domain ? null : "none");
+    if (!domain) return;
+    const [entryX, exitX] = domain.map(date => Math.max(0, Math.min(innerWidth, xTop(date))));
+    tradeBackground.attr("x", entryX).attr("width", exitX - entryX);
+    spotlight.attr("data-entry-ts", domain[0].getTime() / 1000)
+      .attr("data-exit-ts", domain[1].getTime() / 1000);
+    [{ x: 0, width: entryX, opacity: 0.78 },
+      { x: exitX, width: innerWidth - exitX, opacity: 0.65 }].forEach(shade => {
+      spotlight.append("rect").attr("class", "trade-history-shade")
+        .attr("x", shade.x).attr("y", 0).attr("width", shade.width).attr("height", topInnerHeight + 26)
+        .attr("fill", "#000").attr("fill-opacity", shade.opacity);
+    });
+    const observations = props.observationData.length ? props.observationData : index;
+    const snappedRange = snapTradeWindow(observations, domain.map(date => date.getTime() / 1000));
+    const times = snappedRange?.map(ts => new Date(ts * 1000)) ?? domain;
+    [{ x: entryX, label: "Entry", time: times[0], anchor: "start", offset: 6, y: exitX - entryX < 200 ? -24 : -8 },
+      { x: exitX, label: "Exit", time: times[1], anchor: "end", offset: -6, y: -8 }].forEach(boundary => {
+      spotlight.append("text").attr("class", "trade-boundary-label")
+        .attr("x", boundary.x + boundary.offset).attr("y", boundary.y)
+        .attr("text-anchor", boundary.anchor).attr("fill", CHART_COLORS.secondaryText)
+        .style("font-size", "10px").text(`${boundary.label} · ${formatBoundaryTime(boundary.time)}`)
+        .append("title").text(`${boundary.label} · ${formatDate(boundary.time)} UTC`);
+    });
+  }
+  brushGroup.raise();
+  topGroup.select(".hedge-trades").raise();
+  drawTradeSpotlight(brushedDomain);
   drawBottom(brushedDomain);
-  emitTimeAnchorIfChanged(index, brushedDomain, true);
+  emitTimeAnchorIfChanged(index, brushedDomain, false);
   drawResolutionControl(svg);
 };
 
 watch(
   () => [
     props.indexData,
+    props.observationData,
+    props.timeRangeTs,
     props.comboData,
+    props.hedgeTrades,
     props.deltaHedgeEnabled,
     props.optionInstrumentName,
     props.comboTitle,

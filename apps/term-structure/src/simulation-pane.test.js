@@ -40,7 +40,7 @@ async function compiler(directory) {
   };
 }
 
-test("performance UI runs automatically with fresh paths, inspects, exports, and preserves results across tabs", async (t) => {
+test("performance UI reuses paths on policy edits and refreshes explicitly, inspects, exports, and preserves results across tabs", async (t) => {
   const directory = await mkdtemp(
     fileURLToPath(new URL("../.simulation-test-", import.meta.url)),
   );
@@ -128,7 +128,7 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
     const set = async (label, value) => {
       const element = input(label);
       assert.ok(element, `input exists: ${label}`);
-      element.value = String(value);
+      element.value = String(element.dataset.valueScale ? Number(value) * Number(element.dataset.valueScale) : value);
       element.dispatchEvent(
         new window.Event(element.tagName === "SELECT" ? "change" : "input", {
           bubbles: true,
@@ -165,7 +165,7 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
     await settle();
     assert.ok(
       root().querySelector(".sim-performance"),
-      "ready market data starts a default run without submitting the form",
+      `ready market data starts a default run without submitting the form: ${[...root().querySelectorAll("input")].filter(input => !input.checkValidity()).map(input => `${input.type} ${input.value} step=${input.step} stepMismatch=${input.validity.stepMismatch} missing=${input.validity.valueMissing}`).join("; ")} ${errors.map(error => error.stack).join("\n")}`,
     );
     assert.equal(root().querySelectorAll(".leg-row").length, 2);
     assert.match(root().querySelector(".combination-heading h1").textContent, /^Bitcoin · /);
@@ -219,7 +219,7 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
     const sidebar = root().querySelector('aside[aria-label="Hedge settings"]');
     assert.ok(sidebar);
     assert.notEqual(sidebar.style.display, "none", "hedge settings are open by default");
-    assert.match(root().querySelector(".sim-timer-help").textContent, /resets the timer/);
+    assert.match(root().querySelector(".hedge-explanation").textContent, /resets the timer/);
     assert.equal(button("Update market snapshot"), undefined);
     assert.doesNotMatch(root().textContent, /seed/i);
     const beforeHiding = pathSeed;
@@ -348,6 +348,7 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
       root().querySelector(".index-heading").textContent,
       /annual drift -20.00%/,
     );
+    assert.equal(root().querySelector(".hedge-comparison"), null, "hedge comparison has been removed");
     const firstMetrics = root().querySelector(".sim-performance").textContent;
     await set("Threshold", 0.1);
     assert.ok(root().querySelector(".sim-pending"));
@@ -517,27 +518,26 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
     assert.ok(root().querySelector(".sim-performance"));
     assert.equal(root().querySelectorAll(".leg-row").length, 2, "mode switches preserve legs");
     for (const [label, value] of [
-      ["Period", 60],
-      ["Timer behaviour", "scheduled"],
-      ["Hedge cost", 2],
+      ["Period", 4],
+      ["Hedge execution cost", 2],
       ["Option cost", 2],
     ]) {
       const previousPath = root().querySelector(".index-price-path").getAttribute("d");
       await set(label, value);
       await settle();
-      assert.notEqual(
+      assert.equal(
         root().querySelector(".index-price-path").getAttribute("d"),
         previousPath,
-        `${label} automatically reruns the simulation`,
+        `${label} reruns accounting on the same market path`,
       );
       assert.equal(root().querySelector('[role="alert"]'), null);
     }
-    assert.match(root().querySelector(".sim-timer-help").textContent, /Check net delta every 60 minutes/);
+    assert.match(root().querySelector(".hedge-explanation").textContent, /1 hour. Returning inside resets the timer/);
     const beforeTyping = pathSeed;
     await set("Threshold", 0.11);
     await set("Threshold", 0.12);
     await settle();
-    assert.equal(pathSeed, beforeTyping + 1, "rapid edits are combined into one run");
+    assert.equal(pathSeed, beforeTyping, "policy edits preserve the random path");
     const beforeInvalid = root().querySelector(".index-price-path").getAttribute("d");
     await set("Annual drift", "");
     await settle();
@@ -595,7 +595,7 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
     quantity.value = "2";
     quantity.dispatchEvent(new window.Event("change", { bubbles: true }));
     await settle();
-    assert.notEqual(root().querySelector(".index-price-path").getAttribute("d"), calendarPath);
+    assert.equal(root().querySelector(".index-price-path").getAttribute("d"), calendarPath, "quantity changes preserve the market path");
     assert.equal(root().querySelector('[role="alert"]'), null);
     for (const count of [3, 4]) {
       button("+ Add leg").click();
@@ -744,6 +744,208 @@ test("performance UI runs automatically with fresh paths, inspects, exports, and
       /Waiting for market/,
     );
     assert.equal(button("Refresh simulation").disabled, true);
+    app.unmount();
+
+    const panelFile = await compile(fileURLToPath(new URL("../../../lib/components/SettingsSidePanel.vue", import.meta.url)));
+    const controlsFile = await compile(fileURLToPath(new URL("../../../lib/components/DeltaHedgeControls.vue", import.meta.url)));
+    const toggleFile = await compile(fileURLToPath(new URL("../../../lib/components/DeltaHedgeToggle.vue", import.meta.url)));
+    const { default: SettingsSidePanel } = await import(pathToFileURL(panelFile).href);
+    const { default: DeltaHedgeControls } = await import(pathToFileURL(controlsFile).href);
+    const { default: DeltaHedgeToggle } = await import(pathToFileURL(toggleFile).href);
+    const fixture = reactive({ policy: { enabled: true, threshold: .05, tolerance: .15, period: 1800,
+      timing: "timer", hedgeBps: 1, entry: "neutralize", exit: "unwind" } });
+    let mainClicks = 0;
+    mount({ setup: () => () => h("div", { class: "settings-workspace" }, [
+      h("main", [
+        h("button", { class: "main-action", onClick: () => { mainClicks++; } }, h("span", "Main action")),
+        h("input", { class: "history-window-control", type: "range", min: 100, max: 10000 }),
+        h(DeltaHedgeToggle, { modelValue: fixture.policy.enabled,
+          "onUpdate:modelValue": value => { fixture.policy = { ...fixture.policy, enabled: value }; } }),
+        h(SettingsSidePanel, { target: "#test-settings-dock", title: "Hedge settings" }, {
+          default: () => h(DeltaHedgeControls, { modelValue: fixture.policy,
+            "onUpdate:modelValue": value => { fixture.policy = value; } }),
+        }),
+      ]),
+      h("div", { id: "test-settings-dock", class: "settings-dock" }),
+    ]) });
+    const toggle = root().querySelector('[role="switch"][aria-label="Delta hedge"]');
+    toggle.click(); await nextTick();
+    assert.equal(fixture.policy.enabled, false, "hedging can be disabled with settings closed");
+    assert.equal(toggle.getAttribute("aria-checked"), "false");
+    assert.equal(window.document.querySelector(".settings-side-panel"), null, "the hedge switch does not open settings");
+    toggle.click(); await nextTick();
+    const trigger = root().querySelector(".settings-panel-trigger");
+    assert.equal(trigger.textContent.trim(), "Configure");
+    assert.equal(trigger.getAttribute("aria-label"), "Configure hedge settings");
+    assert.equal(trigger.title, "Open hedge settings side panel");
+    trigger.focus(); trigger.click();
+    await settle();
+    let dialog = window.document.querySelector(".settings-side-panel");
+    assert.equal(dialog.parentElement.id, "test-settings-dock", "the panel occupies its own layout column");
+    assert.equal(dialog.getAttribute("aria-modal"), null, "the dock is nonmodal");
+    const panelToggle = dialog.querySelector('[role="switch"]');
+    assert.ok(panelToggle, "hedging can also be toggled at the top of settings");
+    assert.equal(panelToggle.checked, true);
+    assert.equal(window.document.querySelector(".settings-panel-backdrop"), null);
+    assert.equal(trigger.getAttribute("aria-expanded"), "true");
+    assert.equal(trigger.title, "Close hedge settings side panel");
+    assert.equal(window.document.body.style.overflow, "", "opening keeps page scrolling available");
+    assert.equal(window.document.activeElement.getAttribute("aria-label"), "Close settings");
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1200 });
+    dialog.getBoundingClientRect = () => ({ width: parseFloat(dialog.style.getPropertyValue("--resized-settings-panel-width")) || 420 });
+    window.dispatchEvent(new window.Event("resize"));
+    const divider = dialog.querySelector('[role="separator"]');
+    let capturedPointer = null;
+    divider.setPointerCapture = id => { capturedPointer = id; };
+    divider.hasPointerCapture = id => capturedPointer === id;
+    divider.releasePointerCapture = () => { capturedPointer = null; };
+    const pointer = (type, x) => divider.dispatchEvent(new window.PointerEvent(type,
+      { pointerId: 1, button: 0, isPrimary: true, clientX: x, bubbles: true, cancelable: true }));
+    pointer("pointerdown", 800); pointer("pointermove", 600); pointer("pointerup", 600);
+    await nextTick();
+    assert.equal(divider.getAttribute("aria-valuenow"), "620", "dragging left widens the right-hand panel");
+    assert.equal(capturedPointer, null, "releasing the divider releases pointer capture");
+    divider.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    await nextTick();
+    assert.equal(divider.getAttribute("aria-valuenow"), "600", "the divider can be resized with the keyboard");
+    pointer("pointerdown", 600); pointer("pointermove", -2000);
+    await nextTick();
+    assert.equal(divider.getAttribute("aria-valuenow"), "880", "resizing leaves at least 320 pixels for the main content");
+    pointer("pointermove", 4000); pointer("pointercancel", 4000);
+    await nextTick();
+    assert.equal(divider.getAttribute("aria-valuenow"), "280", "the panel cannot become too narrow to use");
+    assert.equal(dialog.classList.contains("is-resizing"), false, "a cancelled drag releases resize state");
+    divider.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowLeft", shiftKey: true, bubbles: true }));
+    await nextTick();
+    assert.equal(divider.getAttribute("aria-valuenow"), "330");
+    const tabEvent = new window.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    dialog.dispatchEvent(tabEvent);
+    assert.equal(tabEvent.defaultPrevented, false, "keyboard focus can leave the dock");
+    dialog.querySelector("h2").click();
+    await nextTick();
+    assert.ok(window.document.querySelector(".settings-side-panel"), "clicking inside settings keeps the panel open");
+    assert.equal(dialog.querySelectorAll("select").length, 0, "hedge settings use visible choices instead of dropdowns");
+    assert.equal(dialog.querySelectorAll('input[type="range"]').length, 3, "bands and hedge frequency use sliders");
+    assert.equal(dialog.querySelector('input[value="scheduled"]'), null, "timing has one resettable policy");
+    assert.equal(dialog.querySelector('input[value="policy"]'), null, "entry is always neutralized immediately");
+    const tolerance = dialog.querySelectorAll('input[type="range"]')[1];
+    tolerance.value = "20"; tolerance.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await nextTick();
+    assert.equal(fixture.policy.tolerance, .2);
+    assert.equal(dialog.querySelectorAll(".hedge-slider output")[0].textContent, "0.05");
+    assert.equal(dialog.querySelectorAll(".hedge-slider output")[1].textContent, "0.20");
+    assert.equal(fixture.policy.timing, "timer");
+    assert.equal(fixture.policy.entry, "neutralize");
+    const period = dialog.querySelectorAll('input[type="range"]')[2];
+    assert.equal(period.min, "0");
+    assert.equal(period.max, "11", "the slider has twelve distinct timing presets");
+    for (const [step, seconds, text] of [
+      [0, 300, "5 minutes"], [1, 600, "10 minutes"], [2, 900, "15 minutes"], [3, 1800, "30 minutes"],
+      [4, 3600, "1 hour"], [5, 7200, "2 hours"], [6, 10800, "3 hours"], [7, 14400, "4 hours"],
+      [8, 21600, "6 hours"], [9, 28800, "8 hours"], [10, 43200, "12 hours"], [11, 86400, "24 hours"],
+      [4, 3600, "1 hour"], [3, 1800, "30 minutes"],
+    ]) {
+      period.value = String(step); period.dispatchEvent(new window.Event("input", { bubbles: true }));
+      await nextTick();
+      assert.equal(fixture.policy.period, seconds, "each stop selects its exact timing preset in seconds");
+      assert.equal(period.value, String(step));
+      assert.equal(period.getAttribute("aria-valuetext"), text);
+      assert.equal(period.getAttribute("aria-label"), seconds < 3600 ? "Period · minutes" : "Period · hours");
+      assert.ok(dialog.querySelector(".hedge-explanation").textContent.includes(`${text}. Returning inside resets the timer`));
+    }
+    panelToggle.click(); await nextTick();
+    assert.equal(fixture.policy.enabled, false);
+    assert.equal(toggle.checked, false, "the settings toggle updates the external toggle");
+    assert.ok(dialog.querySelector("fieldset").disabled, "disabling hedging updates the open settings");
+    assert.equal(panelToggle.disabled, false, "hedging can be re-enabled while its fields are disabled");
+    assert.ok(window.document.querySelector(".settings-side-panel"), "toggling inside settings keeps the pane open");
+    panelToggle.click(); await nextTick();
+    assert.equal(fixture.policy.enabled, true);
+    assert.equal(toggle.checked, true);
+    assert.equal(dialog.querySelector("fieldset").disabled, false);
+    assert.equal(fixture.policy.tolerance, .2, "switching hedging off and on preserves the policy");
+    pointer("pointerdown", 600);
+    dialog.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle();
+    assert.equal(window.document.querySelector(".settings-side-panel"), null);
+    assert.equal(window.document.body.style.overflow, "");
+    assert.equal(capturedPointer, null, "closing during a drag releases pointer capture");
+    assert.equal(window.document.activeElement, trigger, "closing returns focus to the opener");
+    trigger.click(); await settle();
+    dialog = window.document.querySelector(".settings-side-panel");
+    assert.equal(dialog.querySelector('[role="separator"]').getAttribute("aria-valuenow"), "330", "reopening retains the chosen width");
+    assert.equal(dialog.querySelectorAll('input[type="range"]')[1].value, "20", "reopening preserves settings");
+    const mainAction = root().querySelector(".main-action");
+    mainAction.focus(); mainAction.querySelector("span").click(); await settle();
+    assert.equal(mainClicks, 1, "the outside click still activates its target");
+    assert.ok(window.document.querySelector(".settings-side-panel"), "clicking a button's child keeps settings open");
+    assert.equal(window.document.activeElement, mainAction, "using another control preserves its focus");
+    root().querySelector(".history-window-control").click(); await settle();
+    assert.ok(window.document.querySelector(".settings-side-panel"), "using a time-window slider keeps settings open");
+    root().querySelector("main").click(); await settle();
+    assert.ok(window.document.querySelector(".settings-side-panel"), "a single click on blank space keeps settings open");
+    dialog.querySelector("h2").dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+    await settle();
+    assert.ok(window.document.querySelector(".settings-side-panel"), "double-clicking inside settings keeps the pane open");
+    root().querySelector("main").dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+    await settle();
+    assert.equal(window.document.querySelector(".settings-side-panel"), null, "double-clicking outside closes settings");
+    trigger.click(); await settle();
+    assert.ok(window.document.querySelector(".settings-side-panel"), "the opener is excluded from outside dismissal");
+    trigger.click(); await settle();
+    assert.equal(window.document.querySelector(".settings-side-panel"), null, "the opener can still toggle settings closed");
+    trigger.click(); await settle();
+    toggle.click(); await settle();
+    assert.equal(fixture.policy.enabled, false);
+    assert.ok(window.document.querySelector(".settings-side-panel"), "the separate hedge switch keeps settings open");
+    assert.ok(window.document.querySelector(".settings-side-panel fieldset").disabled);
+    assert.equal(window.document.querySelector('.settings-side-panel [role="switch"]').checked, false, "the external toggle updates the settings toggle");
+    toggle.click(); await settle();
+    assert.equal(fixture.policy.enabled, true);
+    assert.ok(window.document.querySelector(".settings-side-panel"), "switching hedging on keeps settings open");
+    dialog = window.document.querySelector(".settings-side-panel");
+    assert.equal(dialog.querySelectorAll('input[type="range"]')[1].value, "20", "outside dismissal preserves settings");
+    assert.equal(dialog.querySelector('[role="separator"]').getAttribute("aria-valuenow"), "330", "outside dismissal preserves panel width");
+    window.document.querySelector('[aria-label="Close settings"]').click(); await settle();
+    assert.equal(window.document.querySelector(".settings-side-panel"), null, "the close button works");
+    assert.equal(window.document.querySelector("#test-settings-dock").children.length, 0, "closing releases the dock column");
+    app.unmount();
+
+    const comboChartFile = await compile(fileURLToPath(new URL("../../combo-pnl/src/components/Chart.vue", import.meta.url)));
+    const { default: ComboChart } = await import(pathToFileURL(comboChartFile).href);
+    const start = Date.parse("2026-11-04T09:00:00Z") / 1000;
+    const minutes = Array.from({ length: 241 }, (_, i) => ({ ts: start + i * 60,
+      index_price_close: 100 + i / 10, mark_price_close: 10 + i / 100 }));
+    const chartState = reactive({ range: null, resolution: "900" });
+    mount({ setup: () => () => h(ComboChart, {
+      indexData: minutes.filter((_, i) => i % 60 === 0), comboData: minutes,
+      observationData: minutes, timeRangeTs: chartState.range, resolutionKey: chartState.resolution,
+      "onUpdate:timeRangeTs": value => { chartState.range = value; },
+    }) });
+    await nextTick();
+    const chartSvg = root().querySelector("svg");
+    chartSvg.createSVGPoint = undefined; // Use d3's bounding-rectangle pointer path.
+    const brush = root().querySelector(".brush");
+    brush.getBoundingClientRect = () => ({ left: 0, top: 0 });
+    Object.defineProperties(brush, { clientLeft: { value: 0 }, clientTop: { value: 0 } });
+    const xAt = minute => 1088 * minute / 240 + .5;
+    const mouse = (target, type, minute) => target.dispatchEvent(new window.MouseEvent(type,
+      { view: window, clientX: xAt(minute), clientY: 50, button: 0, bubbles: true, cancelable: true }));
+    const labels = () => [...root().querySelectorAll(".trade-boundary-label")].map(node => node.firstChild.textContent);
+    mouse(brush.querySelector(".overlay"), "mousedown", 30);
+    mouse(window, "mousemove", 91);
+    assert.deepEqual(labels(), ["Entry · 09:31 UTC", "Exit · 10:31 UTC"], "drag previews snap to minute observations, independent of coarse chart points");
+    assert.ok([...root().querySelectorAll(".trade-boundary-label")].every(node => Number(node.getAttribute("y")) < 0), "entry and exit labels sit above the plot and selection band");
+    assert.equal(chartState.range, null, "live time labels do not commit the trade while dragging");
+    mouse(window, "mousemove", 151);
+    assert.deepEqual(labels(), ["Entry · 09:31 UTC", "Exit · 11:31 UTC"], "the exit time updates before the mouse is released");
+    mouse(window, "mouseup", 151);
+    await nextTick();
+    assert.deepEqual(chartState.range, [start + 31 * 60, start + 151 * 60]);
+    assert.deepEqual(labels(), ["Entry · 09:31 UTC", "Exit · 11:31 UTC"]);
+    assert.match(root().querySelector(".trade-boundary-label title").textContent, /04 Nov 26 09:31 UTC/);
+    chartState.resolution = "3600"; await nextTick();
+    assert.deepEqual(labels(), ["Entry · 09:31 UTC", "Exit · 11:31 UTC"], "changing chart resolution preserves the selected times");
     assert.deepEqual(errors, []);
   } finally {
     app?.unmount();

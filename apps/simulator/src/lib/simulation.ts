@@ -1,4 +1,6 @@
 export type SimulationStats = {
+  meanHedgeFees?: number;
+  meanHedgeTrades?: number;
   meanPayoff: number;
   medianPayoff: number;
   payoffMin: number;

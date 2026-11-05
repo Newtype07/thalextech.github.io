@@ -1,6 +1,7 @@
 import { calcGreeks, calcOptionPrice } from "../../../../lib/thalex.js";
 import { buildForwardCurve, YEAR } from "./forward-curve.js";
-import { hedgeDecision } from "./delta-hedge.js";
+import { createMarketProcess } from "../../../../lib/market-model/path.js";
+import { createDeltaHedge, normalizeHedgePolicy } from "../../../../lib/delta-hedging/index.js";
 
 export const ATTRIBUTION = [
   {
@@ -48,9 +49,11 @@ function normals(seed) {
     t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-  return () =>
+  const normal = () =>
     Math.sqrt(-2 * Math.log(Math.max(uniform(), 1e-15))) *
     Math.cos(2 * Math.PI * uniform());
+  normal.uniform = uniform;
+  return normal;
 }
 
 function optionRisk(spot, leg, remaining, iv) {
@@ -69,7 +72,6 @@ function validate(config) {
     "spot",
     "horizon",
     "step",
-    "period",
   ];
   const nonnegative = [
     "rvMultiplier",
@@ -77,6 +79,7 @@ function validate(config) {
     "tolerance",
     "hedgeBps",
     "optionBps",
+    "period",
   ];
   if (
     positive.some((key) => !Number.isFinite(config[key]) || config[key] <= 0) ||
@@ -103,22 +106,12 @@ function validate(config) {
   }
   if (config.horizon > Math.max(...config.legs.map(leg => leg.maturity)) + 1e-6)
     throw new Error("Holding period cannot exceed the last option expiry.");
-  if (config.tolerance > 0 && config.tolerance < config.threshold)
-    throw new Error(
-      "Tolerance must be at least the threshold, or zero to disable it.",
-    );
-  if (config.step > config.period)
-    throw new Error("Simulation step must be no longer than the hedge period.");
-  if (
-    config.timing === "scheduled" &&
-    Math.abs(
-      config.period / config.step - Math.round(config.period / config.step),
-    ) > 1e-8
-  ) {
-    throw new Error(
-      "For scheduled checks, choose a period that is a multiple of the simulation step.",
-    );
-  }
+  normalizeHedgePolicy({ threshold: config.threshold, tolerance: config.tolerance,
+    period: config.period, timing: config.timing, hedgeBps: config.hedgeBps });
+  if (config.volatilityShape && !["forward", "flat"].includes(config.volatilityShape))
+    throw new Error("Choose flat RV or forward-curve volatility.");
+  if (config.flatRv != null && (!Number.isFinite(config.flatRv) || config.flatRv < 0))
+    throw new Error("Flat RV must be a nonnegative number.");
 }
 
 /** One spot path, an option position and its net-delta hedge. No fetches or UI state. */
@@ -135,12 +128,17 @@ export function simulatePosition(config) {
       entryPrice: calcOptionPrice(config.spot, leg.strike, leg.maturity, legCurve.entryIv, leg.optionType),
     };
   });
-  const hedgePolicy = {
-    threshold: config.threshold,
-    tolerance: config.tolerance,
-    period: config.period,
-    timing: config.timing,
-  };
+  const hedge = createDeltaHedge({
+    enabled: config.hedgeEnabled !== false,
+    threshold: config.threshold, tolerance: config.tolerance, period: config.period,
+    timing: config.timing, hedgeBps: config.hedgeBps,
+    entry: config.hedgeEntry ?? "neutralize", exit: config.hedgeExit ?? "unwind",
+  }, { observationSeconds: config.step });
+  const flatRv = config.flatRv ?? Math.sqrt(curve.totalVariance * YEAR / config.horizon) * config.rvMultiplier;
+  const marketProcess = createMarketProcess({ ...(config.marketModel ?? {
+    shape: config.volatilityShape ?? "forward", dynamics: "constant", rv: flatRv, rvMultiplier: config.rvMultiplier,
+  }), horizon: config.horizon, nodes: config.nodes });
+  const marketState = marketProcess.createState(config.spot);
   // The path clock never depends on hedging settings: same seed, same moves.
   // Include variance boundaries and the exact exit, even for partial steps.
   const times = new Set([0, config.horizon]);
@@ -172,34 +170,9 @@ export function simulatePosition(config) {
     sum + (settledValues[i] ?? leg.signedQty * calcOptionPrice(
       price, leg.strike, Math.max(0, leg.maturity - elapsed), vols[i], leg.optionType,
     )), 0);
-  let spot = config.spot,
-    position = 0,
-    cash = 0,
-    optionFees = (grossQuantity * spot * config.optionBps) / 10000;
-  let fees = optionFees;
-  let hedgePnl = 0,
-    breachSince = null,
-    previous,
-    previousIvs,
-    sampledVariance = 0;
-  const execute = (elapsed, target, reason, netDeltaBefore) => {
-    const amount = target - position;
-    if (Math.abs(amount) < 1e-12) return;
-    const cost = (Math.abs(amount) * spot * config.hedgeBps) / 10000;
-    cash -= amount * spot;
-    position = target;
-    fees += cost;
-    trades.push({
-      elapsed,
-      spot,
-      amount,
-      position,
-      reason,
-      cost,
-      netDeltaBefore,
-      netDeltaAfter: 0,
-    });
-  };
+  let spot = config.spot;
+  let optionFees = (grossQuantity * spot * config.optionBps) / 10000;
+  let previous, previousIvs, sampledVariance = 0;
   for (const elapsed of clock) {
     const exit = elapsed === config.horizon;
     // Every leg rolls its own remaining variance from the same calendar-time curve.
@@ -211,22 +184,9 @@ export function simulatePosition(config) {
     ).iv;
     if (previous) {
       const dt = elapsed - previous.elapsed;
-      const variance = Math.max(
-        0,
-        curve.varianceAt(elapsed) - curve.varianceAt(previous.elapsed),
-      );
-      const pathVariance = variance * config.rvMultiplier ** 2;
-      const logReturn =
-        (config.drift * dt) / YEAR -
-        0.5 * pathVariance +
-        Math.sqrt(pathVariance) * normal();
-      spot *= Math.exp(logReturn);
-      if (!Number.isFinite(spot) || spot <= 0)
-        throw new Error(
-          "Path overflow. Reduce the drift or volatility settings.",
-        );
-      sampledVariance += logReturn ** 2;
-      hedgePnl += position * (spot - previous.spot);
+      const oldSpot = spot;
+      spot = marketProcess.advance(marketState, previous.elapsed, dt, normal, normal.uniform, config.drift);
+      sampledVariance += Math.log(spot / oldSpot) ** 2;
       const timeValue = optionValueAt(previous.spot, elapsed, previousIvs);
       const rollValue = optionValueAt(previous.spot, elapsed, ivs);
       const endValue = optionValueAt(spot, elapsed, ivs);
@@ -257,28 +217,19 @@ export function simulatePosition(config) {
       return total;
     }, { delta: 0, gamma: 0, vega: 0 });
     const optionDelta = greeks.delta;
-    const netDeltaBefore = optionDelta + position;
-    let trigger = null;
-    if (!previous) {
-      trigger = "entry";
-      execute(elapsed, -optionDelta, trigger, netDeltaBefore);
-    } else if (exit) {
-      trigger = "exit";
-      execute(elapsed, 0, trigger, netDeltaBefore);
-      // Expiring legs cash-settle; later-dated legs close at model marks.
+    if (exit) {
       const closingQuantity = legs.reduce((sum, leg) =>
         sum + (leg.maturity - elapsed > 1e-6 ? Math.abs(leg.signedQty) : 0), 0);
-      const closeFee = (closingQuantity * spot * config.optionBps) / 10000;
-      optionFees += closeFee;
-      fees += closeFee;
-    } else {
-      const decision = hedgeDecision(
-        { elapsed, netDelta: netDeltaBefore, breachSince },
-        hedgePolicy,
-      );
-      breachSince = decision.breachSince;
-      trigger = decision.reason;
-      if (trigger) execute(elapsed, -optionDelta, trigger, netDeltaBefore);
+      optionFees += (closingQuantity * spot * config.optionBps) / 10000;
+    }
+    const hedgeRow = hedge.observe({ time: elapsed, price: spot, delta: exit ? 0 : optionDelta,
+      phase: !previous ? "entry" : exit ? "exit" : "observe" });
+    const { position, cash, netDeltaBefore, reason: trigger } = hedgeRow;
+    const hedgePnl = hedgeRow.grossPnl;
+    const fees = optionFees + hedgeRow.fees;
+    if (hedgeRow.fill) {
+      const fill = hedgeRow.fill;
+      trades.push({ ...fill, elapsed: fill.time, spot: fill.price });
     }
     const optionValue = optionValueAt(spot, elapsed, ivs);
     const optionPnl = optionValue - entryValue;
@@ -297,7 +248,7 @@ export function simulatePosition(config) {
       spot,
       iv,
       forwardVol,
-      rvVol: forwardVol * config.rvMultiplier,
+      rvVol: Math.sqrt(Math.max(0, (marketProcess.varianceAt(Math.min(config.horizon, elapsed + config.step)) - marketProcess.varianceAt(elapsed)) * YEAR / Math.min(config.step, config.horizon - elapsed))) || marketProcess.targetRv,
       optionDelta: exit ? 0 : optionDelta,
       gamma: exit ? 0 : greeks.gamma,
       vega: exit ? 0 : greeks.vega,
@@ -312,7 +263,7 @@ export function simulatePosition(config) {
       position,
       cash,
       netDeltaBefore,
-      netDelta: exit ? 0 : optionDelta + position,
+      netDelta: hedgeRow.netDelta,
       trigger,
       returnOnPremium: pnl / premium,
       buckets: { ...buckets },
@@ -331,9 +282,9 @@ export function simulatePosition(config) {
     entryValue,
     legs: legs.map(({ curve, ...leg }) => leg),
     end: rows.at(-1),
-    targetRv:
-      Math.sqrt((curve.varianceAt(config.horizon) * YEAR) / config.horizon) *
-      config.rvMultiplier,
+    marketModel: { version: marketProcess.modelVersion, daysPerYear: marketProcess.daysPerYear,
+      cappedJumpSteps: marketState.cappedJumpSteps },
+    targetRv: marketProcess.targetRv,
     sampledRv: Math.sqrt((sampledVariance * YEAR) / config.horizon),
     maxDrawdown: rows.reduce(
       (state, row) => ({

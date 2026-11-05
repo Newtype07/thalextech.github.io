@@ -8,6 +8,14 @@ import {
   ref,
   watch,
 } from "vue";
+import DeltaHedgeControls from "../../../lib/components/DeltaHedgeControls.vue";
+import DeltaHedgeToggle from "../../../lib/components/DeltaHedgeToggle.vue";
+import SettingsSidePanel from "../../../lib/components/SettingsSidePanel.vue";
+import { DEFAULT_HEDGE_POLICY } from "../../../lib/delta-hedging/index.js";
+import { applyDeltaHedge, summarizeComboHedge } from "./delta-hedging.js";
+import { tradeChartResolution } from "./chart-resolution.js";
+import { tradeWindowRows } from "./trade-window.js";
+import { createMinuteHistoryLoader } from "../../../lib/minute-history.js";
 import PositionBuilder from "../../../lib/components/PositionBuilder.vue";
 import IndexMarkComboChart from "./components/Chart.vue";
 import {
@@ -38,10 +46,11 @@ const DEFAULT_VOL = 0.4;
 const DEFAULT_T = 30 / 365.25;
 const MARK_CONCURRENCY = 10;
 const LOAD_DEBOUNCE_MS = 140;
+const HEDGE_OBSERVATION_SECONDS = 60;
+const HISTORY_WINDOW_UNIT_SECONDS = 900;
+const loadMinuteIndex = createMinuteHistoryLoader(fetchIndexHistory);
+const loadMinuteMarks = createMinuteHistoryLoader(fetchMarkHistory);
 const GREEK_EVOLUTION_POINT_COUNT = 101;
-const MIN_HEDGE_FREQUENCY_HOURS = 1;
-const MAX_HEDGE_FREQUENCY_HOURS = 24;
-const DEFAULT_HEDGE_FREQUENCY_HOURS = 1;
 
 const UNDERLYING_OPTIONS = [
   { value: "BTCUSD", label: "BTC" },
@@ -51,13 +60,13 @@ const UNDERLYING_OPTIONS = [
 const ui = reactive({
   resolutionKey: "900",
   maxPoints: DEFAULT_MAX_POINTS_PER_FETCH,
-  deltaHedgeEnabled: false,
-  hedgeFrequencyHours: DEFAULT_HEDGE_FREQUENCY_HOURS,
   showHigherOrderGreeks: false,
   loading: false,
   error: "",
 });
 
+const hedgePolicy = ref({ ...DEFAULT_HEDGE_POLICY, enabled: false, exit: "hold" });
+const hedgeError = ref("");
 const underlying = ref("BTCUSD");
 const positionLegs = ref([]);
 
@@ -73,13 +82,30 @@ const indexByName = ref({});
 const indexSeries = ref([]);
 const comboBaseSeries = ref([]);
 const comboSeries = ref([]);
+const minuteIndexSeries = ref([]);
+const minuteComboSeries = ref([]);
+const hedgeTrades = computed(() => minuteComboSeries.value.flatMap(row => row.hedge_fill
+  ? [{ ...row.hedge_fill, barTs: row.ts }] : []));
+const hedgeHistoryGaps = computed(() => minuteComboSeries.value.filter(row => row.hedge_quality?.gap || row.hedge_quality?.missingRisk).length);
+const historyTo = ref(Math.floor(Date.now() / 60000) * 60 - 60);
 const indexHistoryRows = ref([]);
 const markHistoryByInstrument = ref({});
 const chartAnchorTs = ref(null);
 const chartRangeTs = ref(null);
+const tradeMinuteSeries = computed(() => tradeWindowRows(minuteComboSeries.value, chartRangeTs.value));
+const hedgeSummary = computed(() => summarizeComboHedge(tradeMinuteSeries.value));
+const pnlMoney = value => Number.isFinite(value)
+  ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", signDisplay: "exceptZero", maximumFractionDigits: 2 }).format(value)
+  : "—";
+const costMoney = value => Number.isFinite(value)
+  ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(value)
+  : "—";
 const chartLowerMode = ref("mark");
 const chartRef = ref(null);
 const chartBlockRef = ref(null);
+const comboEditorScale = ref(1);
+const comboEditorHeight = ref(null);
+const builderMainRef = ref(null);
 const topSettingsMenuRef = ref(null);
 const bottomSettingsMenuRef = ref(null);
 const settingsOpenTarget = ref(null);
@@ -87,6 +113,7 @@ const settingsLeftPx = ref(null);
 
 let loadRequestId = 0;
 let loadTimer = null;
+let chartResizeObserver = null;
 
 const clampQty = (value) => {
   const n = Number(value);
@@ -224,8 +251,8 @@ const exportPageTitle = computed(() =>
         return `${sign}${formatSignedLegQty(signedQty)} ${entry.instrumentName}`;
       })
       .join(" "),
-    ui.deltaHedgeEnabled
-      ? `Delta-hedged every ${activeHedgeFrequencyHours.value} hours`
+    hedgePolicy.value.enabled
+      ? `Delta hedge: threshold ${hedgePolicy.value.threshold}, tolerance ${hedgePolicy.value.tolerance}, period ${hedgePolicy.value.period / 60} min`
       : "",
   ]
     .filter(Boolean)
@@ -437,59 +464,11 @@ const activeResolutionLabel = computed(() => {
   return Number.isFinite(seconds) && seconds > 0 ? `${seconds}s` : "n/a";
 });
 
-const minSupportedHedgeFrequencyHours = computed(() => {
-  const resolutionHours = Math.ceil(activeResolutionSeconds.value / (60 * 60));
-  if (!Number.isFinite(resolutionHours)) return MIN_HEDGE_FREQUENCY_HOURS;
-  return Math.max(
-    MIN_HEDGE_FREQUENCY_HOURS,
-    Math.min(MAX_HEDGE_FREQUENCY_HOURS, resolutionHours),
-  );
-});
-
-const selectedHedgeFrequencyHours = computed(() => {
-  const hours = Math.round(Number(ui.hedgeFrequencyHours));
-  if (!Number.isFinite(hours)) return DEFAULT_HEDGE_FREQUENCY_HOURS;
-  return Math.max(
-    MIN_HEDGE_FREQUENCY_HOURS,
-    Math.min(MAX_HEDGE_FREQUENCY_HOURS, hours),
-  );
-});
-
-const activeHedgeFrequencyHours = computed(() => {
-  return Math.max(
-    minSupportedHedgeFrequencyHours.value,
-    selectedHedgeFrequencyHours.value,
-  );
-});
-
-const activeHedgeIntervalSeconds = computed(
-  () => activeHedgeFrequencyHours.value * 60 * 60,
-);
-
-const activeHedgeFrequencyLabel = computed(
-  () => `${activeHedgeFrequencyHours.value}h`,
-);
-
-const hedgeFrequencyControlTitle = computed(() => {
-  if (activeHedgeFrequencyHours.value > selectedHedgeFrequencyHours.value) {
-    return `Effective rebalance: ${activeHedgeFrequencyLabel.value}, limited by ${activeResolutionLabel.value} candles`;
-  }
-  return `Rebalance every ${activeHedgeFrequencyLabel.value}`;
-});
-
 const getTimestampRange = () => {
-  const now = Math.floor(Date.now() / 1000);
-  const resolutionConfig = RESOLUTION_CONFIG[ui.resolutionKey];
-  const resolution = resolutionConfig?.resolution;
-  const seconds =
-    resolutionConfig?.interval_seconds ?? Number(ui.resolutionKey) ?? 0;
-  const safeSeconds = Number.isFinite(seconds) && seconds > 0 ? seconds : 900;
-  // Align to the candle grid so each resolution fetches a consistent count.
-  const to = now - (now % safeSeconds);
   return {
-    resolution,
-    from: to - safeSeconds * (maxPointsPerFetch.value - 1),
-    to,
+    resolution: "1m",
+    from: historyTo.value - HISTORY_WINDOW_UNIT_SECONDS * (maxPointsPerFetch.value - 1),
+    to: historyTo.value,
   };
 };
 
@@ -498,17 +477,22 @@ const toggleSettings = (target) => {
     settingsOpenTarget.value === target ? null : target;
 };
 
-const alignSettingsToBuilderMinusX = () => {
+const alignSettingsToBuilderMinusX = async () => {
   const chartBlockEl = chartBlockRef.value;
   if (!chartBlockEl) return;
   const chartRect = chartBlockEl.getBoundingClientRect();
+  // Match the SVG's 1200-unit viewBox scale without reflowing the leg table.
+  comboEditorScale.value = Math.min(1, Math.max(1, chartRect.width) / 1200);
+  await nextTick();
+  const editor = builderMainRef.value?.querySelector(".comboPositionBuilder");
+  if (editor) comboEditorHeight.value = editor.getBoundingClientRect().height;
   const removeBtn = document.querySelector(".builderMain .remove-btn");
   if (!(removeBtn instanceof HTMLElement)) return;
   const removeRect = removeBtn.getBoundingClientRect();
   const centeredLeft =
     removeRect.left - chartRect.left + (removeRect.width - 22) / 2;
   if (!Number.isFinite(centeredLeft)) return;
-  settingsLeftPx.value = Math.round(centeredLeft);
+  settingsLeftPx.value = Math.round(Math.max(0, Math.min(centeredLeft, chartRect.width - 22)));
 };
 
 const settingsWrapStyle = computed(() => {
@@ -566,7 +550,7 @@ const loadInitialAnchoredIndexSnapshot = async () => {
   const indexName = underlying.value;
   try {
     const { resolution, from, to } = getTimestampRange();
-    const rows = await fetchIndexHistory({
+    const rows = await loadMinuteIndex({
       index_name: indexName,
       resolution,
       from,
@@ -658,8 +642,8 @@ const resolveGreekEvolutionState = (anchorTs, label) => {
     .filter(Boolean);
 
   if (!legs.length || legs.length !== selected.length) return null;
-  const hedgeRow = ui.deltaHedgeEnabled
-    ? getLastRowAtOrBefore(comboSeries.value, ts)
+  const hedgeRow = hedgePolicy.value.enabled
+    ? getLastRowAtOrBefore(minuteComboSeries.value, ts)
     : null;
   const hedgeRatio = Number(hedgeRow?.hedge_ratio);
   return {
@@ -810,134 +794,31 @@ const rebuildBuilderSnapshots = () => {
   }
 };
 
-const applyTimeBasedDeltaHedge = (rows, intervalSeconds) => {
-  const points = Array.isArray(rows) ? rows : [];
-  const safeInterval = Number(intervalSeconds);
-  const nextRows = points.map((row) => ({
-    ...row,
-    hedge_PL: 0,
-    hedge_cumulative_PL: 0,
-    hedge_realized_cumulative: 0,
-    hedge_unrealized: 0,
-    hedged_mark_price_close: Number(row?.mark_price_close),
-    hedge_ratio: null,
-    hedge_rehedge: false,
-  }));
-
-  let hedgePosition = 0;
-  let avgEntryPrice = null;
-  let lastRehedgeTs = null;
-  let realizedHedgePnl = 0;
-  let prevTotalHedgePnl = 0;
-
-  for (let i = 0; i < nextRows.length; i += 1) {
-    const row = nextRows[i];
-    const indexOpen = Number(row?.index_price_open);
-    const indexClose = Number(row?.index_price_close);
-    const combinedDelta = Number(row?.combined_delta);
-    const shouldRehedge =
-      Number.isFinite(indexClose) &&
-      Number.isFinite(combinedDelta) &&
-      (i === 0 ||
-        !Number.isFinite(lastRehedgeTs) ||
-        !Number.isFinite(safeInterval) ||
-        safeInterval <= 0 ||
-        row.ts - lastRehedgeTs >= safeInterval);
-
-    if (shouldRehedge) {
-      const tradePrice =
-        i === 0 && Number.isFinite(indexOpen) ? indexOpen : indexClose;
-      const targetPosition = -combinedDelta;
-      const tradeQty = targetPosition - hedgePosition;
-      const hasTrade = Math.abs(tradeQty) > 1e-12;
-
-      if (hasTrade) {
-        const hasOpenPosition = Math.abs(hedgePosition) > 1e-12;
-        const sameDirection = hasOpenPosition && hedgePosition * tradeQty > 0;
-
-        if (!hasOpenPosition || sameDirection) {
-          const entryPrice = Number.isFinite(avgEntryPrice)
-            ? avgEntryPrice
-            : tradePrice;
-          const prevNotional = hasOpenPosition
-            ? Math.abs(hedgePosition) * entryPrice
-            : 0;
-          const nextQtyAbs = Math.abs(hedgePosition + tradeQty);
-          const nextNotional = prevNotional + Math.abs(tradeQty) * tradePrice;
-          avgEntryPrice = nextQtyAbs > 0 ? nextNotional / nextQtyAbs : null;
-          hedgePosition += tradeQty;
-        } else {
-          const closingQty = Math.min(Math.abs(hedgePosition), Math.abs(tradeQty));
-          const entryPrice = Number.isFinite(avgEntryPrice)
-            ? avgEntryPrice
-            : tradePrice;
-
-          if (hedgePosition > 0) {
-            realizedHedgePnl += closingQty * (tradePrice - entryPrice);
-          } else {
-            realizedHedgePnl += closingQty * (entryPrice - tradePrice);
-          }
-
-          const remainingQtyAbs = Math.abs(tradeQty) - closingQty;
-          if (remainingQtyAbs <= 1e-12) {
-            hedgePosition += tradeQty;
-            if (Math.abs(hedgePosition) <= 1e-12) {
-              hedgePosition = 0;
-              avgEntryPrice = null;
-            }
-          } else {
-            hedgePosition = Math.sign(tradeQty) * remainingQtyAbs;
-            avgEntryPrice = tradePrice;
-          }
-        }
-      }
-
-      lastRehedgeTs = row.ts;
-      row.hedge_ratio = hedgePosition;
-      row.hedge_rehedge = true;
-    }
-
-    row.hedge_ratio = hedgePosition;
-    const unrealizedHedgePnl =
-      Number.isFinite(indexClose) &&
-      Math.abs(hedgePosition) > 1e-12 &&
-      Number.isFinite(avgEntryPrice)
-        ? hedgePosition * (indexClose - avgEntryPrice)
-        : 0;
-    const totalHedgePnl = realizedHedgePnl + unrealizedHedgePnl;
-    const periodHedgePnl = totalHedgePnl - prevTotalHedgePnl;
-    prevTotalHedgePnl = totalHedgePnl;
-
-    row.hedge_PL = periodHedgePnl;
-    row.hedge_unrealized = unrealizedHedgePnl;
-    row.hedge_realized_cumulative = realizedHedgePnl;
-    row.hedge_cumulative_PL = totalHedgePnl;
-
-    const optionMark = Number(row?.mark_price_close);
-    row.hedged_mark_price_close = Number.isFinite(optionMark)
-      ? optionMark + totalHedgePnl
-      : totalHedgePnl;
-
-    const optionPL = Number(row?.PL);
-    row.PL = Number.isFinite(optionPL) ? optionPL + periodHedgePnl : periodHedgePnl;
-  }
-
-  return nextRows;
+const rebuildChartSeries = () => {
+  indexSeries.value = tradeChartResolution(minuteIndexSeries.value, activeResolutionSeconds.value, chartRangeTs.value);
+  comboSeries.value = tradeChartResolution(minuteComboSeries.value, activeResolutionSeconds.value, chartRangeTs.value);
 };
-
+const clearChartSeries = () => {
+  minuteIndexSeries.value = [];
+  minuteComboSeries.value = [];
+  comboBaseSeries.value = [];
+  rebuildChartSeries();
+};
 const rebuildDisplayedComboSeries = () => {
-  comboSeries.value = ui.deltaHedgeEnabled
-    ? applyTimeBasedDeltaHedge(
-        comboBaseSeries.value,
-        activeHedgeIntervalSeconds.value,
-      )
-    : [...comboBaseSeries.value];
+  try {
+    minuteComboSeries.value = hedgePolicy.value.enabled
+      ? applyDeltaHedge(comboBaseSeries.value, hedgePolicy.value, HEDGE_OBSERVATION_SECONDS, chartRangeTs.value)
+      : [...comboBaseSeries.value];
+    rebuildChartSeries();
+    hedgeError.value = "";
+  } catch (error) { hedgeError.value = error.message; }
 };
 
 const loadSeries = async () => {
   const requestId = ++loadRequestId;
 
   if (hasUnsupportedLegs.value) {
+    clearChartSeries();
     ui.error = "Only option legs are supported in Option Strike.";
     indexSeries.value = [];
     comboBaseSeries.value = [];
@@ -951,6 +832,7 @@ const loadSeries = async () => {
 
   const selected = selectedLegInstruments.value;
   if (!selected.length) {
+    clearChartSeries();
     ui.error = "";
     indexSeries.value = [];
     comboBaseSeries.value = [];
@@ -967,12 +849,12 @@ const loadSeries = async () => {
   ui.error = "";
 
   try {
-    const indexRows = await fetchIndexHistory({
+    const indexRows = await loadMinuteIndex({
       index_name: activeIndexName.value,
       resolution,
       from,
       to,
-    });
+    }, () => requestId === loadRequestId);
 
     const markByInstrument = {};
     await runWithConcurrency(
@@ -980,12 +862,12 @@ const loadSeries = async () => {
       MARK_CONCURRENCY,
       async (instrumentName) => {
         markByInstrument[instrumentName] =
-          (await fetchMarkHistory({
+          (await loadMinuteMarks({
             instrument_name: instrumentName,
             resolution,
             from,
             to,
-          })) || [];
+          }, () => requestId === loadRequestId)) || [];
       },
     );
 
@@ -1010,8 +892,8 @@ const loadSeries = async () => {
         const map = new Map();
         for (const row of markByInstrument[entry.instrumentName] || []) {
           const ts = Number(row?.ts);
-          const markClose = Number(row?.mark_price_close);
-          const ivClose = Number(row?.iv_close);
+          const markClose = row?.mark_price_close == null ? NaN : Number(row.mark_price_close);
+          const ivClose = row?.iv_close == null ? NaN : Number(row.iv_close);
           if (!Number.isFinite(ts) || !Number.isFinite(markClose)) continue;
           map.set(ts, {
             markClose,
@@ -1040,6 +922,7 @@ const loadSeries = async () => {
           label: entry.label,
           optionType: entry.optionType,
           strike: entry.strike,
+          expirationTs: entry.expirationTs,
           byTs: map,
           greeksPnlByTs,
         };
@@ -1047,6 +930,7 @@ const loadSeries = async () => {
       .filter((entry) => entry.byTs.size > 0);
 
     if (legSeries.length !== selected.length) {
+      clearChartSeries();
       indexSeries.value = [];
       comboBaseSeries.value = [];
       comboSeries.value = [];
@@ -1062,8 +946,8 @@ const loadSeries = async () => {
     for (const ts of baseTs) {
       if (!legSeries.every((entry) => entry.byTs.has(ts))) continue;
       const indexRow = indexByTs.get(ts);
-      const indexClose = Number(indexRow?.index_price_close);
-      if (!Number.isFinite(indexClose)) continue;
+      const indexClose = indexRow?.index_price_close == null ? NaN : Number(indexRow.index_price_close);
+      if (!Number.isFinite(indexClose) || indexClose <= 0) continue;
 
       let totalMark = 0;
       let ivSum = 0;
@@ -1086,7 +970,7 @@ const loadSeries = async () => {
       let hasCharmPL = false;
       let hasVommaPL = false;
       let hasResidualPL = false;
-      let hasCombinedDelta = false;
+      let validDeltaLegs = 0;
       let hasCombinedGamma = false;
       for (const entry of legSeries) {
         const point = entry.byTs.get(ts);
@@ -1130,12 +1014,17 @@ const loadSeries = async () => {
           totalResidualPL += signedQty * Number(legPnlPoint.residual_PL);
           hasResidualPL = true;
         }
-        if (Number.isFinite(legPnlPoint?.delta)) {
-          totalCombinedDelta += signedQty * Number(legPnlPoint.delta);
-          hasCombinedDelta = true;
+        const remaining = entry.expirationTs - ts - HEDGE_OBSERVATION_SECONDS;
+        const closingRisk = remaining <= 0 ? { delta: 0, gamma: 0 }
+          : Number.isFinite(point.ivClose) && point.ivClose > 0
+            ? calcGreeks(indexClose, entry.strike, remaining, point.ivClose, entry.optionType)
+            : { delta: null, gamma: null };
+        if (Number.isFinite(closingRisk.delta)) {
+          totalCombinedDelta += signedQty * closingRisk.delta;
+          validDeltaLegs++;
         }
-        if (Number.isFinite(legPnlPoint?.gamma)) {
-          totalCombinedGamma += signedQty * Number(legPnlPoint.gamma);
+        if (Number.isFinite(closingRisk.gamma)) {
+          totalCombinedGamma += signedQty * closingRisk.gamma;
           hasCombinedGamma = true;
         }
       }
@@ -1165,12 +1054,12 @@ const loadSeries = async () => {
         charm_PL: hasCharmPL ? totalCharmPL : null,
         vomma_PL: hasVommaPL ? totalVommaPL : null,
         residual_PL: hasResidualPL ? totalResidualPL : null,
-        combined_delta: hasCombinedDelta ? totalCombinedDelta : null,
+        combined_delta: validDeltaLegs === legSeries.length ? totalCombinedDelta : null,
         combined_gamma: hasCombinedGamma ? totalCombinedGamma : null,
       });
     }
 
-    indexSeries.value = top;
+    minuteIndexSeries.value = top;
     comboBaseSeries.value = bottom;
     rebuildDisplayedComboSeries();
 
@@ -1180,6 +1069,7 @@ const loadSeries = async () => {
     rebuildBuilderSnapshots();
   } catch (error) {
     if (requestId !== loadRequestId) return;
+    clearChartSeries();
     ui.error = error instanceof Error ? error.message : String(error);
     indexSeries.value = [];
     comboBaseSeries.value = [];
@@ -1204,7 +1094,7 @@ const scheduleLoad = () => {
 };
 
 watch(
-  () => [ui.resolutionKey, maxPointsPerFetch.value, positionLegs.value],
+  () => [maxPointsPerFetch.value, positionLegs.value],
   () => {
     scheduleLoad();
   },
@@ -1212,11 +1102,13 @@ watch(
 );
 
 watch(
-  () => [ui.deltaHedgeEnabled, activeHedgeIntervalSeconds.value],
+  () => hedgePolicy.value,
   () => {
     rebuildDisplayedComboSeries();
   },
 );
+watch(activeResolutionSeconds, rebuildChartSeries);
+watch(chartRangeTs, rebuildDisplayedComboSeries);
 
 watch(
   () => [
@@ -1236,6 +1128,7 @@ const switchUnderlying = async (next) => {
   if (next === underlying.value) return;
   if (!UNDERLYING_OPTIONS.some((opt) => opt.value === next)) return;
   underlying.value = next;
+  clearChartSeries();
   positionLegs.value = [];
   chartRangeTs.value = null;
   indexHistoryRows.value = [];
@@ -1259,6 +1152,9 @@ const switchUnderlying = async (next) => {
 onMounted(async () => {
   document.addEventListener("pointerdown", handleDocumentPointerDown);
   window.addEventListener("resize", alignSettingsToBuilderMinusX);
+  chartResizeObserver = new ResizeObserver(alignSettingsToBuilderMinusX);
+  if (chartBlockRef.value) chartResizeObserver.observe(chartBlockRef.value);
+  if (builderMainRef.value?.firstElementChild) chartResizeObserver.observe(builderMainRef.value.firstElementChild);
   allInstruments.value = (await fetchAllInstruments()) || [];
 
   await loadInitialAnchoredIndexSnapshot();
@@ -1276,6 +1172,7 @@ onUnmounted(() => {
   if (loadTimer) clearTimeout(loadTimer);
   document.removeEventListener("pointerdown", handleDocumentPointerDown);
   window.removeEventListener("resize", alignSettingsToBuilderMinusX);
+  chartResizeObserver?.disconnect();
 });
 
 watch(
@@ -1289,6 +1186,7 @@ watch(
 </script>
 
 <template>
+  <div class="settings-workspace combo-workspace">
   <div class="appRoot">
     <div class="underlyingRow">
       <div class="underlyingActions">
@@ -1319,9 +1217,10 @@ watch(
       </button>
     </div>
     <div class="builderRow">
-      <div class="builderMain">
+      <div ref="builderMainRef" class="builderMain" :style="{ '--combo-editor-scale': comboEditorScale, height: comboEditorHeight === null ? undefined : `${comboEditorHeight}px` }">
         <PositionBuilder
           class="comboPositionBuilder"
+          title=""
           :legs="positionLegs"
           :spot="spot"
           :vol="DEFAULT_VOL"
@@ -1337,34 +1236,31 @@ watch(
       </div>
     </div>
 
-    <div class="hedgeControls" role="group" aria-label="Delta hedging">
-      <button
-        type="button"
-        class="deltaHedgeButton"
-        :class="{ deltaHedgeButtonActive: ui.deltaHedgeEnabled }"
-        :title="hedgeFrequencyControlTitle"
-        @click="ui.deltaHedgeEnabled = !ui.deltaHedgeEnabled"
-      >
-        {{ ui.deltaHedgeEnabled ? "− Delta hedge" : "+ Delta hedge" }}
-      </button>
-      <label
-        class="hedgeFrequencyControl"
-        :class="{ hedgeFrequencyControlDisabled: !ui.deltaHedgeEnabled }"
-        :title="hedgeFrequencyControlTitle"
-      >
-        <span class="hedgeFrequencyLabel">Every</span>
-        <input
-          v-model.number="ui.hedgeFrequencyHours"
-          class="hedgeFrequencySlider"
-          type="range"
-          :min="minSupportedHedgeFrequencyHours"
-          :max="MAX_HEDGE_FREQUENCY_HOURS"
-          step="1"
-          :disabled="!ui.deltaHedgeEnabled"
-        />
-        <span class="hedgeFrequencyValue">{{ activeHedgeFrequencyLabel }}</span>
-      </label>
+    <div class="sharedHedgeSettings">
+      <DeltaHedgeToggle :model-value="hedgePolicy.enabled" @update:model-value="hedgePolicy = { ...hedgePolicy, enabled: $event }" />
+      <SettingsSidePanel target="#combo-settings-dock" title="Hedge settings">
+      <DeltaHedgeControls v-model="hedgePolicy" :asset="underlying.slice(0, 3)" :observation-seconds="HEDGE_OBSERVATION_SECONDS" />
+      <section v-if="hedgePolicy.enabled && hedgeSummary" class="hedge-run-summary" aria-label="Selected trade hedge results">
+        <dl class="hedge-pnl-breakdown">
+          <div><dt>Option P&amp;L</dt><dd>{{ pnlMoney(hedgeSummary.optionPnl) }}</dd></div>
+          <div><dt>Hedge P&amp;L · after execution costs</dt><dd>{{ pnlMoney(hedgeSummary.hedgePnl) }}</dd></div>
+          <div class="hedge-pnl-total"><dt>Total P&amp;L</dt><dd>{{ pnlMoney(hedgeSummary.totalPnl) }}</dd></div>
+        </dl>
+        <p>Hedge trading P&amp;L before costs: {{ pnlMoney(hedgeSummary.grossHedgePnl) }}.
+          Modeled execution costs: {{ costMoney(hedgeSummary.executionCosts) }}. Exchange trading fees are not separately itemized.</p>
+        <p>{{ hedgeSummary.triggers.period }} hedges triggered by period · {{ hedgeSummary.triggers.tolerance }} by tolerance.
+          Entry: {{ hedgeSummary.triggers.entry }} · Exit: {{ hedgeSummary.triggers.exit }}<template v-if="hedgeSummary.triggers.other"> · Other: {{ hedgeSummary.triggers.other }}</template> · {{ hedgeSummary.fills }} fills in total.</p>
+        <p>For the selected trade window. Total P&amp;L = option P&amp;L + hedge P&amp;L after execution costs.
+          Option P&amp;L is mark-to-mark; option execution costs, funding and basis are excluded.
+          Chart {{ activeResolutionLabel }}; hedging stays on the one-minute replay.</p>
+      </section>
+      <p v-if="hedgePolicy.enabled && hedgeHistoryGaps" class="hedge-run-summary" role="status">
+        {{ hedgeHistoryGaps }} gaps or missing risk observations. The threshold timer restarts after each gap; missing prices or risk are not interpolated.
+      </p>
+      </SettingsSidePanel>
     </div>
+    <p v-if="hedgeError" class="error" role="alert">{{ hedgeError }}</p>
+
 
     <div class="statusRow" v-if="ui.loading || ui.error">
       <span v-if="ui.loading">Loading mark history...</span>
@@ -1388,7 +1284,7 @@ watch(
         ></button>
         <div v-if="settingsOpenTarget === 'top'" class="settingsDropdown">
           <div class="settingsHint">
-            Choose the number of data points to load: {{ maxPointsPerFetch }}
+            History window · {{ ((maxPointsPerFetch - 1) * HISTORY_WINDOW_UNIT_SECONDS / 86400).toFixed(1) }} days
           </div>
           <input
             v-model.number="ui.maxPoints"
@@ -1437,8 +1333,11 @@ watch(
       <IndexMarkComboChart
         ref="chartRef"
         :index-data="indexSeries"
+        :observation-data="minuteIndexSeries"
+        :time-range-ts="chartRangeTs"
         :combo-data="comboSeries"
-        :delta-hedge-enabled="ui.deltaHedgeEnabled"
+        :hedge-trades="hedgeTrades"
+        :delta-hedge-enabled="hedgePolicy.enabled"
         :option-instrument-name="activeIndexName"
         :subtitle="chartSubtitle"
         :loading="ui.loading"
@@ -1453,10 +1352,22 @@ watch(
       />
     </div>
   </div>
+  <div id="combo-settings-dock" class="settings-dock"></div>
+  </div>
 </template>
 
 <style scoped>
+.combo-workspace { --settings-panel-width: 50vw; }
+.hedge-run-summary { color: #aaa; font-size: 11px; line-height: 1.6; margin-top: 20px; }
+.hedge-run-summary p { margin: 10px 0 0; }
+.hedge-pnl-breakdown { margin: 0; color: #ddd; }
+.hedge-pnl-breakdown > div { display: flex; justify-content: space-between; gap: 16px; padding: 5px 0; }
+.hedge-pnl-breakdown dd { margin: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hedge-pnl-total { border-top: 1px solid #353539; margin-top: 4px; color: #fff; }
+.sharedHedgeSettings { display: flex; align-items: center; gap: 4px; margin: 12px 28px; font-size: 12px; }
 .appRoot {
+  container-type: inline-size;
+  container-name: combo-workspace;
   --selector-section-width: 100%;
   max-width: 1320px;
   margin: 0 auto;
@@ -1748,11 +1659,20 @@ watch(
 
 .builderMain {
   flex: 1 1 auto;
+  width: 100%;
   min-width: 0;
 }
 
 .builderMain > .comboPositionBuilder {
   padding-bottom: 0;
+  width: calc(100% / var(--combo-editor-scale, 1));
+  transform: scale(var(--combo-editor-scale, 1));
+  transform-origin: top left;
+}
+
+.builderMain :deep(.builder-heading) {
+  box-sizing: border-box;
+  padding-left: calc(8px / var(--combo-editor-scale, 1));
 }
 
 .hedgeControls {
@@ -1904,7 +1824,9 @@ watch(
   .appRoot {
     padding: 18px 14px 20px;
   }
+}
 
+@container combo-workspace (max-width: 900px) {
   .settingsWrap--chart {
     right: 12px;
   }
@@ -1916,6 +1838,10 @@ watch(
   .builderRow {
     flex-direction: column;
     gap: 10px;
+  }
+
+  .builderMain :deep(.builder-heading) {
+    padding-left: 0;
   }
 
   .underlyingRow {

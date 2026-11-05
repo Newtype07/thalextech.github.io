@@ -290,7 +290,7 @@ test("invalid simulation inputs and excessive work fail explicitly", () => {
     { tolerance: 0.01 },
     { horizon: 8 * DAY },
     { step: 0.01 },
-    { timing: "scheduled", period: 301 },
+    { timing: "scheduled", period: 0 },
   ]) {
     assert.throws(() => simulateStraddle(config(input)));
   }
@@ -367,4 +367,14 @@ test("option-only payoff summary has exact break-evens and correct bounded/unbou
   assert.throws(() =>
     straddlePayoff({ strike: 100, entryPrice: NaN, quantity: 1, side: "buy" }),
   );
+});
+
+ test("irregular scheduled periods and flat RV reuse a policy-independent clock", () => {
+  const forward = simulateStraddle(config());
+  const flat = simulateStraddle(config({ volatilityShape: "flat", flatRv: forward.targetRv }));
+  assert.deepEqual(forward.rows.map(row => row.elapsed), flat.rows.map(row => row.elapsed));
+  assert.notDeepEqual(forward.rows.map(row => row.spot), flat.rows.map(row => row.spot));
+  near(flat.targetRv, forward.targetRv);
+  const irregular = simulateStraddle(config({ timing: "scheduled", period: 301 }));
+  assert.ok(irregular.trades.some(trade => trade.reason === "scheduled"));
 });

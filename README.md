@@ -16,6 +16,19 @@ The app's central chart container owns the editor width. The builder fills that 
 For charts with internal SVG margins, align the editor to the plotted content using the chart's layout values. Simulator shares its chart width and margins between the renderer and the editor's responsive insets.
 
 
+### Shared delta hedging and market assumptions
+
+`lib/delta-hedging/` owns threshold/tolerance decisions, sustained-breach timers, fill accounting and observed-path replay. Simulator, Combo P&L, Term Structure and Hedging use the same engine and `lib/components/DeltaHedgeControls.vue`. Simulator and Combo P&L dock settings beside the main content using the shared `SettingsSidePanel.vue`, which owns the two-column layout and stacks it on narrow screens.
+
+The interactive controls now expose threshold, tolerance and period sliders, a resettable threshold timer, immediate entry neutralization, and an exit choice. Legacy scheduled/entry-policy fields remain supported by the replay API for saved scenarios. Combo P&L splits the chart and settings equally and loads closed one-minute observations through bounded, cached pages in `lib/minute-history.js`; chart resolution aggregates the completed replay without fetching, changing the history window, or changing fills and costs. All minute fills remain visible as trade markers. The dedicated Hedging app also evaluates at one minute and samples results for display. Missing observations reset the threshold timer and are not interpolated or replaced by coarse history.
+
+Strategy Monte Carlo paths use a separate one-minute evaluation clock, including when hedging is off; the graph step count only controls sampled output. This preserves outcomes across display resolutions without allocating a full minute-path matrix. Fine evaluation is more expensive: a local 100-path, 14-day GBM run with hedging and sampled output took about 0.7 seconds. Large path counts and long horizons take substantially longer; slider changes cancel obsolete worker runs. Term Structure continues to evaluate on its existing one-minute clock.
+
+`lib/market-model/` owns flat/forward variance schedules, stochastic/jump paths and historical calibration profiles. Simulator and Term Structure generate small BTC/ETH lookback profiles from the tracked Backtest index Parquet in their prebuild/predev steps. The browser loads profiles, not Parquet. `MarketAssumptions.vue` applies estimates explicitly and records the training date; realized return/variance-shock correlation is used. Live forward snapshots remain separate from historical calibration.
+
+Run shared regression tests with `node --test lib/delta-hedging/*.test.js lib/market-model/*.test.js`, then each consumer's `npm test` and `npm run build`. See [the implementation plan](DELTA_HEDGING_PLAN.md) for model conventions and remaining calibration work.
+
+
 ## Automated Secrets Scanning
 
 The build pipeline automatically scans pull requests for leaked secrets before

@@ -9,6 +9,8 @@ import {
   type PathModelParams,
 } from "../lib/pathModel";
 import type { PositionLeg } from "../lib/position";
+import type { MarketModel } from "../../../../lib/market-model/path.js";
+import type { HedgePolicy } from "../../../../lib/delta-hedging/index.js";
 import type { OptionStopComparison } from "../lib/optionStopComparison";
 import {
   buildBinnedCumulativeEV,
@@ -45,6 +47,9 @@ const props = defineProps<{
   seed: number;
   params: GBMParams;
   pathModel: PathModelParams;
+  hedgePolicy?: Partial<HedgePolicy>;
+  marketModel?: MarketModel;
+  forwardNodes?: { seconds: number; iv: number }[];
   priceScale?: "log" | "linear";
   valuationTs?: number;
   muMin?: number;
@@ -79,6 +84,8 @@ const emit = defineEmits<{
   (event: "set-vol", value: number): void;
   (event: "guide-update", value: { mu: number; vol: number }): void;
   (event: "stats-update", value: SimulationStats): void;
+  (event: "simulation-start"): void;
+  (event: "simulation-error", message: string): void;
   (event: "comparison-stats-update", value: SimulationStats): void;
   (
     event: "payoff-difference-update",
@@ -243,6 +250,10 @@ type SimWorkerRequest = {
   seed: number;
   params: GBMParams;
   pathModel: PathModelParams;
+  hedgePolicy?: Partial<HedgePolicy>;
+  hedgeObservationSeconds?: number;
+  marketModel?: MarketModel;
+  forwardNodes?: { seconds: number; iv: number }[];
   legs: PositionLeg[];
   optionPricingByLegId: Record<string, OptionPricingInput>;
   valuationTs: number;
@@ -382,6 +393,8 @@ type SimWorkerSuccess = {
   p95Payoff: number;
   maxLossRate: number;
   opportunityCost: number;
+  meanHedgeFees: number;
+  meanHedgeTrades: number;
 };
 
 type SimWorkerError = {
@@ -418,6 +431,8 @@ type SimComputation = {
   p95Payoff: number;
   maxLossRate: number;
   opportunityCost: number;
+  meanHedgeFees: number;
+  meanHedgeTrades: number;
 };
 
 const sanitizeParamsForWorker = (params: GBMParams): GBMParams => ({
@@ -590,6 +605,8 @@ const handleWorkerMessage = (
     p95Payoff: payload.p95Payoff,
     maxLossRate: payload.maxLossRate,
     opportunityCost: payload.opportunityCost,
+    meanHedgeFees: payload.meanHedgeFees,
+    meanHedgeTrades: payload.meanHedgeTrades,
   });
 };
 
@@ -2697,6 +2714,7 @@ const draw = async (): Promise<void> => {
   const canvasCtx = canvas.getContext("2d");
   if (!canvasCtx) return;
   const drawSeq = ++latestDrawSeq;
+  emit("simulation-start");
 
   let sim: SimComputation;
   let comparisonSim: SimComputation | null = null;
@@ -2743,6 +2761,10 @@ const draw = async (): Promise<void> => {
         : undefined;
     sim = await requestSimulation({
       seed: props.seed,
+      hedgePolicy: props.hedgePolicy ? { ...props.hedgePolicy } : undefined,
+      hedgeObservationSeconds: props.hedgePolicy ? 60 : undefined,
+      marketModel: props.marketModel ? JSON.parse(JSON.stringify(props.marketModel)) : undefined,
+      forwardNodes: props.forwardNodes ? JSON.parse(JSON.stringify(props.forwardNodes)) : undefined,
       params: workerParams,
       pathModel: sanitizePathModel(props.pathModel),
       legs: sanitizeLegsForWorker(props.legs),
@@ -2761,6 +2783,7 @@ const draw = async (): Promise<void> => {
     if (props.comparisonLegs?.length) {
       comparisonSim = await requestSimulation({
         seed: props.seed,
+        hedgeObservationSeconds: props.hedgePolicy ? 60 : undefined,
         params: workerParams,
         pathModel: sanitizePathModel(props.pathModel),
         legs: sanitizeLegsForWorker(props.comparisonLegs),
@@ -2784,6 +2807,7 @@ const draw = async (): Promise<void> => {
       message !== "Simulation worker disposed"
     ) {
       console.error("Failed to compute simulation in worker", error);
+      emit("simulation-error", message);
     }
     return;
   }
@@ -2804,6 +2828,8 @@ const draw = async (): Promise<void> => {
     winRate: sim.winRate,
     maxLossRate: sim.maxLossRate,
     opportunityCost: sim.opportunityCost,
+    meanHedgeFees: sim.meanHedgeFees,
+    meanHedgeTrades: sim.meanHedgeTrades,
     breakEvenPrices: computeBreakEvenPrices(sim.bins),
   });
   if (comparisonSim) {
@@ -2839,13 +2865,21 @@ const draw = async (): Promise<void> => {
 
 const scheduleDraw = (): void => {
   drawQueued = true;
+  // Minute-level runs can be expensive. Stop an obsolete worker immediately
+  // rather than calculating every intermediate slider position in sequence.
+  if (drawInFlight && pendingSimRequests.size) {
+    latestDrawSeq++;
+    simWorker?.terminate();
+    simWorker = null;
+    cancelPendingSimRequests("Simulation request superseded");
+  }
   if (drawScheduleTimer != null) {
     clearTimeout(drawScheduleTimer);
   }
   drawScheduleTimer = setTimeout(() => {
     drawScheduleTimer = null;
     void runDrawQueue();
-  }, 16);
+  }, props.hedgePolicy ? 160 : 16);
 };
 
 const runDrawQueue = async (): Promise<void> => {
@@ -2875,6 +2909,9 @@ watch(
     props.params.dt,
     props.params.rows,
     JSON.stringify(sanitizePathModel(props.pathModel)),
+    JSON.stringify(props.hedgePolicy),
+    JSON.stringify(props.marketModel),
+    JSON.stringify(props.forwardNodes),
     props.payoffDisplayMode == null ? props.priceScale ?? "log" : "linear",
     props.histBins,
     props.histBinsMultiplier,
