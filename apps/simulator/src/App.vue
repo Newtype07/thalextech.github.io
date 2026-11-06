@@ -4,9 +4,6 @@ import MarketAssumptions from "../../../lib/components/MarketAssumptions.vue";
 import { fetchForwardSnapshot } from "../../../lib/market-model/live-curve.js";
 import type { MarketModel } from "../../../lib/market-model/path.js";
 import SettingsSidePanel from "../../../lib/components/SettingsSidePanel.vue";
-import DeltaHedgeControls from "../../../lib/components/DeltaHedgeControls.vue";
-import DeltaHedgeToggle from "../../../lib/components/DeltaHedgeToggle.vue";
-import { DEFAULT_HEDGE_POLICY, type HedgePolicy } from "../../../lib/delta-hedging/index.js";
 import CloudChart from "./components/CloudChart.vue";
 import PositionBuilder from "../../../lib/components/PositionBuilder.vue";
 import StopLossSimulator from "./components/StopLossSimulator.vue";
@@ -20,7 +17,7 @@ import {
   volOfVolFromHorizonMovePoints,
 } from "./lib/pathModel";
 import type { PositionLeg, OptionLeg } from "./lib/position";
-import { STRATEGY_OBSERVATION_SECONDS, type SimulationStats } from "./lib/simulation";
+import type { SimulationStats } from "./lib/simulation";
 import {
   fetchInstruments,
   fetchLatestIndexPrice,
@@ -66,7 +63,7 @@ const SETTINGS_TOOLTIPS = {
   correlation:
     "Correlation between spot-price and volatility shocks. Negative values make volatility tend to rise when spot falls.",
   timeSteps:
-    "Number of points shown per simulated path. Strategy paths and hedge decisions use a separate hourly clock.",
+    "Number of simulation steps per path. Active stop levels may use finer sampling.",
   pathLimit:
     "Maximum sampled paths rendered in the cloud. This changes visual density, not the number of outcomes used for statistics.",
   binsMultiplier:
@@ -87,7 +84,6 @@ const EXPORT_HTML_FONT_SCALE = 1.05;
 const generateSeed = (): number => Math.floor(Math.random() * 1_000_000_000);
 const seed = ref(generateSeed());
 const strategyRunning = ref(false), strategyError = ref("");
-const hedgePolicy = ref<HedgePolicy>({ ...DEFAULT_HEDGE_POLICY, enabled: false });
 const marketSettings = ref<MarketModel>({ shape: "flat", dynamics: "stochastic", rv: .4, rvMultiplier: 1, lookbackDays: 90, profile: null });
 const forwardSnapshot = ref<Awaited<ReturnType<typeof fetchForwardSnapshot>> | null>(null);
 const forwardLoading = ref(false), forwardError = ref("");
@@ -104,7 +100,6 @@ async function refreshForwardCurve() {
 }
 function exportScenario() {
   const data = { version: 1, seed: seed.value, asset: underlying.value, params: { ...appliedParams },
-    hedgePolicy: hedgePolicy.value, hedgeObservationSeconds: STRATEGY_OBSERVATION_SECONDS,
     marketModel: effectiveMarketModel.value, forwardSnapshot: forwardSnapshot.value,
     legs: positionLegs.value, pricing: optionPricingByLegId.value, valuationTs: quoteValuationTs.value,
     modelVersion: "variance-schedule-v1", executionModel: "observed-price-v1" };
@@ -2357,34 +2352,20 @@ watch(
             />
           </section>
 
-      <div class="sim-shared-hedge">
-      <DeltaHedgeToggle :model-value="hedgePolicy.enabled" @update:model-value="hedgePolicy = { ...hedgePolicy, enabled: $event }" />
-      <SettingsSidePanel target="#simulator-settings-dock" title="Hedging & market assumptions">
-        <template #header-actions>
-          <DeltaHedgeToggle :model-value="hedgePolicy.enabled" @update:model-value="hedgePolicy = { ...hedgePolicy, enabled: $event }" />
-        </template>
-        <div class="shared-settings-panels">
-        <DeltaHedgeControls v-model="hedgePolicy" :asset="underlying.slice(0, 3)" :observation-seconds="STRATEGY_OBSERVATION_SECONDS" :show-toggle="false">
-          <MarketAssumptions v-model="marketSettings" :asset="underlying.slice(0, 3)" :forward-available="true" :manual-defaults="effectiveMarketModel.manual">
-            <template v-if="marketSettings.shape === 'forward'">
-              <button type="button" :disabled="forwardLoading" @click="refreshForwardCurve">{{ forwardLoading ? 'Loading live curve…' : 'Refresh live curve' }}</button>
-              <p v-if="forwardSnapshot">Captured {{ new Date(forwardSnapshot.asOf * 1000).toISOString() }} · {{ forwardSnapshot.nodes.length }} expiries.</p>
-              <p v-if="forwardError" role="alert">{{ forwardError }}</p>
-            </template>
-          </MarketAssumptions>
-          <button class="scenario-export" type="button" @click="exportScenario">Export scenario settings</button>
-          <p v-if="strategyError" role="alert">{{ strategyError }}</p>
-          <p v-else-if="strategyRunning" role="status">Updating the hourly simulation… Larger path counts and longer horizons take more time. Previous results remain visible.</p>
-          <p v-else-if="hedgePolicy.enabled && strategyStats">Mean modeled hedge execution costs {{ strategyStats.meanHedgeFees?.toFixed(2) }} USD ·
-            Mean fills {{ strategyStats.meanHedgeTrades?.toFixed(1) }} per path. Policy edits reuse the same market paths.</p>
-          <template #explanation>
-            <p>Simulator checks hedges hourly. Threshold and tolerance breaches between observations are not captured.</p>
-          </template>
-        </DeltaHedgeControls>
-        </div>
-      </SettingsSidePanel>
-      <span v-if="strategyRunning" class="hedge-compute-status" role="status">Updating hourly simulation…</span>
-      </div>
+          <div class="sim-market-settings">
+            <SettingsSidePanel target="#simulator-settings-dock" title="Market assumptions">
+              <MarketAssumptions v-model="marketSettings" :asset="underlying.slice(0, 3)" :forward-available="true" :manual-defaults="effectiveMarketModel.manual">
+                <template v-if="marketSettings.shape === 'forward'">
+                  <button type="button" :disabled="forwardLoading" @click="refreshForwardCurve">{{ forwardLoading ? 'Loading live curve…' : 'Refresh live curve' }}</button>
+                  <p v-if="forwardSnapshot">Captured {{ new Date(forwardSnapshot.asOf * 1000).toISOString() }} · {{ forwardSnapshot.nodes.length }} expiries.</p>
+                  <p v-if="forwardError" role="alert">{{ forwardError }}</p>
+                </template>
+              </MarketAssumptions>
+              <button class="scenario-export" type="button" @click="exportScenario">Export scenario settings</button>
+            </SettingsSidePanel>
+            <span v-if="strategyError" class="simulation-status" role="alert">{{ strategyError }}</span>
+            <span v-else-if="strategyRunning" class="simulation-status" role="status">Updating simulation…</span>
+          </div>
 
           <section ref="chartSectionRef" class="chart-section">
 
@@ -2512,7 +2493,6 @@ watch(
 
           <CloudChart
         v-if="strategySimulationReady"
-        :hedge-policy="hedgePolicy"
         :market-model="effectiveMarketModel"
         :forward-nodes="forwardSnapshot?.nodes"
         :priceScale="priceScaleMode"
@@ -2591,13 +2571,11 @@ watch(
 </template>
 
 <style scoped>
-.sim-shared-hedge { grid-area: hedge; display: flex; align-items: center; gap: 4px; min-width: 0; margin: 0; padding: 4px var(--chart-content-right) 8px var(--chart-content-left); font-size: 12px; }
-.shared-settings-panels { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; }
-.hedge-compute-status { margin-left: 8px; color: #999; font-size: 11px; }
-.shared-settings-panels :deep(.market-assumptions) { margin-top: 24px; }
+.sim-market-settings { grid-area: assumptions; display: flex; align-items: center; gap: 4px; min-width: 0; margin: 0; padding: 4px var(--chart-content-right) 8px var(--chart-content-left); font-size: 12px; }
+.simulation-status { margin-left: 8px; color: #999; font-size: 11px; }
 .scenario-export { color: #bbb; background: transparent; border: 1px solid #333; border-radius: 4px; padding: 7px; margin: 12px 0 0; cursor: pointer; font: inherit; }
-.app-main.is-exporting-strategy .sim-shared-hedge { display: none; }
-.sim-shared-hedge p { color: #999; line-height: 1.6; }
+.app-main.is-exporting-strategy .sim-market-settings { display: none; }
+.sim-market-settings p { color: #999; line-height: 1.6; }
 :global(:root) {
   --color-bg: #0a0b0e;
   --color-surface: #131316;
@@ -2888,7 +2866,7 @@ watch(
   grid-template-columns: 170px minmax(0, 1fr);
   grid-template-areas:
     ". selector"
-    ". hedge"
+    ". assumptions"
     "metrics chart";
   align-items: start;
   gap: 8px;
@@ -3781,7 +3759,7 @@ watch(
 }
 
 @container simulator-workspace (max-width: 1400px) {
-  .sim-shared-hedge {
+  .sim-market-settings {
     flex-wrap: wrap;
   }
 
@@ -3832,7 +3810,7 @@ watch(
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       "selector"
-      "hedge"
+      "assumptions"
       "metrics"
       "chart";
   }
