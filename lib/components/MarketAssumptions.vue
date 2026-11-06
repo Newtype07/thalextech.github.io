@@ -3,6 +3,7 @@ import { computed, ref, watch, onBeforeUnmount } from "vue";
 import { loadCalibrationProfile } from "../market-model/profiles.js";
 const props = defineProps({ modelValue: { type: Object, required: true }, asset: { type: String, required: true },
   forwardAvailable: { type: Boolean, default: false }, showManual: { type: Boolean, default: true },
+  showForwardRatio: { type: Boolean, default: true },
   manualDefaults: { type: Object, default: () => ({ volOfVol: .5, correlation: 0, jumpIntensity: 0, jumpMean: 0, jumpVol: 0 }) } });
 const emit = defineEmits(["update:modelValue"]);
 const loading = ref(false), message = ref(""), estimate = ref(null);
@@ -47,7 +48,7 @@ const date = ts => new Date(ts * 1000).toISOString().slice(0, 10);
       </select></label>
       <label v-if="settings.shape === 'flat'">Flat RV · %<input :value="settings.rv * 100" type="number" min="0" step="any" required
         @input="update('rv', $event.target.value === '' ? NaN : Number($event.target.value) / 100)" /></label>
-      <label v-else>RV / forward IV<input :value="settings.rvMultiplier" type="number" min="0" step="any" required
+      <label v-else-if="showForwardRatio">RV / forward IV<input :value="settings.rvMultiplier" type="number" min="0" step="any" required
         @input="update('rvMultiplier', $event.target.value === '' ? NaN : Number($event.target.value))" /></label>
       <label>Historical lookback<select :value="settings.lookbackDays ?? 90" @change="update('lookbackDays', Number($event.target.value))">
         <option v-for="days in [30, 90, 180, 365]" :key="days" :value="days">{{ days }} days</option>

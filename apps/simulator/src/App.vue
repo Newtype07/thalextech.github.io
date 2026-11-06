@@ -2360,21 +2360,25 @@ watch(
       <div class="sim-shared-hedge">
       <DeltaHedgeToggle :model-value="hedgePolicy.enabled" @update:model-value="hedgePolicy = { ...hedgePolicy, enabled: $event }" />
       <SettingsSidePanel target="#simulator-settings-dock" title="Hedging & market assumptions">
+        <template #header-actions>
+          <DeltaHedgeToggle :model-value="hedgePolicy.enabled" @update:model-value="hedgePolicy = { ...hedgePolicy, enabled: $event }" />
+        </template>
         <div class="shared-settings-panels">
-        <DeltaHedgeControls v-model="hedgePolicy" :asset="underlying.slice(0, 3)" :observation-seconds="60" />
-        <MarketAssumptions v-model="marketSettings" :asset="underlying.slice(0, 3)" :forward-available="true" :manual-defaults="effectiveMarketModel.manual">
-          <template v-if="marketSettings.shape === 'forward'">
-            <button type="button" :disabled="forwardLoading" @click="refreshForwardCurve">{{ forwardLoading ? 'Loading live curve…' : 'Refresh live curve' }}</button>
-            <p v-if="forwardSnapshot">Captured {{ new Date(forwardSnapshot.asOf * 1000).toISOString() }} · {{ forwardSnapshot.nodes.length }} expiries.</p>
-            <p v-if="forwardError" role="alert">{{ forwardError }}</p>
-          </template>
-        </MarketAssumptions>
+        <DeltaHedgeControls v-model="hedgePolicy" :asset="underlying.slice(0, 3)" :observation-seconds="60" :show-toggle="false">
+          <MarketAssumptions v-model="marketSettings" :asset="underlying.slice(0, 3)" :forward-available="true" :manual-defaults="effectiveMarketModel.manual">
+            <template v-if="marketSettings.shape === 'forward'">
+              <button type="button" :disabled="forwardLoading" @click="refreshForwardCurve">{{ forwardLoading ? 'Loading live curve…' : 'Refresh live curve' }}</button>
+              <p v-if="forwardSnapshot">Captured {{ new Date(forwardSnapshot.asOf * 1000).toISOString() }} · {{ forwardSnapshot.nodes.length }} expiries.</p>
+              <p v-if="forwardError" role="alert">{{ forwardError }}</p>
+            </template>
+          </MarketAssumptions>
+          <button class="scenario-export" type="button" @click="exportScenario">Export scenario settings</button>
+          <p v-if="strategyError" role="alert">{{ strategyError }}</p>
+          <p v-else-if="strategyRunning" role="status">Updating the one-minute simulation… Larger path counts and longer horizons take more time. Previous results remain visible.</p>
+          <p v-else-if="hedgePolicy.enabled && strategyStats">Mean modeled hedge execution costs {{ strategyStats.meanHedgeFees?.toFixed(2) }} USD ·
+            Mean fills {{ strategyStats.meanHedgeTrades?.toFixed(1) }} per path. Policy edits reuse the same market paths.</p>
+        </DeltaHedgeControls>
         </div>
-        <button class="scenario-export" type="button" @click="exportScenario">Export scenario settings</button>
-        <p v-if="strategyError" role="alert">{{ strategyError }}</p>
-        <p v-else-if="strategyRunning" role="status">Updating the one-minute simulation… Larger path counts and longer horizons take more time. Previous results remain visible.</p>
-        <p v-else-if="hedgePolicy.enabled && strategyStats">Mean modeled hedge execution costs {{ strategyStats.meanHedgeFees?.toFixed(2) }} USD ·
-          Mean fills {{ strategyStats.meanHedgeTrades?.toFixed(1) }} per path. Policy edits reuse the same market paths.</p>
       </SettingsSidePanel>
       <span v-if="strategyRunning" class="hedge-compute-status" role="status">Updating minute simulation…</span>
       </div>
@@ -2618,7 +2622,7 @@ watch(
 .sim-shared-hedge { grid-area: hedge; display: flex; align-items: center; gap: 4px; min-width: 0; margin: 0; padding: 4px var(--chart-content-right) 8px var(--chart-content-left); font-size: 12px; }
 .shared-settings-panels { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; }
 .hedge-compute-status { margin-left: 8px; color: #999; font-size: 11px; }
-.shared-settings-panels :deep(.market-assumptions) { margin-top: 0; }
+.shared-settings-panels :deep(.market-assumptions) { margin-top: 24px; }
 .scenario-export { color: #bbb; background: transparent; border: 1px solid #333; border-radius: 4px; padding: 7px; margin: 12px 0 0; cursor: pointer; font: inherit; }
 .app-main.is-exporting-strategy .sim-shared-hedge { display: none; }
 .sim-shared-hedge p { color: #999; line-height: 1.6; }

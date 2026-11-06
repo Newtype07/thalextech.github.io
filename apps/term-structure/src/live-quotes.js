@@ -1,6 +1,28 @@
 import { bookMidIv } from "./volatility.js";
 import { takeThalexRequest, reportThalexStreamError } from "./thalex-rest.js";
 
+// An ATM snapshot needs the listed call/put brackets, not every wing ticker.
+// Check the listed ladder so a partial stream cannot look ready merely because
+// interpolation can fall back to the first (possibly distant) quote received.
+export function readyAtmExpiries(chain, quotes, spot) {
+  const ready = new Set();
+  if (!(spot > 0)) return ready;
+  const available = new Set(quotes.map(quote => quote.name));
+  const byExpiry = new Map();
+  for (const instrument of chain) {
+    if (!byExpiry.has(instrument.expiry)) byExpiry.set(instrument.expiry, []);
+    byExpiry.get(instrument.expiry).push(instrument);
+  }
+  for (const [expiry, instruments] of byExpiry) {
+    const strikes = [...new Set(instruments.map(instrument => instrument.strike))].sort((a, b) => a - b);
+    const low = strikes.findLast(strike => strike <= spot) ?? strikes[0];
+    const high = strikes.find(strike => strike >= spot) ?? strikes.at(-1);
+    const brackets = instruments.filter(instrument => instrument.strike === low || instrument.strike === high);
+    if (brackets.length && brackets.every(instrument => available.has(instrument.name))) ready.add(expiry);
+  }
+  return ready;
+}
+
 // REST and batched WebSocket tickers share one normalization boundary.
 export function normalizeTicker(instrument, ticker) {
   if (!(

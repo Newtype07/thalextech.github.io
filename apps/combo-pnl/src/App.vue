@@ -1236,36 +1236,45 @@ watch(
       </div>
     </div>
 
+    <div class="chartToolbar">
     <div class="sharedHedgeSettings">
       <DeltaHedgeToggle :model-value="hedgePolicy.enabled" @update:model-value="hedgePolicy = { ...hedgePolicy, enabled: $event }" />
       <SettingsSidePanel target="#combo-settings-dock" title="Hedge settings">
-      <DeltaHedgeControls v-model="hedgePolicy" :asset="underlying.slice(0, 3)" :observation-seconds="HEDGE_OBSERVATION_SECONDS" />
-      <section v-if="hedgePolicy.enabled && hedgeSummary" class="hedge-run-summary" aria-label="Selected trade hedge results">
-        <dl class="hedge-pnl-breakdown">
-          <div><dt>Option P&amp;L</dt><dd>{{ pnlMoney(hedgeSummary.optionPnl) }}</dd></div>
-          <div><dt>Hedge P&amp;L · after execution costs</dt><dd>{{ pnlMoney(hedgeSummary.hedgePnl) }}</dd></div>
-          <div class="hedge-pnl-total"><dt>Total P&amp;L</dt><dd>{{ pnlMoney(hedgeSummary.totalPnl) }}</dd></div>
-        </dl>
-        <p>Hedge trading P&amp;L before costs: {{ pnlMoney(hedgeSummary.grossHedgePnl) }}.
-          Modeled execution costs: {{ costMoney(hedgeSummary.executionCosts) }}. Exchange trading fees are not separately itemized.</p>
-        <p>{{ hedgeSummary.triggers.period }} hedges triggered by period · {{ hedgeSummary.triggers.tolerance }} by tolerance.
-          Entry: {{ hedgeSummary.triggers.entry }} · Exit: {{ hedgeSummary.triggers.exit }}<template v-if="hedgeSummary.triggers.other"> · Other: {{ hedgeSummary.triggers.other }}</template> · {{ hedgeSummary.fills }} fills in total.</p>
-        <p>For the selected trade window. Total P&amp;L = option P&amp;L + hedge P&amp;L after execution costs.
-          Option P&amp;L is mark-to-mark; option execution costs, funding and basis are excluded.
-          Chart {{ activeResolutionLabel }}; hedging stays on the one-minute replay.</p>
-      </section>
-      <p v-if="hedgePolicy.enabled && hedgeHistoryGaps" class="hedge-run-summary" role="status">
-        {{ hedgeHistoryGaps }} gaps or missing risk observations. The threshold timer restarts after each gap; missing prices or risk are not interpolated.
-      </p>
+      <template #header-actions>
+        <DeltaHedgeToggle :model-value="hedgePolicy.enabled" @update:model-value="hedgePolicy = { ...hedgePolicy, enabled: $event }" />
+      </template>
+      <DeltaHedgeControls v-model="hedgePolicy" :asset="underlying.slice(0, 3)" :observation-seconds="HEDGE_OBSERVATION_SECONDS" :show-toggle="false">
+        <section v-if="hedgePolicy.enabled && hedgeSummary" class="hedge-run-summary" aria-label="Selected trade hedge results">
+          <dl class="hedge-pnl-breakdown">
+            <div><dt>Option P&amp;L</dt><dd>{{ pnlMoney(hedgeSummary.optionPnl) }}</dd></div>
+            <div><dt>Hedge P&amp;L · after execution costs</dt><dd>{{ pnlMoney(hedgeSummary.hedgePnl) }}</dd></div>
+            <div class="hedge-pnl-total"><dt>Total P&amp;L</dt><dd>{{ pnlMoney(hedgeSummary.totalPnl) }}</dd></div>
+          </dl>
+          <p>{{ hedgeSummary.triggers.period }} hedges triggered by period · {{ hedgeSummary.triggers.tolerance }} by tolerance.</p>
+          <p>Modeled execution costs: {{ costMoney(hedgeSummary.executionCosts) }}.</p>
+        </section>
+        <template #explanation>
+          <div v-if="hedgePolicy.enabled && hedgeSummary" class="hedge-run-explanation">
+            <p>Hedge trading P&amp;L before costs: {{ pnlMoney(hedgeSummary.grossHedgePnl) }}.
+              Modeled execution costs: {{ costMoney(hedgeSummary.executionCosts) }}. Exchange trading fees are not separately itemized.</p>
+            <p>Entry: {{ hedgeSummary.triggers.entry }} · Exit: {{ hedgeSummary.triggers.exit }}<template v-if="hedgeSummary.triggers.other"> · Other: {{ hedgeSummary.triggers.other }}</template> · {{ hedgeSummary.fills }} fills in total.</p>
+            <p>For the selected trade window. Total P&amp;L = option P&amp;L + hedge P&amp;L after execution costs.
+              Option P&amp;L is mark-to-mark; option execution costs, funding and basis are excluded.
+              Chart {{ activeResolutionLabel }}; hedging stays on the one-minute replay.</p>
+          </div>
+        </template>
+        <p v-if="hedgePolicy.enabled && hedgeHistoryGaps" class="hedge-run-summary" role="status">
+          {{ hedgeHistoryGaps }} gaps or missing risk observations. The threshold timer restarts after each gap; missing prices or risk are not interpolated.
+        </p>
+      </DeltaHedgeControls>
       </SettingsSidePanel>
+    </div>
+      <div v-if="ui.loading" class="statusRow" role="status">Loading mark history...</div>
     </div>
     <p v-if="hedgeError" class="error" role="alert">{{ hedgeError }}</p>
 
 
-    <div class="statusRow" v-if="ui.loading || ui.error">
-      <span v-if="ui.loading">Loading mark history...</span>
-      <span v-else class="error">{{ ui.error }}</span>
-    </div>
+    <p v-if="!ui.loading && ui.error" class="error" role="alert">{{ ui.error }}</p>
 
     <div class="chartBlock" ref="chartBlockRef">
       <div
@@ -1283,10 +1292,12 @@ watch(
           @click="toggleSettings('top')"
         ></button>
         <div v-if="settingsOpenTarget === 'top'" class="settingsDropdown">
-          <div class="settingsHint">
-            History window · {{ ((maxPointsPerFetch - 1) * HISTORY_WINDOW_UNIT_SECONDS / 86400).toFixed(1) }} days
-          </div>
+          <label class="settingsHint" for="combo-history-window">
+            <span>History window</span>
+            <output for="combo-history-window">{{ ((maxPointsPerFetch - 1) * HISTORY_WINDOW_UNIT_SECONDS / 86400).toFixed(1) }} days</output>
+          </label>
           <input
+            id="combo-history-window"
             v-model.number="ui.maxPoints"
             class="settingsSlider"
             type="range"
@@ -1359,12 +1370,15 @@ watch(
 <style scoped>
 .combo-workspace { --settings-panel-width: 50vw; }
 .hedge-run-summary { color: #aaa; font-size: 11px; line-height: 1.6; margin-top: 20px; }
-.hedge-run-summary p { margin: 10px 0 0; }
+.hedge-run-explanation { color: #aaa; font-size: 11px; line-height: 1.6; }
+.hedge-run-summary p, .hedge-run-explanation p { margin: 10px 0 0; }
 .hedge-pnl-breakdown { margin: 0; color: #ddd; }
 .hedge-pnl-breakdown > div { display: flex; justify-content: space-between; gap: 16px; padding: 5px 0; }
 .hedge-pnl-breakdown dd { margin: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .hedge-pnl-total { border-top: 1px solid #353539; margin-top: 4px; color: #fff; }
-.sharedHedgeSettings { display: flex; align-items: center; gap: 4px; margin: 12px 28px; font-size: 12px; }
+.chartToolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center;
+  width: calc(var(--selector-section-width) - 8px); margin: 12px 0 12px 8px; min-height: 34px; }
+.sharedHedgeSettings { grid-column: 1; display: flex; align-items: center; gap: 4px; padding-left: 20px; font-size: 12px; }
 .appRoot {
   container-type: inline-size;
   container-name: combo-workspace;
@@ -1482,16 +1496,16 @@ watch(
   top: calc(100% + 8px);
   right: 0;
   width: 240px;
-  border: 0.5px solid rgba(255, 255, 255, 0.9);
-  background: #080a0f;
+  border: 1px solid #353539;
+  background: #141417;
   border-radius: 6px;
-  padding: 10px 12px 12px;
+  padding: 16px;
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.35);
   z-index: 20;
-  color: #a9abb6;
-  font-size: 10px;
-  font-weight: 600;
-  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  color: #aaa;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .settingsWrap--chart {
@@ -1560,64 +1574,73 @@ watch(
 }
 
 .settingsHint {
-  color: #a9abb6;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0;
-  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 7px;
+}
+
+.settingsHint output {
+  color: #eee;
+  font-variant-numeric: tabular-nums;
 }
 
 .settingsSlider {
   -webkit-appearance: none;
   appearance: none;
   width: 100%;
-  height: 14px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 0;
   background: transparent;
   cursor: pointer;
 }
 
-.settingsSlider:focus {
-  outline: none;
+.settingsSlider:focus-visible {
+  outline: 1px solid #999;
+  outline-offset: 2px;
 }
 
 .settingsSlider::-webkit-slider-runnable-track {
-  height: 2px;
-  background: rgba(245, 245, 245, 0.45);
-  border-radius: 999px;
+  height: 4px;
+  background: #4b4b50;
+  border-radius: 4px;
 }
 
 .settingsSlider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 8px;
-  height: 8px;
-  margin-top: -3px;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
   border-radius: 50%;
   border: none;
-  background: #f5f5f7;
+  background: #ddd;
 }
 
 .settingsSlider::-moz-range-track {
-  height: 2px;
-  background: rgba(245, 245, 245, 0.45);
-  border-radius: 999px;
+  height: 4px;
+  background: #4b4b50;
+  border-radius: 4px;
 }
 
 .settingsSlider::-moz-range-thumb {
-  width: 8px;
-  height: 8px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   border: none;
-  background: #f5f5f7;
+  background: #ddd;
 }
 
 .settingsRange {
   margin-top: 4px;
   display: flex;
   justify-content: space-between;
-  color: #a9abb6;
-  font-size: 10px;
-  font-weight: 600;
+  color: #aaa;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .settingsToggleRow {
@@ -1668,11 +1691,6 @@ watch(
   width: calc(100% / var(--combo-editor-scale, 1));
   transform: scale(var(--combo-editor-scale, 1));
   transform-origin: top left;
-}
-
-.builderMain :deep(.builder-heading) {
-  box-sizing: border-box;
-  padding-left: calc(8px / var(--combo-editor-scale, 1));
 }
 
 .hedgeControls {
@@ -1805,9 +1823,11 @@ watch(
 }
 
 .statusRow {
-  min-height: 20px;
+  grid-column: 2;
+  min-width: 0;
   color: #9ea5bc;
-  font-size: 14px;
+  font-size: 12px;
+  text-align: center;
 }
 
 .error {
@@ -1840,18 +1860,20 @@ watch(
     gap: 10px;
   }
 
-  .builderMain :deep(.builder-heading) {
-    padding-left: 0;
-  }
-
   .underlyingRow {
     width: 100%;
     margin-left: 0;
   }
 
+  .chartToolbar,
   .chartBlock {
     width: 100%;
     margin-left: 0;
   }
+}
+@container combo-workspace (max-width: 650px) {
+  .chartToolbar { grid-template-columns: auto minmax(0, 1fr); column-gap: 12px; }
+  .sharedHedgeSettings { padding-left: 0; }
+  .statusRow { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 }
 </style>

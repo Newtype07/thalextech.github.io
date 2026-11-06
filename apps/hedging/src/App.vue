@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import DeltaHedgeControls from "../../../lib/components/DeltaHedgeControls.vue";
+import DeltaHedgeToggle from "../../../lib/components/DeltaHedgeToggle.vue";
 import { createMinuteHistoryLoader } from "../../../lib/minute-history.js";
 import HedgingChart from "./components/HedgingChart.vue";
 import { buildHedgingSimulation } from "./hedgingSimulation.js";
@@ -727,6 +728,10 @@ onBeforeUnmount(() => {
       />
 
       <aside class="configPanel" aria-label="Hedging configuration">
+        <header class="configPanelHeader">
+          <h2>Hedge settings</h2>
+          <DeltaHedgeToggle :model-value="hedgePolicy.enabled" @update:model-value="hedgePolicy = { ...hedgePolicy, enabled: $event }" />
+        </header>
         <p class="botDescription">
           Hedges the selected option position's delta with the perpetual. The
           bot allows delta to drift within the threshold for the selected
@@ -751,7 +756,7 @@ onBeforeUnmount(() => {
           </div>
         </label>
 
-        <DeltaHedgeControls v-model="hedgePolicy" :asset="underlying.slice(0, 3)" :observation-seconds="60" />
+        <DeltaHedgeControls v-model="hedgePolicy" :asset="underlying.slice(0, 3)" :observation-seconds="60" :show-toggle="false" />
         <p v-if="simulation.error" class="error" role="alert">{{ simulation.error }}</p>
 
         <div v-if="ui.error" class="error">{{ ui.error }}</div>
@@ -761,6 +766,8 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.configPanelHeader { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 20px; }
+.configPanelHeader h2 { margin: 0; font-size: 14px; font-weight: 600; }
 .app {
   max-width: none;
   width: 100%;

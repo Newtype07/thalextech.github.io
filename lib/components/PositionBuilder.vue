@@ -1352,7 +1352,7 @@ const totalMarkPrice = computed<number | null>(() => {
   box-sizing: border-box; width: 100%; min-width: 0; margin: 0;
   padding: 16px 0 12px; gap: 16px; color: #fff; font-size: 13px;
 }
-.builder-heading { min-width: 0; }
+.builder-heading { box-sizing: border-box; min-width: 0; padding: 0 12px; }
 .combination-heading { display: flex; align-items: center; gap: 16px; min-width: 0; overflow-x: auto; }
 .combination-heading h1 {
   flex-shrink: 0; margin: 0; font-size: 13px; font-weight: 500;

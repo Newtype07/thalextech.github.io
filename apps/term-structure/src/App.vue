@@ -31,6 +31,7 @@ import { getThalexQueueStatus } from "./thalex-rest.js";
 import { buildTermSnapshots, SNAPSHOT_RESOLUTIONS } from "./term-snapshots.js";
 import PositionSimulator from "./components/PositionSimulator.vue";
 import { nearestListedStrike } from "./simulation/straddle-selection.js";
+import { readyAtmExpiries } from "./live-quotes.js";
 
 const activeTab = ref("curve"),
   simulationOpened = ref(false);
@@ -68,6 +69,7 @@ const indexBars = shallowRef([]),
   coverage = ref(null);
 const live = shallowRef([]),
   history = shallowRef([]);
+const liveAsOf = ref(null);
 const loading = ref(false),
   historyLoading = ref(false),
   historyWarnings = ref([]),
@@ -90,12 +92,14 @@ const chart = ref(null),
 let controller, historyController, statusTimer;
 const currentChain = shallowRef([]);
 const selectedLive = computed(() => selectLiveQuotes(live.value, source.value));
+const readySimulationExpiries = computed(() => readyAtmExpiries(currentChain.value, live.value, simulationSpot.value));
 // Simulation consumes a captured ATM curve, never the selected wing/display view.
 const simulationCurve = computed(() => buildCurrentSeries(live.value, "atm")
   .map(point => ({
-    seconds: point.expiry - referenceTime.value,
+    seconds: point.expiry - liveAsOf.value,
     expiry: point.expiry,
     iv: point.iv,
+    ready: readySimulationExpiries.value.has(point.expiry),
     strike: nearestListedStrike(currentChain.value, point.expiry, simulationSpot.value),
   }))
   .filter(point => point.seconds > 0));
@@ -279,6 +283,7 @@ async function load(nextAsset = asset.value) {
   currentChain.value = [];
   if (switchingAsset) {
     live.value = [];
+    liveAsOf.value = null;
     history.value = [];
     indexBars.value = [];
     expiries.value = [];
@@ -298,6 +303,7 @@ async function load(nextAsset = asset.value) {
       (a, b) => a - b,
     );
     referenceTime.value = Date.now() / 1000;
+    const asOf = referenceTime.value;
     let liveTimer = null,
       pendingLive = [];
     const publishLive = (quotes) => {
@@ -307,11 +313,17 @@ async function load(nextAsset = asset.value) {
       if (quotes.length === chain.length) {
         clearTimeout(liveTimer);
         liveTimer = null;
-        if (active()) live.value = quotes;
+        if (active()) {
+          liveAsOf.value = asOf;
+          live.value = quotes;
+        }
       } else if (liveTimer == null)
         liveTimer = setTimeout(() => {
           liveTimer = null;
-          if (active()) live.value = pendingLive;
+          if (active()) {
+            liveAsOf.value = asOf;
+            live.value = pendingLive;
+          }
         }, 50);
     };
     signal.addEventListener("abort", () => clearTimeout(liveTimer), {
@@ -329,6 +341,7 @@ async function load(nextAsset = asset.value) {
         if (!active()) return;
         clearTimeout(liveTimer);
         liveTimer = null;
+        liveAsOf.value = asOf;
         live.value = snapshot.quotes;
         liveReceived.value = snapshot.quotes.length;
         if (snapshot.rateLimitWarning) warnings.value.push(snapshot.rateLimitWarning);
@@ -463,26 +476,26 @@ onBeforeUnmount(() => {
           Save PNG
         </button>
       </div>
+      <nav
+        class="appTabs"
+        role="tablist"
+        aria-label="Term structure workspace"
+        @keydown="tabKey"
+      >
+        <button
+          v-for="tab in ['curve', 'simulate']"
+          :id="`tab-${tab}`"
+          :key="tab"
+          type="button"
+          role="tab"
+          :aria-selected="activeTab === tab"
+          :aria-controls="`panel-${tab}`"
+          :tabindex="activeTab === tab ? 0 : -1"
+          @click="selectTab(tab)"
+        >{{ tab === 'curve' ? 'Term structure' : 'Simulate' }}</button>
+      </nav>
     </header>
 
-    <nav
-      class="appTabs"
-      role="tablist"
-      aria-label="Term structure workspace"
-      @keydown="tabKey"
-    >
-      <button
-        v-for="tab in ['curve', 'simulate']"
-        :id="`tab-${tab}`"
-        :key="tab"
-        type="button"
-        role="tab"
-        :aria-selected="activeTab === tab"
-        :aria-controls="`panel-${tab}`"
-        :tabindex="activeTab === tab ? 0 : -1"
-        @click="selectTab(tab)"
-      >{{ tab === 'curve' ? 'Term structure' : 'Simulate' }}</button>
-    </nav>
     <div
       v-show="activeTab === 'curve'"
       id="panel-curve"
@@ -648,8 +661,11 @@ onBeforeUnmount(() => {
         :asset="asset"
         :live-curve="simulationCurve"
         :live-spot="simulationSpot"
-        :as-of="referenceTime"
+        :as-of="liveAsOf"
         :market-loading="liveLoading"
+        :market-progress="liveProgress"
+        :market-cooldown="cooldownSeconds"
+        :market-error="error"
         :instruments="currentChain"
       />
     </div>

@@ -201,3 +201,67 @@ test("builder selections resolve strictly to listed instruments and keep model e
   assert.throws(() => resolvePosition([{ ...defaults[0], strike: 99000 }], chain, asOf), /currently listed/);
   assert.throws(() => resolvePosition([], chain, asOf), /Add an option leg/);
 });
+
+test("trade windows preserve the full path and open a fresh option and hedge ledger at the selected entry", () => {
+  const input = config({ horizon: 30 * DAY, step: 1800 });
+  const full = simulatePosition(input);
+  const run = simulatePosition({ ...input, tradeWindow: [2 * DAY + 1, 9 * DAY + 1] });
+  assert.deepEqual(run.pathRows, full.pathRows);
+  assert.deepEqual(run.tradeWindow, [2 * DAY + 1800, 9 * DAY]);
+  const entry = run.rows[0];
+  const expectedValue = input.legs.reduce((sum, leg) => sum + leg.signedQty * calcOptionPrice(
+    entry.spot, leg.strike, leg.maturity - entry.elapsed,
+    buildForwardCurve(input.nodes, leg.maturity).remainingIv(entry.elapsed), leg.optionType), 0);
+  near(run.entryValue, expectedValue);
+  near(entry.optionPnl, 0);
+  near(entry.hedgePnl, 0);
+  near(entry.pnl, -entry.fees);
+  near(entry.optionFees, 2 * entry.spot * input.optionBps / 10000);
+  assert.equal(run.trades[0].reason, "entry");
+  assert.equal(run.trades[0].elapsed, entry.elapsed);
+  assert.equal(run.trades.at(-1).reason, "exit");
+  assert.equal(run.trades.at(-1).elapsed, 9 * DAY);
+  assert.deepEqual(run.settlements.map(row => row.elapsed), [7 * DAY]);
+  near(run.end.optionFees, (2 * entry.spot + run.end.spot) * input.optionBps / 10000);
+  let cash = 0, position = 0;
+  const trades = [...run.trades];
+  for (const row of run.rows) {
+    while (trades.length && trades[0].elapsed <= row.elapsed) {
+      const trade = trades.shift();
+      cash -= trade.amount * trade.spot;
+      position += trade.amount;
+    }
+    near(row.hedgePnl, cash + position * row.spot);
+    near(row.pnl, row.optionValue - expectedValue + cash + position * row.spot - row.fees);
+    near(Object.values(row.buckets).reduce((a, b) => a + b, 0), row.pnl);
+  }
+  assert.equal(run.end.position, 0);
+  assert.deepEqual(simulatePosition({ ...input, tradeWindow: null }).rows, full.rows, "reset restores the original account");
+});
+
+test("window replay preserves stochastic paths and rejects empty windows or entry after a leg expires", () => {
+  for (const dynamics of ["stochastic", "jumps"]) {
+    const input = config({ marketModel: { shape: "forward", dynamics, rvMultiplier: 1,
+      manual: { jumpIntensity: 5, jumpVol: .05 } } });
+    const full = simulatePosition(input);
+    const run = simulatePosition({ ...input, tradeWindow: [DAY, 3 * DAY] });
+    assert.deepEqual(run.pathRows, full.pathRows);
+  }
+  for (const tradeWindow of [[0, 1], [40 * DAY, 41 * DAY], [NaN, DAY], [0], [7 * DAY, 8 * DAY]])
+    assert.throws(() => simulatePosition(config({ horizon: 30 * DAY, tradeWindow })), /entry|observations/);
+});
+
+test("the 90-day holding horizon retains one-minute observations through expiry", () => {
+  const input = config({
+    horizon: 90 * DAY, step: 60, rvMultiplier: 0, hedgeEnabled: false, optionBps: 0,
+    nodes: [{ seconds: 90 * DAY, iv: .6 }],
+    legs: [{ optionType: "call", strike: 100000, maturity: 90 * DAY, signedQty: -1 }],
+  });
+  const run = simulatePosition(input);
+  assert.equal(run.pathRows.length, 90 * 24 * 60 + 1);
+  assert.equal(run.rows.length, run.pathRows.length);
+  assert.equal(run.end.elapsed, 90 * DAY);
+  assert.ok(Number.isFinite(run.end.pnl));
+  assert.ok(run.pathRows.slice(1).every((row, i) => row.elapsed - run.pathRows[i].elapsed === 60));
+  assert.throws(() => simulatePosition({ ...input, step: 59 }), /129,600 steps/);
+});

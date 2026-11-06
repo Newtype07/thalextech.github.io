@@ -25,7 +25,12 @@ const error = computed(() => {
 });
 const interval = computed(() => props.observationSeconds < 60
   ? `${props.observationSeconds.toFixed(1)} seconds` : `${(props.observationSeconds / 60).toFixed(1).replace(/\.0$/, "")} ${props.observationSeconds === 60 ? "minute" : "minutes"}`);
-function update(key, value) { emit("update:modelValue", { ...policy.value, [key]: value }); }
+function update(key, value) {
+  const next = { ...policy.value, [key]: value };
+  if ((key === "threshold" || key === "tolerance") && next.tolerance > 0)
+    next.tolerance = Math.max(next.threshold, next.tolerance);
+  emit("update:modelValue", next);
+}
 </script>
 
 <template>
@@ -40,14 +45,22 @@ function update(key, value) { emit("update:modelValue", { ...policy.value, [key]
           @input="update('tolerance', Number($event.target.value) / 100)" /></label>
         <label class="hedge-wide hedge-slider"><span>Period · {{ periodUnit }}<output>{{ periodValue }}</output></span><input :aria-label="`Period · ${periodUnit}`" :value="periodStep" type="range" min="0" :max="periodPresets.length - 1" step="1" :aria-valuetext="periodText" required
           @input="update('period', periodPresets[Number($event.target.value)])" /></label>
-        <label>Hedge execution cost · bps<input :value="policy.hedgeBps" type="number" min="0" step="any" required
-          @input="update('hedgeBps', $event.target.value === '' ? NaN : Number($event.target.value))" /></label>
-        <fieldset class="hedge-wide hedge-choices">
+        <fieldset class="hedge-choices">
           <legend>At exit</legend>
           <label><input type="radio" :name="`${controlId}-exit`" value="unwind" :checked="policy.exit === 'unwind'" @change="update('exit', 'unwind')" />Unwind the hedge</label>
           <label><input type="radio" :name="`${controlId}-exit`" value="hold" :checked="policy.exit === 'hold'" @change="update('exit', 'hold')" />Leave marked to market</label>
         </fieldset>
+        <label>Hedge execution cost · bps<input :value="policy.hedgeBps" type="number" min="0" step="any" required
+          @input="update('hedgeBps', $event.target.value === '' ? NaN : Number($event.target.value))" /></label>
       </div>
+    </fieldset>
+    <p v-if="policy.enabled && policy.period > 0 && observationSeconds > policy.period" class="hedge-warning" role="status">
+      Observations are coarser than the period; this data cannot resolve the requested waiting time.
+    </p>
+    <p v-if="error" class="hedge-error" role="alert">{{ error }}</p>
+    <slot />
+    <details class="hedge-method">
+      <summary>Explanation</summary>
       <p class="hedge-explanation"><strong>Threshold</strong> is the allowed band around target delta (zero here).
         Net delta includes both the options and the existing hedge, measured in {{ asset }}.
         A period-triggered hedge fires only after net delta stays outside ±{{ policy.threshold.toFixed(2) }} {{ asset }} for
@@ -59,14 +72,11 @@ function update(key, value) { emit("update:modelValue", { ...policy.value, [key]
       <p class="hedge-cost-explanation"><strong>Execution cost</strong> is your assumed charge per hedge fill, as bps of traded notional.
         Use it for fees plus spread/slippage. It is deducted from hedge trading P&amp;L; it is not a quoted exchange fee.
         Costs apply to entry, rebalances and any exit unwind.</p>
-    </fieldset>
-    <p class="hedge-observation">Entry is neutralized immediately. Hedge rules are checked every {{ interval }}.</p>
-    <p class="hedge-source">Definitions follow the <a href="https://thalex.com/docs/#tag/bot_strategies/Delta-Hedger" target="_blank" rel="noopener">Thalex Delta Hedger API</a>.</p>
-    <p v-if="policy.enabled && policy.period > 0 && observationSeconds > policy.period" class="hedge-warning" role="status">
-      Observations are coarser than the period; this data cannot resolve the requested waiting time.
-    </p>
-    <p v-if="error" class="hedge-error" role="alert">{{ error }}</p>
-    <slot />
+      <p class="hedge-observation">Entry is neutralized immediately. Hedge rules are checked every {{ interval }}.
+        Chart display resolution does not change those checks.</p>
+      <slot name="explanation" />
+      <p class="hedge-source">Definitions follow the <a href="https://thalex.com/docs/#tag/bot_strategies/Delta-Hedger" target="_blank" rel="noopener">Thalex Delta Hedger API</a>.</p>
+    </details>
   </section>
 </template>
 
@@ -75,7 +85,7 @@ function update(key, value) { emit("update:modelValue", { ...policy.value, [key]
 .hedge-toggle { margin-bottom: 16px; }
 fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 fieldset:disabled { opacity: .45; }
-.hedge-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.hedge-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 12px; }
 .hedge-fields label { display: flex; flex-direction: column; gap: 7px; color: var(--color-text-muted, #aaa); }
 .hedge-fields input, .hedge-fields select { box-sizing: border-box; width: 100%; min-width: 0; height: 34px; padding: 6px 8px;
   border: 1px solid var(--color-border, #333); border-radius: 4px; color: var(--color-text, #eee); background: var(--color-bg, #111); font: inherit; }
@@ -94,6 +104,9 @@ fieldset:disabled { opacity: .45; }
 .hedge-choices input { width: 14px; height: 14px; padding: 0; margin: 0; accent-color: #ddd; }
 p { color: var(--color-text-muted, #999); font-size: 11px; line-height: 1.6; margin: 12px 0 0; }
 strong { color: var(--color-text, #ddd); font-weight: 500; }
+.hedge-method { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--color-border, #333); }
+.hedge-method summary { color: var(--color-text-muted, #aaa); font-size: 12px; cursor: pointer; }
+.hedge-method summary:focus-visible { outline: 1px solid #999; outline-offset: 3px; }
 .hedge-source a { color: inherit; text-underline-offset: 2px; }
 .hedge-warning { color: #e6be7c; }
 .hedge-error { color: #ff8585; }

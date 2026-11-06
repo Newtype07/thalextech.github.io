@@ -8,7 +8,6 @@ import { Window } from "happy-dom";
 import { transformWithEsbuild } from "vite";
 import { builderExpiry } from "./simulation/position-selection.js";
 import { calcGreeks } from "../../../lib/thalex.js";
-import { Worker as NodeWorker } from "node:worker_threads";
 
 // Exercise the real templates and SVG output, without an exchange connection.
 async function compiler(directory) {
@@ -45,24 +44,6 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     fileURLToPath(new URL("../.simulation-test-", import.meta.url)),
   );
   const window = new Window({ url: "http://localhost/" });
-  const workers = new Set();
-  // Run the actual browser worker module in a Node thread, adapting only messaging.
-  class BrowserWorker {
-    constructor(url) {
-      this.worker = new NodeWorker(`
-        const { parentPort } = require('node:worker_threads');
-        globalThis.self = { postMessage: data => parentPort.postMessage(data) };
-        import(${JSON.stringify(url.href)}).then(() => {
-          parentPort.on('message', data => self.onmessage({ data }));
-        });
-      `, { eval: true });
-      workers.add(this);
-      this.worker.on("message", data => this.onmessage?.({ data }));
-      this.worker.on("error", error => this.onerror?.({ message: error.message }));
-    }
-    postMessage(data) { this.worker.postMessage(data); }
-    terminate() { workers.delete(this); this.worker.terminate(); }
-  }
   const values = {
     window,
     WebSocket: undefined,
@@ -71,7 +52,6 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     Element: window.Element,
     HTMLElement: window.HTMLElement,
     SVGElement: window.SVGElement,
-    Worker: BrowserWorker,
     requestAnimationFrame: (callback) => setTimeout(callback, 0),
   };
   const originals = new Map(
@@ -167,8 +147,30 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
       root().querySelector(".sim-performance"),
       `ready market data starts a default run without submitting the form: ${[...root().querySelectorAll("input")].filter(input => !input.checkValidity()).map(input => `${input.type} ${input.value} step=${input.step} stepMismatch=${input.validity.stepMismatch} missing=${input.validity.valueMissing}`).join("; ")} ${errors.map(error => error.stack).join("\n")}`,
     );
+    const holding = input("Holding horizon");
+    assert.equal(holding.type, "range");
+    assert.equal(holding.min, "0");
+    assert.equal(holding.max, "10");
+    assert.equal(holding.value, "6", "holding horizon defaults to seven days");
+    assert.equal(Number([...root().querySelectorAll(".cumulative-pnl-bar")].at(-1).dataset.elapsed), 7 * 86400);
+    const originalHorizonPath = root().querySelector(".index-price-path").getAttribute("d");
+    const horizonSeed = pathSeed;
+    for (const [index, days] of [1, 2, 3, 4, 5, 6, 7, 14, 30, 60, 90].entries()) {
+      await set("Holding horizon", index);
+      assert.ok(holding.getAttribute("aria-valuetext").startsWith(`${days} ${days === 1 ? 'day' : 'days'}`));
+      assert.match(root().querySelector('.sim-horizon-control output').textContent, new RegExp(`^${days}d`));
+    }
+    await settle();
+    assert.equal(Number([...root().querySelectorAll(".cumulative-pnl-bar")].at(-1).dataset.elapsed), 7 * 86400, "a requested horizon beyond the last expiry caps at expiry");
+    assert.match(holding.getAttribute("aria-valuetext"), /last option expiry/);
+    await set("Holding horizon", 0); await settle();
+    assert.equal(Number([...root().querySelectorAll(".cumulative-pnl-bar")].at(-1).dataset.elapsed), 86400, "shorter holding horizons close the account before expiry");
+    assert.equal(root().querySelector(".performance-time").textContent, "At selected exit");
+    await set("Holding horizon", 6); await settle();
+    assert.equal(root().querySelector(".index-price-path").getAttribute("d"), originalHorizonPath, "restoring the horizon restores the same seeded path");
+    assert.equal(pathSeed, horizonSeed, "horizon changes do not request new random draws");
     assert.equal(root().querySelectorAll(".leg-row").length, 2);
-    assert.match(root().querySelector(".combination-heading h1").textContent, /^Bitcoin · /);
+    assert.equal(root().querySelector(".combination-heading h1"), null, "the builder does not repeat the selected legs in a title");
     assert.equal(root().querySelector('[aria-label="Combination maturity"]').textContent.trim(), builderExpiry(1793700000 + 7 * 86400));
     assert.equal(root().querySelectorAll('[aria-label="Option expiry"]').length, 0);
     assert.ok(root().querySelector('[aria-label="Edit maturities per leg"]'));
@@ -178,9 +180,7 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
       assert.equal(row.querySelector('[aria-label="Option strike"]').textContent.trim(), "90,000");
     }
     assert.equal(input("Realized / forward volatility").value, "100");
-    assert.ok(root().querySelector('[role="group"][aria-label="Simulate until"]'));
-    assert.equal(button("First expiry").getAttribute("aria-pressed"), "true");
-    assert.equal(button("Last expiry").getAttribute("aria-pressed"), "false");
+    assert.equal(root().querySelector('[role="group"][aria-label="Simulate until"]'), null, "a single maturity has no redundant exit choice");
     const callGreeks = root().querySelector(".leg-row").querySelectorAll(".leg-greek-value");
     assert.equal(callGreeks[0].textContent.trim(), "60.00%");
     assert.equal(callGreeks[2].textContent.trim(), (-calcGreeks(91000, 90000, 7 * 86400, 0.6, "call").delta).toFixed(2));
@@ -216,24 +216,34 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
       assert.equal(row.querySelector('[aria-label="Option expiry"]').textContent.trim(), builderExpiry(1793700000 + 7 * 86400));
     button("Use a single maturity").click();
     await nextTick();
-    const sidebar = root().querySelector('aside[aria-label="Hedge settings"]');
+    assert.equal(root().querySelector(".settings-side-panel"), null, "hedge settings start closed, as in Combo P&L");
+    const beforeHiding = pathSeed;
+    const configure = button("Configure hedge settings");
+    assert.equal(configure.textContent.trim(), "Configure");
+    configure.click();
+    await settle();
+    const sidebar = root().querySelector(".settings-side-panel");
     assert.ok(sidebar);
-    assert.notEqual(sidebar.style.display, "none", "hedge settings are open by default");
+    assert.equal(sidebar.parentElement.id, "term-sim-settings-dock", "the shared panel occupies a separate layout column");
+    assert.ok(sidebar.closest("form"), "teleported controls remain within the simulation form for validation");
+    assert.ok(sidebar.querySelector('[role="separator"]'), "the panel uses the shared width resizer");
+    assert.ok(sidebar.querySelector("header [role=switch]"), "the hedge toggle sits beside the panel title");
+    assert.equal(sidebar.querySelector(".settings-panel-content [role=switch]"), null, "the panel body does not duplicate the header toggle");
+    assert.ok(![...sidebar.querySelectorAll("label")].some(node => node.textContent.startsWith("RV / forward IV")), "the panel omits the ratio already controlled by the toolbar slider");
+    assert.equal(input("Realized / forward volatility").type, "range");
     assert.match(root().querySelector(".hedge-explanation").textContent, /resets the timer/);
     assert.equal(button("Update market snapshot"), undefined);
     assert.doesNotMatch(root().textContent, /seed/i);
-    const beforeHiding = pathSeed;
-    button("Hide hedge settings").click();
+    button("Close settings").click();
     await settle();
-    assert.equal(sidebar.style.display, "none");
-    assert.ok(root().querySelector(".sim-layout-collapsed"));
-    assert.equal(button("Show hedge settings").getAttribute("aria-expanded"), "false");
-    button("Show hedge settings").click();
+    assert.equal(root().querySelector(".settings-side-panel"), null);
+    assert.equal(configure.getAttribute("aria-expanded"), "false");
+    configure.click();
     await settle();
-    assert.notEqual(sidebar.style.display, "none");
+    assert.ok(root().querySelector(".settings-side-panel"));
     assert.equal(pathSeed, beforeHiding, "hiding and showing settings preserves the run");
     assert.match(
-      root().querySelector(".sim-source").textContent,
+      root().querySelector(".sim-snapshot").textContent,
       /Live ATM marks/,
     );
     for (const removed of [
@@ -247,8 +257,8 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     ])
       assert.equal(input(removed), undefined);
     assert.match(
-      root().querySelector(".sim-trade-facts").textContent,
-      /\$91,000.00/,
+      root().querySelector(".sim-position-builder").textContent,
+      /91,000/,
     );
     for (const index of [0, 1]) {
       await selectLeg(index, "Option expiry", builderExpiry(1793700000 + 86400));
@@ -272,34 +282,25 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
         )
         .join("; "),
     );
-    assert.equal(
-      root().querySelectorAll(".pnl-chart path[data-series]").length,
-      3,
-    );
-    assert.match(
-      root().querySelector(".pnl-heading").textContent,
-      /2 option legs/,
-    );
+    assert.equal(root().querySelectorAll(".combined-chart").length, 1, "price and cumulative P&L share one chart");
+    const bars = root().querySelectorAll(".cumulative-pnl-bar");
+    assert.ok(bars.length >= 12 && bars.length <= 160, "readable cumulative bars sample the minute ledger");
+    assert.equal(root().querySelectorAll(".shared-time-axis").length, 1, "both lanes use one time axis");
+    assert.equal(root().querySelector("[stroke-dasharray]"), null, "the merged chart has no dashed guide");
+    assert.equal(root().querySelector(".sim-performance h2, .performance-subtitle, .sim-trade-facts, .performance-note"), null, "the chart has no redundant title, scope row or explanatory footer");
+    assert.equal(root().querySelectorAll(".leg-row").length, 2);
     assert.equal(
       root().querySelectorAll(".pnl-key .performance-value").length,
       3,
     );
     assert.equal(
-      root().querySelectorAll(".index-chart .index-price-path").length,
+      root().querySelectorAll(".combined-chart .index-price-path").length,
       1,
     );
-    const indexChart = root().querySelector(".index-chart");
-    const pnlChart = root().querySelector(".pnl-chart");
-    assert.ok(
-      pnlChart.compareDocumentPosition(indexChart) &
-        window.Node.DOCUMENT_POSITION_FOLLOWING,
-      "P&L is above the index chart",
-    );
-    assert.match(
-      root().querySelector(".index-heading").textContent,
-      /annual drift 0.00%/,
-    );
-    const tradeDots = root().querySelectorAll(".index-chart .hedge-trade-dot");
+    assert.ok(root().querySelector(".index-lane").compareDocumentPosition(root().querySelector(".pnl-lane")) &
+      window.Node.DOCUMENT_POSITION_FOLLOWING, "cumulative P&L bars sit below price and hedge fills");
+    assert.equal(input("Annual drift").value, "0");
+    const tradeDots = root().querySelectorAll(".combined-chart .hedge-trade-dot");
     assert.ok(tradeDots.length > 2);
     assert.ok(
       root().querySelector('.hedge-trade-dot.buy-dot[data-side="buy"]'),
@@ -334,20 +335,14 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     const noDriftPrice = root().querySelector(".index-price").textContent;
     await set("Annual drift", 20);
     await settle();
-    assert.match(
-      root().querySelector(".index-heading").textContent,
-      /annual drift 20.00%/,
-    );
+    assert.equal(input("Annual drift").value, "20");
     assert.notEqual(
       root().querySelector(".index-price").textContent,
       noDriftPrice,
     );
     await set("Annual drift", -20);
     await settle();
-    assert.match(
-      root().querySelector(".index-heading").textContent,
-      /annual drift -20.00%/,
-    );
+    assert.equal(input("Annual drift").value, "-20");
     assert.equal(root().querySelector(".hedge-comparison"), null, "hedge comparison has been removed");
     const firstMetrics = root().querySelector(".sim-performance").textContent;
     await set("Threshold", 0.1);
@@ -359,8 +354,8 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     );
     await settle();
     assert.equal(root().querySelector(".sim-pending"), null);
-    const svg = root().querySelector(".index-chart");
-    const pnlSvg = root().querySelector(".pnl-chart");
+    const svg = root().querySelector(".combined-chart");
+    const pnlSvg = root().querySelector(".combined-chart");
     t.mock.method(pnlSvg, "getBoundingClientRect", () => ({ left: 0, width: 1280 }));
     for (const [seconds, expectedDay] of [[30, "0.000"], [61, "0.001"]]) {
       pnlSvg.dispatchEvent(new window.MouseEvent("pointermove", {
@@ -382,9 +377,10 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
       root().querySelector(".performance-time").textContent,
       /Day 0.000/,
     );
-    assert.equal(root().querySelector(".index-heading .index-time").textContent, "Day 0.000");
+    assert.equal(root().querySelector(".index-time").textContent, "Day 0.000");
     assert.ok(root().querySelector(".index-cursor"));
     assert.ok(root().querySelector(".performance-cursor"));
+    assert.equal(root().querySelector("[stroke-dasharray]"), null, "inspection highlights values without a dashed guide");
 
     const openingValues = [
       ...root().querySelectorAll(".performance-value strong"),
@@ -428,6 +424,13 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
       .slice(1)
       .map((row) => row.split(",").map(Number));
     assert.equal(csvRows.length, 1441, "a one-day run has one-minute observations plus entry");
+    const renderedBars = [...root().querySelectorAll(".cumulative-pnl-bar")];
+    const exportedPnl = new Map(csvRows.map(values => [values[0], values[4]]));
+    for (const bar of renderedBars) {
+      assert.equal(Number(bar.dataset.pnl), exportedPnl.get(Number(bar.dataset.elapsed)), "each bar shows an actual cumulative ledger value, never a sum or average");
+    }
+    assert.equal(Number(renderedBars[0].dataset.elapsed), 0, "bars include entry execution costs");
+    assert.equal(Number(renderedBars.at(-1).dataset.pnl), csvRows.at(-1)[4], "the last bar includes expiry and hedge unwind costs");
     csvRows.slice(1).forEach((values, i) => {
       assert.equal(values[0] - csvRows[i][0], 60, "the path step is always one minute");
     });
@@ -455,68 +458,89 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     );
     await set("Tolerance", 0.01);
     await settle();
-    assert.match(
-      root().querySelector('[role="alert"]').textContent,
-      /Tolerance/,
-    );
+    assert.equal(root().querySelector('[role="alert"]'), null, "tolerance is constrained instead of producing an error");
+    assert.equal(input("Tolerance").value, input("Threshold").value);
     assert.ok(
       root().querySelector(".sim-performance"),
-      "invalid settings preserve the last good result",
+      "constrained settings keep the simulation available",
     );
     await set("Tolerance", 0.15);
     await settle();
     assert.equal(root().querySelector('[role="alert"]'), null);
-    // Change modes while a real worker is running; stale batches must not publish.
-    button("100 runs").click();
-    for (let i = 0; i < 200 && !workers.size; i++) {
-      await new Promise(resolve => setTimeout(resolve, 5));
-      await nextTick();
-    }
-    assert.equal(workers.size, 1);
-    assert.ok(root().querySelector(".sim-progress"));
-    button("Single run").click();
-    await settle();
-    assert.equal(workers.size, 0, "switching to single run terminates the batch worker");
-    assert.ok(root().querySelector(".sim-performance"));
+    assert.equal(button("100 runs"), undefined);
+    assert.equal(button("Single run"), undefined);
     assert.equal(root().querySelector(".sim-ensemble"), null);
-    button("100 runs").click();
-    await settle();
-    for (let i = 0; i < 100 && root().querySelector(".sim-progress"); i++) await settle();
-    assert.equal(root().querySelector('[role="alert"]'), null);
-    assert.equal(root().querySelector(".sim-progress"), null);
-    assert.equal(root().querySelectorAll(".ensemble-path").length, 100);
-    assert.equal(root().querySelectorAll(".ensemble-median").length, 1);
-    assert.equal(root().querySelector(".sim-performance"), null);
-    assert.equal(workers.size, 0, "completed workers are released");
-    const ensembleChart = root().querySelector(".ensemble-chart");
-    ensembleChart.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    // Select a trade within the existing path, then resize, move, and reset it.
+    const fixedPath = root().querySelector(".index-price-path").getAttribute("d");
+    const brushMouse = (target, type, minute) => target.dispatchEvent(new window.MouseEvent(type, {
+      view: window, clientX: 78 + 1164 * minute / 1440 + .01, clientY: 100,
+      button: 0, bubbles: true, cancelable: true,
+    }));
+    const prepareBrush = () => {
+      root().querySelector(".combined-chart").createSVGPoint = undefined;
+      const brush = root().querySelector(".brush");
+      brush.getBoundingClientRect = () => ({ left: 0, top: 0 });
+      Object.defineProperties(brush, { clientLeft: { configurable: true, value: 0 }, clientTop: { configurable: true, value: 0 } });
+      return brush;
+    };
+    let selectionBrush = prepareBrush();
+    const assertNoSelection = () => {
+      assert.equal(root().querySelector(".trade-window-background"), null);
+      assert.equal(root().querySelector(".trade-window-spotlight"), null);
+      assert.equal(root().querySelector(".trade-boundary-label"), null);
+      assert.equal(selectionBrush.querySelector(".selection").style.display, "none");
+    };
+    assertNoSelection();
+    assert.equal(Number(root().querySelector(".cumulative-pnl-bar").dataset.elapsed), 0);
+    assert.equal(Number([...root().querySelectorAll(".cumulative-pnl-bar")].at(-1).dataset.elapsed), 86400,
+      "the unselected baseline evaluates the whole path");
+    assert.equal(Number(root().querySelector('[data-trigger="entry"]').dataset.elapsed), 0);
+    assert.equal(Number(root().querySelector('[data-trigger="exit"]').dataset.elapsed), 86400);
+    brushMouse(selectionBrush.querySelector(".overlay"), "mousedown", 60);
     await nextTick();
-    assert.match(root().querySelector(".ensemble-actions").textContent, /Day 0.000/);
-    assert.ok(root().querySelector(".ensemble-cursor"));
-    ensembleChart.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    await nextTick();
-    assert.match(root().querySelector(".ensemble-actions").textContent, /At exit/);
-    button("Export CSV").click();
-    await nextTick();
-    assert.equal(downloads.at(-1), "BTC-position-100-runs.csv");
-    const ensembleCsv = (await blobs.at(-1).text()).trim().split("\n");
-    assert.equal(ensembleCsv[0], "run,elapsedSeconds,totalPnl");
-    const exported = ensembleCsv.slice(1).map(row => row.split(","));
-    const medians = exported.filter(row => row[0] === "median");
-    assert.equal(medians.length, 1200);
-    assert.equal(exported.length, 1200 * 101);
-    const terminal = exported.filter(row => row[0] !== "median" && row[1] === medians.at(-1)[1])
-      .map(row => Number(row[2])).sort((a, b) => a - b);
-    assert.equal(Number(medians.at(-1)[2]), (terminal[49] + terminal[50]) / 2);
-    const oldMedian = root().querySelector(".ensemble-median").getAttribute("d");
-    button("Refresh simulation").click();
+    assert.equal(root().querySelector(".trade-window-spotlight"), null, "pointer down alone does not create a visible selection");
+    brushMouse(window, "mouseup", 60);
     await settle();
-    for (let i = 0; i < 100 && root().querySelector(".sim-progress"); i++) await settle();
-    assert.notEqual(root().querySelector(".ensemble-median").getAttribute("d"), oldMedian);
-    button("Single run").click();
+    assertNoSelection();
+    brushMouse(selectionBrush.querySelector(".overlay"), "mousedown", 60);
+    brushMouse(window, "mousemove", 180);
+    await nextTick();
+    assert.equal(Number(root().querySelector(".trade-window-spotlight").dataset.entryElapsed), 61 * 60, "live labels snap to the next minute inside the selection");
+    assert.equal(Number(root().querySelector(".trade-window-spotlight").dataset.exitElapsed), 180 * 60);
+    assert.equal(Number(root().querySelector(".cumulative-pnl-bar").dataset.elapsed), 0, "drag previews do not commit the account until release");
+    brushMouse(window, "mouseup", 180);
     await settle();
-    assert.ok(root().querySelector(".sim-performance"));
-    assert.equal(root().querySelectorAll(".leg-row").length, 2, "mode switches preserve legs");
+    assert.equal(root().querySelector(".index-price-path").getAttribute("d"), fixedPath, "selecting a trade preserves the full price path");
+    assert.equal(Number(root().querySelector(".cumulative-pnl-bar").dataset.elapsed), 61 * 60, `${errors.map(e => e.stack).join("\n")} status=${root().querySelector(".sim-status")?.textContent}`);
+    assert.equal(Number([...root().querySelectorAll(".cumulative-pnl-bar")].at(-1).dataset.elapsed), 180 * 60);
+    assert.equal(root().querySelector(".performance-time").textContent, "At selected exit");
+    assert.equal(Number(root().querySelector('[data-trigger="entry"]').dataset.elapsed), 61 * 60);
+    assert.equal(Number(root().querySelector('[data-trigger="exit"]').dataset.elapsed), 180 * 60);
+    button("Export CSV").click(); await nextTick();
+    const windowRows = (await blobs.at(-1).text()).trim().split("\n").slice(1).map(row => row.split(",").map(Number));
+    assert.equal(windowRows[0][0], 61 * 60);
+    assert.equal(windowRows.at(-1)[0], 180 * 60);
+    assert.ok(windowRows[0][4] < 0, "entry costs are charged in the new ledger");
+    selectionBrush = prepareBrush();
+    brushMouse(selectionBrush.querySelector(".handle--e"), "mousedown", 180);
+    brushMouse(window, "mousemove", 240);
+    brushMouse(window, "mouseup", 240);
+    await settle();
+    assert.equal(Number([...root().querySelectorAll(".cumulative-pnl-bar")].at(-1).dataset.elapsed), 240 * 60, "the exit edge resizes the window");
+    selectionBrush = prepareBrush();
+    brushMouse(selectionBrush.querySelector(".selection"), "mousedown", 120);
+    brushMouse(window, "mousemove", 180);
+    brushMouse(window, "mouseup", 180);
+    await settle();
+    assert.equal(Number(root().querySelector(".cumulative-pnl-bar").dataset.elapsed), 121 * 60, "dragging inside moves the trade window");
+    selectionBrush.dispatchEvent(new window.MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+    await settle();
+    assert.equal(Number(root().querySelector(".cumulative-pnl-bar").dataset.elapsed), 0);
+    assert.equal(Number([...root().querySelectorAll(".cumulative-pnl-bar")].at(-1).dataset.elapsed), 86400);
+    assert.equal(root().querySelector(".index-price-path").getAttribute("d"), fixedPath);
+    selectionBrush = prepareBrush();
+    assertNoSelection();
+    if (!root().querySelector(".settings-side-panel")) { configure.click(); await settle(); }
     for (const [label, value] of [
       ["Period", 4],
       ["Hedge execution cost", 2],
@@ -559,37 +583,25 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     root().querySelectorAll(".leg-row")[1].querySelector(".type-pill").click();
     await nextTick();
     await selectLeg(1, "Option expiry", builderExpiry(1793700000 + 7 * 86400));
-    assert.match(root().querySelector(".pnl-heading").textContent, /exit at first expiry/);
-    assert.match(root().querySelector(".sim-trade-facts").textContent, /later legs closed at model marks/);
-    assert.equal(root().querySelector(".performance-time").textContent, "At first expiry");
-    assert.equal(button("First expiry").getAttribute("aria-pressed"), "true");
-    assert.equal(button("Last expiry").getAttribute("aria-pressed"), "false");
+    assert.match(root().querySelector(".sim-settings-panel").textContent, /Drag on the index chart/);
+    assert.equal(root().querySelector(".performance-time").textContent, "At last expiry");
+    assert.equal(button("First expiry"), undefined);
+    assert.equal(button("Last expiry"), undefined);
     const validCurve = initialMarket.liveCurve;
     initialMarket.liveCurve = [{ seconds: 86400, iv: 0.7, strike: 90000 }];
     await settle();
-    assert.match(root().querySelector('[role="status"]').textContent, /exceeds the curve/);
-    assert.ok(button("Last expiry"), "exit controls stay visible when a calendar cannot be valued");
+    assert.equal(root().querySelector('[role="alert"]'), null, "background quotes preserve the captured market snapshot");
     initialMarket.liveCurve = validCurve;
     await settle();
-    button("Last expiry").click();
-    await settle();
-    assert.equal(button("Last expiry").getAttribute("aria-pressed"), "true");
-    assert.equal(root().querySelector(".performance-time").textContent, "At last expiry");
-    assert.match(root().querySelector(".pnl-heading").textContent, /exit at last expiry/);
-    assert.match(root().querySelector(".pnl-heading .performance-subtitle").textContent, /7.00 days/);
-    assert.match(root().querySelector(".sim-trade-facts").textContent, /earlier legs cash-settle/);
     assert.equal(root().querySelector('[role="alert"]'), null);
-    button("Export CSV").click();
-    await nextTick();
-    const lastExpiryRows = (await blobs.at(-1).text()).trim().split("\n").slice(1)
-      .map(row => row.split(",").map(Number));
-    assert.equal(lastExpiryRows.at(-1)[0], 7 * 86400, "last-expiry CSV spans the far leg's maturity");
-    button("First expiry").click();
-    await settle();
-    assert.equal(root().querySelector(".performance-time").textContent, "At first expiry");
-    assert.match(root().querySelector(".pnl-heading .performance-subtitle").textContent, /1.00 days/);
-    assert.equal(root().querySelectorAll(".leg-row").length, 2, "exit changes preserve the position");
-    assert.equal(root().querySelector(".performance-summary"), null);
+    button("Export CSV").click(); await nextTick();
+    const lastExpiryRows = (await blobs.at(-1).text()).trim().split("\n").slice(1).map(row => row.split(",").map(Number));
+    assert.equal(lastExpiryRows.at(-1)[0], 7 * 86400, "the selectable path spans the last expiry");
+    await selectLeg(1, "Option expiry", builderExpiry(1793700000 + 86400));
+    assert.equal(root().querySelector(".performance-time").textContent, "At expiry");
+    await selectLeg(1, "Option expiry", builderExpiry(1793700000 + 7 * 86400));
+    assert.equal(root().querySelector(".performance-time").textContent, "At last expiry");
+    assert.equal(root().querySelectorAll(".leg-row").length, 2);
     const calendarPath = root().querySelector(".index-price-path").getAttribute("d");
     const quantity = root().querySelectorAll(".leg-row")[1].querySelector(".qty-input");
     quantity.value = "2";
@@ -601,12 +613,11 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
       button("+ Add leg").click();
       await settle();
       assert.equal(root().querySelectorAll(".leg-row").length, count);
-      assert.match(root().querySelector(".pnl-heading").textContent, new RegExp(`${count} option legs`));
     }
     assert.equal(button("+ Add leg"), undefined, "the shared builder supports four legs");
     root().querySelectorAll(".remove-btn")[3].click();
     await settle();
-    assert.match(root().querySelector(".pnl-heading").textContent, /3 option legs/);
+    assert.equal(root().querySelectorAll(".leg-row").length, 3);
     for (const remove of root().querySelectorAll(".remove-btn")) {
       remove.click();
       await nextTick();
@@ -616,7 +627,7 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     assert.equal(root().querySelectorAll(".leg-row").length, 0);
     button("+ Add leg").click();
     await settle();
-    assert.match(root().querySelector(".pnl-heading").textContent, /1 option leg/);
+    assert.equal(root().querySelectorAll(".leg-row").length, 1);
     assert.deepEqual(errors, []);
     app.unmount();
 
@@ -625,19 +636,36 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
       instruments: chain(1793700000, [1]),
       liveSpot: 91000,
       asOf: 1793700000,
-      liveCurve: [{ seconds: 86400, iv: 0.7, strike: 90000 }],
+      liveCurve: [{ seconds: 86400, iv: 0.7, strike: 90000, ready: false }],
       marketLoading: true,
+      marketProgress: { checked: 1, total: 6 },
+      marketCooldown: 0,
     });
     mount({ setup: () => () => h(Simulator, liveMarket) });
     await settle();
     assert.equal(root().querySelector(".sim-performance"), null);
     assert.equal(button("Refresh simulation").disabled, true);
-    liveMarket.marketLoading = false;
+    assert.match(root().querySelector(".sim-empty").textContent, /Loading live ATM curve/);
+    assert.equal(root().querySelector("progress").value, 1);
+    assert.equal(root().querySelector("progress").max, 6);
+    assert.match(root().querySelector(".sim-empty").textContent, /1 \/ 6 quotes checked/);
+    liveMarket.marketCooldown = 10;
+    await nextTick();
+    assert.match(root().querySelector(".sim-empty").textContent, /retrying in 10s/);
+    liveMarket.marketCooldown = 0;
+    liveMarket.liveCurve = [{ seconds: 86400, iv: 0.7, strike: 90000, ready: true }];
+    liveMarket.marketProgress = { checked: 4, total: 6 };
     await settle();
     assert.ok(
       root().querySelector(".sim-performance"),
-      "a waiting tab runs automatically when live data finishes loading",
+      "a waiting tab runs from the ATM curve before wing quote loading finishes",
     );
+    const earlyPath = root().querySelector(".index-price-path").getAttribute("d");
+    liveMarket.liveCurve = [{ seconds: 86400, iv: 0.7, strike: 90000, ready: true }];
+    liveMarket.marketLoading = false;
+    await settle();
+    assert.equal(root().querySelector(".index-price-path").getAttribute("d"), earlyPath,
+      "background quote completion does not reset the captured simulation");
     const customQuantity = root().querySelector(".leg-row .qty-input");
     customQuantity.value = "2";
     customQuantity.dispatchEvent(new window.Event("change", { bubbles: true }));
@@ -653,6 +681,8 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
       "the previous result stays visible while refreshing the market",
     );
     liveMarket.marketLoading = false;
+    liveMarket.asOf += 1;
+    liveMarket.liveCurve = [{ seconds: 86400 - 1, iv: 0.65, strike: 90000 }];
     await settle();
     const afterRefresh = root()
       .querySelector(".index-price-path")
@@ -677,12 +707,30 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     app.unmount();
 
     const now = Date.now() / 1000;
+    const partialMarket = reactive({ ...liveMarket,
+      instruments: chain(liveMarket.asOf, [1, 7]),
+      liveCurve: [{ seconds: 86400, iv: 0.7, ready: false }],
+      marketLoading: true,
+    });
+    mount({ setup: () => () => h(Simulator, partialMarket) });
+    await settle();
+    assert.equal(root().querySelector(".sim-performance"), null, "a partial curve waits while more maturities can arrive");
+    assert.match(root().querySelector(".sim-empty").textContent, /0 \/ 2 ATM expiries ready/);
+    partialMarket.marketLoading = false;
+    await settle();
+    assert.ok(root().querySelector(".sim-performance"), "completed snapshots with unavailable maturities still use the available-curve fallback");
+    app.unmount();
+
     const expiry = now + 86400;
+    let releaseWings, releaseHistory, usableTickers = 0, chainRequests = 0;
+    const wingsPending = new Promise(resolve => { releaseWings = resolve; });
+    const historyPending = new Promise(resolve => { releaseHistory = resolve; });
     t.mock.method(globalThis, "fetch", async (input) => {
       const url = new URL(input, "http://localhost/");
       let result;
       if (url.pathname.endsWith("/instruments")) {
-        result = [90000, 92000].flatMap((strike) =>
+        chainRequests++;
+        result = [90000, 92000, 94000].flatMap((strike) =>
           ["call", "put"].map((type) => ({
             instrument_name: `BTC-TEST-${strike}-${type}`,
             type: "option",
@@ -693,11 +741,14 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
           })),
         );
       } else if (url.pathname.endsWith("/ticker")) {
+        if (url.searchParams.get("instrument_name").includes("94000")) await wingsPending;
+        else usableTickers++;
         result = { iv: 0.6, index: 91000, mark_timestamp: Date.now() / 1000 };
       } else if (
         url.pathname.endsWith("/index_price_historical_data") ||
         url.pathname.endsWith("/mark_price_historical_data")
       ) {
+        await historyPending;
         result = { no_data: true };
       } else if (url.pathname.includes("history-cache")) {
         return { ok: false, status: 404 };
@@ -711,14 +762,18 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     );
     const { default: App } = await import(pathToFileURL(appFile).href);
     mount(App);
+    for (let i = 0; i < 400 && usableTickers < 4; i++) await settle();
     await settle();
+    assert.equal(usableTickers, 4, "both ATM brackets are already loaded on the curve tab");
+    assert.ok(root().querySelector(".topBar [role=tablist]"), "workspace tabs live in the top bar");
     button("Simulate").click();
     await nextTick();
     assert.equal(root().querySelector("#panel-curve").style.display, "none");
-    for (let i = 0; i < 400 && !root().querySelector(".sim-performance"); i++)
-      await settle();
-    assert.ok(root().querySelector(".sim-performance"));
-    const resultText = root().querySelector(".pnl-heading").textContent;
+    await settle();
+    assert.ok(root().querySelector(".sim-performance"), "entering simulation reuses the curve while wing quotes and history remain blocked");
+    assert.ok(button("Restart fetch"), "background market/history loading is still in flight");
+    assert.equal(chainRequests, 1, "opening simulation does not refetch the option chain");
+    const resultText = root().querySelector(".performance-readout").textContent;
     const resultPath = root()
       .querySelector(".index-price-path")
       .getAttribute("d");
@@ -727,11 +782,14 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     assert.equal(root().querySelector("#panel-simulate").style.display, "none");
     button("Simulate").click();
     await nextTick();
-    assert.equal(root().querySelector(".pnl-heading").textContent, resultText);
+    assert.equal(root().querySelector(".performance-readout").textContent, resultText);
     assert.equal(
       root().querySelector(".index-price-path").getAttribute("d"),
       resultPath,
     );
+    releaseWings();
+    releaseHistory();
+    await settle();
     button("ETH").click();
     await settle();
     assert.equal(
@@ -740,8 +798,8 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
       "changing asset cannot mislabel BTC results as ETH",
     );
     assert.match(
-      root().querySelector(".sim-source").textContent,
-      /Waiting for market/,
+      root().querySelector(".sim-empty").textContent,
+      /No live ETH option expiries returned.*Use Refresh above to retry/,
     );
     assert.equal(button("Refresh simulation").disabled, true);
     app.unmount();
@@ -762,7 +820,9 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
         h(DeltaHedgeToggle, { modelValue: fixture.policy.enabled,
           "onUpdate:modelValue": value => { fixture.policy = { ...fixture.policy, enabled: value }; } }),
         h(SettingsSidePanel, { target: "#test-settings-dock", title: "Hedge settings" }, {
-          default: () => h(DeltaHedgeControls, { modelValue: fixture.policy,
+          "header-actions": () => h(DeltaHedgeToggle, { modelValue: fixture.policy.enabled,
+            "onUpdate:modelValue": value => { fixture.policy = { ...fixture.policy, enabled: value }; } }),
+          default: () => h(DeltaHedgeControls, { modelValue: fixture.policy, showToggle: false,
             "onUpdate:modelValue": value => { fixture.policy = value; } }),
         }),
       ]),
@@ -783,8 +843,13 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     let dialog = window.document.querySelector(".settings-side-panel");
     assert.equal(dialog.parentElement.id, "test-settings-dock", "the panel occupies its own layout column");
     assert.equal(dialog.getAttribute("aria-modal"), null, "the dock is nonmodal");
-    const panelToggle = dialog.querySelector('[role="switch"]');
-    assert.ok(panelToggle, "hedging can also be toggled at the top of settings");
+    const panelToggle = dialog.querySelector('header [role="switch"]');
+    assert.ok(panelToggle, "hedging can also be toggled beside the settings title");
+    assert.equal(dialog.querySelectorAll('[role="switch"]').length, 1, "the toggle appears only in the header");
+    const explanation = dialog.querySelector("details.hedge-method");
+    assert.equal(explanation.open, false, "definitions start collapsed below the configuration");
+    assert.ok(explanation.contains(dialog.querySelector(".hedge-explanation")));
+    assert.ok(explanation.contains(dialog.querySelector(".hedge-source")), "the API reference stays inside the explanation");
     assert.equal(panelToggle.checked, true);
     assert.equal(window.document.querySelector(".settings-panel-backdrop"), null);
     assert.equal(trigger.getAttribute("aria-expanded"), "true");
@@ -836,6 +901,23 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     assert.equal(dialog.querySelectorAll(".hedge-slider output")[1].textContent, "0.20");
     assert.equal(fixture.policy.timing, "timer");
     assert.equal(fixture.policy.entry, "neutralize");
+    const threshold = dialog.querySelectorAll('input[type="range"]')[0];
+    tolerance.value = "1"; tolerance.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await nextTick();
+    assert.equal(fixture.policy.tolerance, .05, "positive tolerance cannot be dragged below threshold");
+    assert.equal(tolerance.value, "5", "the slider snaps back to the allowed minimum");
+    threshold.value = "30"; threshold.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await nextTick();
+    assert.equal(fixture.policy.tolerance, .3, "raising threshold lifts active tolerance in the same update");
+    tolerance.value = "0"; tolerance.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await nextTick();
+    assert.equal(fixture.policy.tolerance, 0, "zero still disables the tolerance override");
+    threshold.value = "5"; threshold.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await nextTick();
+    assert.equal(fixture.policy.tolerance, 0, "threshold edits preserve the disabled override");
+    tolerance.value = "20"; tolerance.dispatchEvent(new window.Event("input", { bubbles: true }));
+    await nextTick();
+    assert.equal(dialog.querySelector(".hedge-error"), null);
     const period = dialog.querySelectorAll('input[type="range"]')[2];
     assert.equal(period.min, "0");
     assert.equal(period.max, "11", "the slider has twelve distinct timing presets");
@@ -934,22 +1016,21 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     const labels = () => [...root().querySelectorAll(".trade-boundary-label")].map(node => node.firstChild.textContent);
     mouse(brush.querySelector(".overlay"), "mousedown", 30);
     mouse(window, "mousemove", 91);
-    assert.deepEqual(labels(), ["Entry · 09:31 UTC", "Exit · 10:31 UTC"], "drag previews snap to minute observations, independent of coarse chart points");
+    assert.deepEqual(labels(), ["Entry · 09:31 UTC · $103.10", "Exit · 10:31 UTC · $109.10"], "drag previews snap to minute observations, independent of coarse chart points");
     assert.ok([...root().querySelectorAll(".trade-boundary-label")].every(node => Number(node.getAttribute("y")) < 0), "entry and exit labels sit above the plot and selection band");
     assert.equal(chartState.range, null, "live time labels do not commit the trade while dragging");
     mouse(window, "mousemove", 151);
-    assert.deepEqual(labels(), ["Entry · 09:31 UTC", "Exit · 11:31 UTC"], "the exit time updates before the mouse is released");
+    assert.deepEqual(labels(), ["Entry · 09:31 UTC · $103.10", "Exit · 11:31 UTC · $115.10"], "the exit time updates before the mouse is released");
     mouse(window, "mouseup", 151);
     await nextTick();
     assert.deepEqual(chartState.range, [start + 31 * 60, start + 151 * 60]);
-    assert.deepEqual(labels(), ["Entry · 09:31 UTC", "Exit · 11:31 UTC"]);
+    assert.deepEqual(labels(), ["Entry · 09:31 UTC · $103.10", "Exit · 11:31 UTC · $115.10"]);
     assert.match(root().querySelector(".trade-boundary-label title").textContent, /04 Nov 26 09:31 UTC/);
     chartState.resolution = "3600"; await nextTick();
-    assert.deepEqual(labels(), ["Entry · 09:31 UTC", "Exit · 11:31 UTC"], "changing chart resolution preserves the selected times");
+    assert.deepEqual(labels(), ["Entry · 09:31 UTC · $103.10", "Exit · 11:31 UTC · $115.10"], "changing chart resolution preserves the minute entry/exit prices and times");
     assert.deepEqual(errors, []);
   } finally {
     app?.unmount();
-    for (const worker of workers) worker.terminate();
     await window.happyDOM.close();
     for (const [key, original] of originals) {
       if (original) Object.defineProperty(globalThis, key, original);

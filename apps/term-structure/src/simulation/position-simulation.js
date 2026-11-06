@@ -143,9 +143,9 @@ export function simulatePosition(config) {
   // Include variance boundaries and the exact exit, even for partial steps.
   const times = new Set([0, config.horizon]);
   const estimated = config.horizon / config.step;
-  if (estimated > 120000)
+  if (estimated > 90 * 24 * 60)
     throw new Error(
-      "This run exceeds 120,000 steps. Choose a shorter holding period.",
+      "This run exceeds 129,600 steps (90 days at one-minute resolution). Choose a shorter holding period.",
     );
   for (let t = config.step; t < config.horizon; t += config.step) times.add(t);
   for (const interval of curve.intervals)
@@ -154,6 +154,29 @@ export function simulatePosition(config) {
     if (leg.maturity < config.horizon) times.add(leg.maturity);
   const clock = [...times].sort((a, b) => a - b);
   const normal = normals(config.seed);
+  const pathRows = [];
+  let pathSpot = config.spot, pathTime = 0;
+  for (const elapsed of clock) {
+    if (elapsed > 0)
+      pathSpot = marketProcess.advance(marketState, pathTime, elapsed - pathTime, normal, normal.uniform, config.drift);
+    pathRows.push({ elapsed, spot: pathSpot });
+    pathTime = elapsed;
+  }
+  const requested = config.tradeWindow;
+  if (requested != null && (!Array.isArray(requested) || requested.length !== 2 || !requested.every(Number.isFinite)))
+    throw new Error("Choose a valid entry and exit on the price chart.");
+  const [from, to] = requested ? [...requested].sort((a, b) => a - b) : [0, config.horizon];
+  const observations = pathRows.filter(row => row.elapsed >= from && row.elapsed <= to);
+  if (observations.length < 2)
+    throw new Error("Select at least two observations for the trade window.");
+  const entry = observations[0], exitTime = observations.at(-1).elapsed;
+  if (legs.some(leg => leg.maturity <= entry.elapsed))
+    throw new Error("Trade entry must be before every selected option's expiry.");
+  for (const leg of legs) {
+    leg.entryIv = leg.curve.remainingIv(entry.elapsed);
+    leg.exitIv = leg.curve.remainingIv(exitTime);
+    leg.entryPrice = calcOptionPrice(entry.spot, leg.strike, leg.maturity - entry.elapsed, leg.entryIv, leg.optionType);
+  }
   const entryValue = legs.reduce((sum, leg) => sum + leg.signedQty * leg.entryPrice, 0);
   // Gross premium stays meaningful for zero-cost spreads and offsetting legs.
   const premium = legs.reduce((sum, leg) => sum + Math.abs(leg.signedQty) * leg.entryPrice, 0);
@@ -170,11 +193,10 @@ export function simulatePosition(config) {
     sum + (settledValues[i] ?? leg.signedQty * calcOptionPrice(
       price, leg.strike, Math.max(0, leg.maturity - elapsed), vols[i], leg.optionType,
     )), 0);
-  let spot = config.spot;
-  let optionFees = (grossQuantity * spot * config.optionBps) / 10000;
+  let optionFees = (grossQuantity * entry.spot * config.optionBps) / 10000;
   let previous, previousIvs, sampledVariance = 0;
-  for (const elapsed of clock) {
-    const exit = elapsed === config.horizon;
+  for (const { elapsed, spot } of observations) {
+    const exit = elapsed === exitTime;
     // Every leg rolls its own remaining variance from the same calendar-time curve.
     const ivs = legs.map(leg => leg.curve.remainingIv(elapsed));
     const iv = ivs[0];
@@ -183,10 +205,7 @@ export function simulatePosition(config) {
       curve.intervals.at(-1)
     ).iv;
     if (previous) {
-      const dt = elapsed - previous.elapsed;
-      const oldSpot = spot;
-      spot = marketProcess.advance(marketState, previous.elapsed, dt, normal, normal.uniform, config.drift);
-      sampledVariance += Math.log(spot / oldSpot) ** 2;
+      sampledVariance += Math.log(spot / previous.spot) ** 2;
       const timeValue = optionValueAt(previous.spot, elapsed, previousIvs);
       const rollValue = optionValueAt(previous.spot, elapsed, ivs);
       const endValue = optionValueAt(spot, elapsed, ivs);
@@ -275,6 +294,8 @@ export function simulatePosition(config) {
   return {
     config: structuredClone(config),
     rows,
+    pathRows,
+    tradeWindow: [entry.elapsed, exitTime],
     trades,
     settlements,
     curve: { intervals: curve.intervals, entryIv: curve.entryIv },
@@ -285,7 +306,7 @@ export function simulatePosition(config) {
     marketModel: { version: marketProcess.modelVersion, daysPerYear: marketProcess.daysPerYear,
       cappedJumpSteps: marketState.cappedJumpSteps },
     targetRv: marketProcess.targetRv,
-    sampledRv: Math.sqrt((sampledVariance * YEAR) / config.horizon),
+    sampledRv: Math.sqrt((sampledVariance * YEAR) / (exitTime - entry.elapsed)),
     maxDrawdown: rows.reduce(
       (state, row) => ({
         peak: Math.max(state.peak, row.pnl),

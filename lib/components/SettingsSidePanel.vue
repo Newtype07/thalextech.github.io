@@ -101,7 +101,10 @@ onBeforeUnmount(() => {
           @pointerdown="startResize" @pointermove="moveResize" @pointerup="stopResize" @pointercancel="stopResize"
           @lostpointercapture="stopResize" @keydown="resizeWithKeyboard"></div>
         <header>
-          <h2 :id="`${panelId}-title`">{{ title }}</h2>
+          <div class="settings-panel-heading">
+            <h2 :id="`${panelId}-title`">{{ title }}</h2>
+            <slot name="header-actions" />
+          </div>
           <button type="button" class="settings-panel-close" aria-label="Close settings" @click="close()">×</button>
         </header>
         <div class="settings-panel-content"><slot /></div>
@@ -138,6 +141,7 @@ onBeforeUnmount(() => {
 header { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 12px;
   padding: 19px 22px; border-bottom: 1px solid #303034; background: var(--color-bg); }
 h2 { font-size: 14px; font-weight: 600; margin: 0; }
+.settings-panel-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 20px; min-width: 0; }
 .settings-panel-close { background: transparent; border: 0; padding: 2px 7px; color: #aaa; font-size: 25px; line-height: 1; cursor: pointer; }
 .settings-panel-close:hover { color: #fff; }
 .settings-panel-content { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 22px; min-height: 0; background: var(--color-bg); }

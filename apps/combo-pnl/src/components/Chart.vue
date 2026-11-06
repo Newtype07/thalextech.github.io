@@ -58,7 +58,7 @@ let lastEmittedTimeRangeKey = null;
 
 const layout = {
   width: 1200,
-  headerHeight: 76,
+  headerHeight: 84,
   topPanelHeight: 300,
   bottomPanelHeight: 420,
   greekEvolutionPanelHeight: 860,
@@ -285,6 +285,7 @@ const buildMarkTrendSegments = (points, baselineMark) => {
 
 const formatDate = d3.utcFormat("%d %b %y %H:%M");
 const formatBoundaryTime = d3.utcFormat("%H:%M UTC");
+const formatBoundaryPrice = d3.format("$,.2f");
 const formatPnl = d3.format("$,.0f");
 const formatMarkAxis = d3.format(",.0f");
 const formatMarkDelta = d3.format("+,.0f");
@@ -2001,15 +2002,17 @@ const render = () => {
           ` · ${fillTime(new Date(fill.time * 1000))} · $${d3.format(",.2f")(fill.price)} · ${fill.reason}`;
       });
 
-    const legend = topGroup.append("g")
-      .attr("class", "hedge-trade-legend")
-      .attr("transform", `translate(${innerWidth - 190},-42)`);
+    const legend = svg.append("g")
+      .attr("class", "hedge-trade-legend");
     [{ label: "Hedge buy", color: CHART_COLORS.positive },
       { label: "Hedge sell", color: CHART_COLORS.negative }].forEach((item, i) => {
       legend.append("circle").attr("cx", i * 100).attr("cy", 0).attr("r", 4).attr("fill", item.color);
       legend.append("text").attr("x", i * 100 + 9).attr("y", 3)
         .attr("fill", CHART_COLORS.secondaryText).style("font-size", "10px").text(item.label);
     });
+    const legendBounds = legend.node().getBBox?.();
+    const legendCenter = legendBounds?.width ? legendBounds.x + legendBounds.width / 2 : 80;
+    legend.attr("transform", `translate(${layout.width / 2 - legendCenter},56)`);
   }
 
   const tradeBackground = topGroup.insert("rect", ":first-child")
@@ -2017,6 +2020,8 @@ const render = () => {
     .attr("y", 0).attr("height", topInnerHeight).attr("fill", "#202020")
     .attr("display", "none");
   const spotlight = topGroup.append("g").attr("class", "trade-window-spotlight").attr("pointer-events", "none");
+  const boundaryPrices = new Map((props.observationData.length ? props.observationData : index)
+    .map(point => [Number(point.ts), Number(point.index_price_close ?? point.value)]));
   function drawTradeSpotlight(domain) {
     spotlight.selectAll("*").remove();
     tradeBackground.attr("display", domain ? null : "none");
@@ -2034,13 +2039,15 @@ const render = () => {
     const observations = props.observationData.length ? props.observationData : index;
     const snappedRange = snapTradeWindow(observations, domain.map(date => date.getTime() / 1000));
     const times = snappedRange?.map(ts => new Date(ts * 1000)) ?? domain;
-    [{ x: entryX, label: "Entry", time: times[0], anchor: "start", offset: 6, y: exitX - entryX < 200 ? -24 : -8 },
+    [{ x: entryX, label: "Entry", time: times[0], anchor: "start", offset: 6, y: exitX - entryX < 340 ? -24 : -8 },
       { x: exitX, label: "Exit", time: times[1], anchor: "end", offset: -6, y: -8 }].forEach(boundary => {
+      const price = boundaryPrices.get(boundary.time.getTime() / 1000);
+      const priceLabel = Number.isFinite(price) && price > 0 ? ` · ${formatBoundaryPrice(price)}` : "";
       spotlight.append("text").attr("class", "trade-boundary-label")
         .attr("x", boundary.x + boundary.offset).attr("y", boundary.y)
         .attr("text-anchor", boundary.anchor).attr("fill", CHART_COLORS.secondaryText)
-        .style("font-size", "10px").text(`${boundary.label} · ${formatBoundaryTime(boundary.time)}`)
-        .append("title").text(`${boundary.label} · ${formatDate(boundary.time)} UTC`);
+        .style("font-size", "10px").text(`${boundary.label} · ${formatBoundaryTime(boundary.time)}${priceLabel}`)
+        .append("title").text(`${boundary.label} · ${formatDate(boundary.time)} UTC${priceLabel}`);
     });
   }
   brushGroup.raise();

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeTicker, fetchStreamSnapshot } from "./live-quotes.js";
+import { normalizeTicker, fetchStreamSnapshot, readyAtmExpiries } from "./live-quotes.js";
 import { fetchLiveQuotes } from "./market-data.js";
 const chain = ["C", "P"].map((side) => ({
   name: `BTC-TEST-${side}`,
@@ -18,6 +18,17 @@ const row = (iv = 0.5, bid = [], ask = []) => [
   ask,
   null,
 ];
+test("ATM readiness requires both listed brackets and sides at every expiry, independently of wing quotes", () => {
+  const ladder = [1, 7].flatMap(expiry => [80, 90, 110, 120].flatMap(strike =>
+    ["C", "P"].map(side => ({ name: `${expiry}-${strike}-${side}`, expiry, strike, side }))));
+  const brackets = ladder.filter(instrument => [90, 110].includes(instrument.strike));
+  assert.deepEqual([...readyAtmExpiries(ladder, brackets, 100)], [1, 7]);
+  assert.deepEqual([...readyAtmExpiries(ladder, brackets.slice(1), 100)], [7], "a missing call cannot freeze a half-populated average");
+  assert.deepEqual([...readyAtmExpiries(ladder, ladder.filter(instrument => instrument.strike === 80), 100)], [], "distant nearest-strike fallbacks must not count as ready");
+  assert.deepEqual([...readyAtmExpiries(ladder, ladder.filter(instrument => instrument.strike === 90), 90)], [1, 7], "an exact ATM strike needs no neighbouring strike");
+  assert.deepEqual([...readyAtmExpiries(ladder, ladder.filter(instrument => instrument.strike === 120), 130)], [1, 7], "outside the listed range, both sides of the nearest strike suffice");
+  assert.equal(readyAtmExpiries(ladder, brackets, null).size, 0);
+});
 class FakeSocket extends EventTarget {
   static onSend = () => {};
   static last;

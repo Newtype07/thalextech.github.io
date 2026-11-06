@@ -1,14 +1,13 @@
 <script setup>
 import { computed, ref, shallowRef, watch, onBeforeUnmount } from "vue";
 import SimulationChart from "./SimulationChart.vue";
-import SimulationPathsChart from "./SimulationPathsChart.vue";
 import MarketAssumptions from "../../../../lib/components/MarketAssumptions.vue";
 import DeltaHedgeControls from "../../../../lib/components/DeltaHedgeControls.vue";
 import DeltaHedgeToggle from "../../../../lib/components/DeltaHedgeToggle.vue";
+import SettingsSidePanel from "../../../../lib/components/SettingsSidePanel.vue";
 import { DEFAULT_HEDGE_POLICY } from "../../../../lib/delta-hedging/index.js";
 import PositionBuilder from "../../../../lib/components/PositionBuilder.vue";
 import { simulatePosition } from "../simulation/position-simulation.js";
-import { runPositionEnsemble } from "../simulation/ensemble-worker-client.js";
 import { builderInstruments, defaultShortStraddle, resolvePosition, entryValuations } from "../simulation/position-selection.js";
 
 const props = defineProps({
@@ -17,6 +16,9 @@ const props = defineProps({
   liveSpot: { type: Number, default: null },
   asOf: { type: Number, default: null },
   marketLoading: { type: Boolean, default: false },
+  marketProgress: { type: Object, default: () => ({ checked: 0, total: 0 }) },
+  marketCooldown: { type: Number, default: 0 },
+  marketError: { type: String, default: "" },
   instruments: { type: Array, default: () => [] },
 });
 const market = shallowRef(null);
@@ -26,12 +28,17 @@ const entrySpot = computed(() => market.value?.spot ?? null);
 const positionLegs = ref([]);
 let initialized = false;
 const instruments = computed(() => builderInstruments(market.value?.instruments || [], props.asset));
+const tradeWindow = ref(null);
 const settings = ref({
-  runs: 1,
-  exitAt: "first",
+  holdingDays: 7,
   driftPercent: 0,
   hedge: { ...DEFAULT_HEDGE_POLICY },
   optionBps: 1,
+});
+const holdingPresets = [1, 2, 3, 4, 5, 6, 7, 14, 30, 60, 90];
+const holdingStep = computed({
+  get: () => holdingPresets.indexOf(settings.value.holdingDays),
+  set: index => { settings.value.holdingDays = holdingPresets[index]; },
 });
 const marketSettings = ref({ shape: "forward", dynamics: "constant", rv: .5, rvMultiplier: 1, lookbackDays: 90, profile: null });
 const rvPercent = computed({ get: () => marketSettings.value.rvMultiplier * 100,
@@ -39,15 +46,13 @@ const rvPercent = computed({ get: () => marketSettings.value.rvMultiplier * 100,
 const result = shallowRef(null),
   error = ref(""),
   running = ref(false),
-  settingsOpen = ref(true),
   runFingerprint = ref(""),
   form = ref(null);
-const completed = ref(0);
 const pathSeed = ref(crypto.getRandomValues(new Uint32Array(1))[0]);
 function newPaths() { pathSeed.value = crypto.getRandomValues(new Uint32Array(1))[0]; run(); }
 let runController;
 const fingerprint = computed(() =>
-  JSON.stringify({ settings: settings.value, marketSettings: marketSettings.value, legs: positionLegs.value, market: market.value }),
+  JSON.stringify({ settings: settings.value, marketSettings: marketSettings.value, legs: positionLegs.value, market: market.value, tradeWindow: tradeWindow.value }),
 );
 const dirty = computed(
   () => result.value && fingerprint.value !== runFingerprint.value,
@@ -55,29 +60,43 @@ const dirty = computed(
 const nodeInputs = computed(() =>
   (market.value?.curve || []).map(({ seconds, iv }) => ({ seconds, iv })),
 );
+const curveCoverage = computed(() => {
+  const expiries = new Set(props.instruments.map(instrument => instrument.expiry));
+  const covered = new Set(props.liveCurve.filter(point => point.ready !== false)
+    .map(point => point.expiry ?? props.asOf + point.seconds));
+  return { ready: [...expiries].filter(expiry => covered.has(expiry)).length, total: expiries.size };
+});
 const canCapture = computed(() =>
-  !props.marketLoading && props.liveSpot > 0 && Number.isFinite(props.asOf) &&
+  props.liveSpot > 0 && Number.isFinite(props.asOf) &&
   props.liveCurve.length > 0 && props.instruments.length > 0,
 );
+// Wait for the curve's maturities, not every strike's ticker or chart history.
+// Once quote collection finishes, preserve the existing partial-curve fallback.
+const curveReady = computed(() => canCapture.value && (
+  !props.marketLoading || curveCoverage.value.ready === curveCoverage.value.total
+));
+const loadingLabel = computed(() => market.value
+  ? running.value ? "Running simulation…" : "Preparing simulation…"
+  : props.marketCooldown > 0
+    ? `Market data rate limit · retrying in ${props.marketCooldown}s…`
+    : props.instruments.length ? "Loading live ATM curve…" : "Loading listed options…");
 const preview = computed(() => {
   if (!market.value) return { error: "Waiting for live spot, ATM IVs and listed options." };
   try {
     const legs = resolvePosition(positionLegs.value, market.value.instruments, curveTime.value);
     const maturities = legs.map(leg => leg.maturity);
-    const horizon = settings.value.exitAt === "last" ? Math.max(...maturities) : Math.min(...maturities);
+    const lastMaturity = Math.max(...maturities);
+    const horizon = Math.min(settings.value.holdingDays * 86400, lastMaturity);
     const valuations = entryValuations(legs, nodeInputs.value, entrySpot.value);
-    return { legs, horizon, valuations, error: "" };
+    return { legs, horizon, lastMaturity, valuations, error: "" };
   } catch (e) {
     return { error: e.message };
   }
 });
-const mixedMaturities = computed(() => preview.value.legs?.some(leg => leg.maturity !== preview.value.horizon));
-const money = (value) =>
-  new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 2,
-  }).format(value);
+const holdingCapped = computed(() => preview.value.horizon < settings.value.holdingDays * 86400 - 1e-6);
+const holdingLabel = computed(() => `${settings.value.holdingDays} ${settings.value.holdingDays === 1 ? 'day' : 'days'}` +
+  (holdingCapped.value ? ` (ends at ${(preview.value.horizon / 86400).toFixed(2)} days, last option expiry)` : ''));
+watch([() => preview.value.horizon, () => preview.value.lastMaturity], () => { tradeWindow.value = null; });
 const timestamp = (seconds) =>
   new Date(seconds * 1000).toLocaleString("en-GB", {
     timeZone: "UTC",
@@ -115,7 +134,9 @@ watch(
     () => props.instruments,
   ],
   () => {
-    if (canCapture.value) useLive();
+    // Freeze one usable snapshot per refresh; background quotes must not keep
+    // replacing the path or restarting the simulation.
+    if (curveReady.value && (!market.value || market.value.asOf !== props.asOf)) useLive();
   },
   { immediate: true },
 );
@@ -144,7 +165,6 @@ async function run() {
   const controller = new AbortController();
   runController = controller;
   running.value = true;
-  completed.value = 0;
   error.value = "";
   // Give the browser a paint before starting the simulation.
   await new Promise((resolve) =>
@@ -166,6 +186,7 @@ async function run() {
       spot: entrySpot.value,
       legs: preview.value.legs,
       horizon: preview.value.horizon,
+      tradeWindow: tradeWindow.value ? [...tradeWindow.value] : null,
       rvMultiplier: marketSettings.value.rvMultiplier,
       drift: s.driftPercent / 100,
       threshold: s.hedge.threshold,
@@ -184,12 +205,7 @@ async function run() {
       curveSource,
       curveTime: curveTime.value,
     };
-    const next = s.runs === 100
-      ? await runPositionEnsemble(config, {
-          signal: controller.signal,
-          onProgress: (count) => { completed.value = count; },
-        })
-      : simulatePosition(config);
+    const next = simulatePosition(config);
     if (controller.signal.aborted) return;
     result.value = next;
     runFingerprint.value = startedFingerprint;
@@ -202,7 +218,7 @@ async function run() {
 function download() {
   if (!result.value) return;
   const data = result.value;
-  const columns = data.paths ? ["run", "elapsedSeconds", "totalPnl"] : [
+  const columns = [
     "elapsedSeconds",
     "spot",
     "optionPnl",
@@ -212,27 +228,17 @@ function download() {
   ];
   const csv = [
     columns.join(","),
-    ...(data.paths ? [
-      ...data.paths.flatMap((path, run) => path.pnl.map((pnl, i) =>
-        [run + 1, data.elapsed[i], pnl].join(","))),
-      ...data.median.map((pnl, i) => ["median", data.elapsed[i], pnl].join(",")),
-    ] : data.rows.map((row) =>
-      [
-        row.elapsed,
-        row.spot,
-        row.optionPnl - row.optionFees,
-        row.hedgePnl - row.hedgeFees,
-        row.pnl,
-        row.fees,
-      ].join(","),
-    )),
+    ...data.rows.map((row) =>
+      [row.elapsed, row.spot, row.optionPnl - row.optionFees,
+        row.hedgePnl - row.hedgeFees, row.pnl, row.fees].join(","),
+    ),
   ].join("\n");
   const url = URL.createObjectURL(
     new Blob([csv], { type: "text/csv;charset=utf-8" }),
   );
   const a = document.createElement("a");
   a.href = url;
-  a.download = `${data.config.asset}-position${data.paths ? '-100-runs' : ''}.csv`;
+  a.download = `${data.config.asset}-position.csv`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
@@ -242,210 +248,166 @@ function download() {
   <section class="simulator" aria-label="Delta-hedged option position simulator">
     <form
       ref="form"
-      class="sim-layout"
-      :class="{ 'sim-layout-collapsed': !settingsOpen }"
+      class="settings-workspace sim-workspace"
       @submit.prevent="newPaths()"
     >
-      <div v-if="market" class="sim-position-builder">
-        <PositionBuilder
-          v-model:legs="positionLegs"
-          :spot="entrySpot"
-          :vol="nodeInputs[0]?.iv || 0.4"
-          :T="30 / 365.25"
-          :show-tte="true"
-          :instruments="instruments"
-          :index-name="`${asset}USD`"
-          :index-price="entrySpot"
-          :index-fetched-at="curveTime * 1000"
-          :valuation-by-leg="preview.valuations || {}"
-        />
-      </div>
-      <div class="sim-divider" role="separator"></div>
-      <div class="sim-toolbar">
-        <div class="sim-exit-control" role="group" aria-label="Simulation runs">
-          <div class="underlyingToggle">
-            <button v-for="count in [1, 100]" :key="count" type="button" class="underlyingButton"
-              :class="{ underlyingButtonActive: settings.runs === count }"
-              :aria-pressed="settings.runs === count" @click="settings.runs = count">
-              {{ count === 1 ? 'Single run' : '100 runs' }}
-            </button>
-          </div>
-        </div>
-        <div class="sim-exit-control" role="group" aria-label="Simulate until">
-          <span>Simulate until</span>
-          <div class="underlyingToggle">
-            <button
-              v-for="exit in ['first', 'last']"
-              :key="exit"
-              type="button"
-              class="underlyingButton"
-              :class="{ underlyingButtonActive: settings.exitAt === exit }"
-              :aria-pressed="settings.exitAt === exit"
-              @click="settings.exitAt = exit"
-            >
-              {{ exit === 'first' ? 'First expiry' : 'Last expiry' }}
-            </button>
-          </div>
-        </div>
-        <div v-if="marketSettings.shape === 'forward'" class="field sim-rv-control">
-          <label for="sim-rv-ratio">RV / forward IV</label>
-          <input id="sim-rv-ratio" v-model.number="rvPercent" type="range" min="50" max="200" step="1" aria-label="Realized / forward volatility" />
-          <output for="sim-rv-ratio">{{ marketSettings.rvMultiplier.toFixed(2) }}×</output>
-        </div>
-        <div class="field sim-drift-control">
-          <label for="sim-drift">Annual drift</label>
-          <input
-            id="sim-drift"
-            v-model.number="settings.driftPercent"
-            type="number"
-            min="-500"
-            max="500"
-            step="any"
-            required
-            aria-label="Annual drift"
+      <div class="sim-layout">
+        <div v-if="market" class="sim-position-builder">
+          <PositionBuilder
+            v-model:legs="positionLegs"
+            title=""
+            :spot="entrySpot"
+            :vol="nodeInputs[0]?.iv || 0.4"
+            :T="30 / 365.25"
+            :show-tte="true"
+            :instruments="instruments"
+            :index-name="`${asset}USD`"
+            :index-price="entrySpot"
+            :index-fetched-at="curveTime * 1000"
+            :valuation-by-leg="preview.valuations || {}"
           />
-          <span>%</span>
         </div>
-        <button
-          class="saveButton sim-run"
-          type="submit"
-          aria-label="Refresh simulation"
-          :aria-busy="running"
-          :title="running ? 'Simulating…' : settings.runs === 100 ? 'Generate 100 new simulations' : 'Generate a new simulation'"
-          :disabled="running || !!preview.error"
-        >
-          <svg
-            class="sim-refresh-icon"
-            :class="{ 'is-running': running }"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.6"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M21 3v5h-5M3 21v-5h5M3 12a9 9 0 0 1 15.36-6.36L21 8M21 12a9 9 0 0 1-15.36 6.36L3 16" />
-          </svg>
-        </button>
-
-        <div class="sim-hedge-actions">
-        <DeltaHedgeToggle :model-value="settings.hedge.enabled" @update:model-value="settings.hedge = { ...settings.hedge, enabled: $event }" />
-        <button
-          class="saveButton sim-settings-toggle"
-          type="button"
-          :aria-expanded="settingsOpen"
-          :aria-label="settingsOpen ? 'Hide hedge settings' : 'Show hedge settings'"
-          :title="settingsOpen ? 'Hide hedge settings' : 'Show hedge settings'"
-          aria-controls="sim-hedge-settings"
-          @click="settingsOpen = !settingsOpen"
-        >
-          <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-            <path d="m5 7.5 5 5 5-5" />
-          </svg>
-        </button>
-        </div>
-      </div>
-      <div class="sim-main">
-        <div class="sim-trade-facts">
-          <span>{{ positionLegs.length }} option {{ positionLegs.length === 1 ? "leg" : "legs" }}</span>
-          <span>Spot {{ entrySpot ? money(entrySpot) : "—" }}</span>
-          <span>{{ mixedMaturities
-            ? settings.exitAt === 'last'
-              ? "Exit at last expiry · earlier legs cash-settle"
-              : "Exit at first expiry · later legs closed at model marks"
-            : "Hold to expiry" }}</span>
-          <span class="sim-source" :title="curveTime ? timestamp(curveTime) : ''">{{
-            market ? "Live ATM marks" : "Waiting for market"
-          }}</span>
-        </div>
-        <p v-if="error" class="sim-status sim-error" role="alert">{{ error }}</p>
-        <p v-else-if="preview.error && market" class="sim-status" role="status">
-          {{ preview.error }}
-        </p>
-        <p
-          v-if="running && settings.runs === 100"
-          class="sim-status sim-progress"
-          role="status"
-          aria-live="polite"
-        >
-          Simulating {{ completed }} / 100 runs…
-        </p>
-        <p
-          v-else-if="dirty && !error && !preview.error"
-          class="sim-status sim-pending"
-          role="status"
-        >
-          Updating simulation…
-        </p>
-        <div class="sim-results" :aria-busy="running">
-          <SimulationPathsChart v-if="result?.paths" :result="result" @export="download" />
-          <SimulationChart v-else-if="result" :result="result" @export="download" />
-          <div v-else class="sim-empty">
-            {{
-              market
-                ? "Preparing simulation…"
-                : "Waiting for live market data. Use Refresh above to retry."
-            }}
+        <div class="sim-divider" role="separator"></div>
+        <div class="sim-toolbar">
+          <div class="field sim-rv-control sim-horizon-control">
+            <label for="sim-horizon">Holding horizon</label>
+            <input id="sim-horizon" v-model.number="holdingStep" type="range" min="0" :max="holdingPresets.length - 1" step="1"
+              aria-label="Holding horizon" :aria-valuetext="holdingLabel" :title="holdingLabel" />
+            <output for="sim-horizon" :title="holdingLabel">{{ settings.holdingDays }}d<span v-if="holdingCapped"> · expiry</span></output>
           </div>
-        </div>
-
-        <footer class="sim-footer">
-          <details class="sim-method">
-            <summary>Model assumptions</summary>
-            <p>
-              Up to four option legs, each priced with its own expiry's remaining
-              variance from the captured ATM term structure and zero rates.
-              Annual drift defaults to zero and is an editable
-              percentage of expected price growth in the simulation model. Forward
-              variance shapes the simulated price path; the RV / forward IV ratio
-              scales its volatility. Option IV follows the variance remaining to
-              expiry. The model excludes smile, funding, basis, margin and
-              liquidation. Each leg cash-settles at its own expiry. At the selected
-              exit, any unexpired legs close at model marks and the hedge is unwound.
-            </p>
-            <p>
-              Hedges fill at the simulated spot and are checked at the selected time
-              step. Option and hedge P&L each include their own execution costs,
-              as selected in hedge settings. Settings changes reuse the same random
-              price path; Refresh simulation generates new paths. In 100 runs mode, the same assumptions are used
-              for 100 independent paths. The highlighted line is their median
-              total P&L at each time, after all option and hedge costs.
-            </p>
-          </details>
-        </footer>
-      </div>
-      <aside
-        v-show="settingsOpen"
-        id="sim-hedge-settings"
-        class="sim-settings"
-        aria-label="Hedge settings"
-      >
-        <h2>Hedge settings</h2>
-        <p class="sim-settings-intro">
-          Changes update the simulation automatically.
-        </p>
-        <DeltaHedgeControls v-model="settings.hedge" :asset="asset" :observation-seconds="60" />
-        <MarketAssumptions v-model="marketSettings" :asset="asset" :forward-available="!!market" />
-        <div class="sim-settings-panel">
-          <label
-            >Option cost · bps / leg<input
-              v-model.number="settings.optionBps"
+          <div v-if="marketSettings.shape === 'forward'" class="field sim-rv-control">
+            <label for="sim-rv-ratio">RV / forward IV</label>
+            <input id="sim-rv-ratio" v-model.number="rvPercent" type="range" min="50" max="200" step="1" aria-label="Realized / forward volatility" />
+            <output for="sim-rv-ratio">{{ marketSettings.rvMultiplier.toFixed(2) }}×</output>
+          </div>
+          <div class="field sim-drift-control">
+            <label for="sim-drift">Annual drift</label>
+            <input
+              id="sim-drift"
+              v-model.number="settings.driftPercent"
               type="number"
-              min="0"
+              min="-500"
+              max="500"
               step="any"
               required
-          /></label>
-          <p v-if="settings.exitAt === 'first'" class="sim-wide">
-            Exit at the first option expiry. Later legs close at model marks;
-            only those later legs incur option closing costs.
-          </p>
-          <p v-else class="sim-wide">
-            Run to the last option expiry. Earlier legs cash-settle at their own
-            expiries; the hedge policy continues on the remaining option delta.
-          </p>
+              aria-label="Annual drift"
+            />
+            <span>%</span>
+          </div>
+          <button
+            class="saveButton sim-run"
+            type="submit"
+            aria-label="Refresh simulation"
+            :aria-busy="running"
+            :title="running ? 'Simulating…' : 'Generate a new simulation'"
+            :disabled="running || !!preview.error"
+          >
+            <svg
+              class="sim-refresh-icon"
+              :class="{ 'is-running': running }"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M21 3v5h-5M3 21v-5h5M3 12a9 9 0 0 1 15.36-6.36L21 8M21 12a9 9 0 0 1-15.36 6.36L3 16" />
+            </svg>
+          </button>
+
+          <div class="sim-hedge-actions">
+            <DeltaHedgeToggle :model-value="settings.hedge.enabled" @update:model-value="settings.hedge = { ...settings.hedge, enabled: $event }" />
+            <SettingsSidePanel target="#term-sim-settings-dock" title="Hedge settings">
+              <template #header-actions>
+                <DeltaHedgeToggle :model-value="settings.hedge.enabled" @update:model-value="settings.hedge = { ...settings.hedge, enabled: $event }" />
+              </template>
+              <p class="sim-settings-intro">
+                Changes update the simulation automatically.
+              </p>
+              <DeltaHedgeControls v-model="settings.hedge" :asset="asset" :observation-seconds="60" :show-toggle="false">
+                <MarketAssumptions v-model="marketSettings" :asset="asset" :forward-available="!!market" :show-forward-ratio="false" />
+                <div class="sim-settings-panel">
+                  <label
+                    >Option cost · bps / leg<input
+                      v-model.number="settings.optionBps"
+                      type="number"
+                      min="0"
+                      step="any"
+                      required
+                  /></label>
+                  <p class="sim-wide">
+                    The holding horizon limits the path, ending at the last expiry if sooner.
+                    Drag on the index chart to select entry and exit. Unexpired legs close
+                    at model marks; earlier expiries cash-settle. Double-click to reset.
+                  </p>
+                </div>
+              </DeltaHedgeControls>
+            </SettingsSidePanel>
+          </div>
         </div>
-      </aside>
+        <div class="sim-main">
+          <p v-if="error" class="sim-status sim-error" role="alert">{{ error }}</p>
+          <p v-else-if="preview.error && market" class="sim-status" role="status">
+            {{ preview.error }}
+          </p>
+          <p v-if="dirty && !error && !preview.error" class="sim-status sim-pending" role="status">
+            Updating simulation…
+          </p>
+          <div class="sim-results" :aria-busy="running || (!market && marketLoading)">
+            <SimulationChart v-if="result" :result="result" @update:trade-window="tradeWindow = $event" @export="download" />
+            <div v-else-if="!error && !(preview.error && market)" class="sim-empty" role="status" aria-live="polite">
+              <template v-if="market || marketLoading">
+                <span>{{ loadingLabel }}</span>
+                <progress
+                  class="sim-load-progress"
+                  :aria-label="market ? 'Simulation preparation' : 'Live quote collection'"
+                  :value="!market && marketProgress.total ? marketProgress.checked : undefined"
+                  :max="marketProgress.total || 1"
+                ></progress>
+                <small v-if="!market && curveCoverage.total">
+                  {{ curveCoverage.ready }} / {{ curveCoverage.total }} ATM expiries ready
+                  <template v-if="marketProgress.total"> · {{ marketProgress.checked }} / {{ marketProgress.total }} quotes checked</template>
+                </small>
+                <small v-if="!market">Simulation starts as soon as the ATM curve is ready.</small>
+              </template>
+              <template v-else>
+                <span>{{ marketError || 'Live market data unavailable.' }} Use Refresh above to retry.</span>
+              </template>
+            </div>
+          </div>
+
+          <footer class="sim-footer">
+            <details class="sim-method">
+              <summary>Model assumptions</summary>
+              <p v-if="market" class="sim-snapshot">Live ATM marks · {{ timestamp(curveTime) }}</p>
+              <p>
+                Up to four option legs, each priced with its own expiry's remaining
+                variance from the captured ATM term structure and zero rates.
+                Annual drift defaults to zero and is an editable
+                percentage of expected price growth in the simulation model. Forward
+                variance shapes the simulated price path; the RV / forward IV ratio
+                scales its volatility. Option IV follows the variance remaining to
+                expiry. The model excludes smile, funding, basis, margin and
+                liquidation. Each leg cash-settles at its own expiry. At the selected
+                exit, any unexpired legs close at model marks and the hedge is unwound.
+              </p>
+              <p>
+                Hedges fill at the simulated spot and are checked every minute. Option and hedge P&L each include their own execution costs,
+                as selected in hedge settings. Settings changes reuse the same random
+                price path; Refresh simulation generates a new path.
+                The holding horizon limits the path to the selected number of days or the last
+                option expiry, whichever comes first. Dragging the index chart selects the trade window on that same path,
+                with a fresh option valuation and hedge ledger at entry.
+                Bars sample cumulative total P&L since entry; they do not sum observations.
+                Inspection and CSV retain every trade observation.
+              </p>
+            </details>
+          </footer>
+        </div>
+      </div>
+      <div id="term-sim-settings-dock" class="settings-dock"></div>
     </form>
   </section>
 </template>
@@ -458,21 +420,20 @@ function download() {
   --color-border: #292929;
   --color-border-strong: #484848;
   margin: 0;
-  padding: 18px 28px 24px;
+  padding: 0;
   font-size: 12px;
   background: #000;
 }
+.sim-workspace {
+  --settings-panel-width: 34vw;
+}
 .sim-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
-  grid-template-areas: "builder ." "divider ." "toolbar settings" "main settings";
-  grid-template-rows: auto auto auto 1fr;
-  gap: 0 28px;
-  align-items: start;
-}
-.sim-layout-collapsed {
   grid-template-columns: minmax(0, 1fr);
   grid-template-areas: "builder" "divider" "toolbar" "main";
+  grid-template-rows: auto auto auto 1fr;
+  padding: 18px 28px 24px;
+  align-items: start;
 }
 .sim-position-builder {
   grid-area: builder;
@@ -491,6 +452,7 @@ function download() {
 .sim-main {
   grid-area: main;
   min-width: 0;
+  padding-top: 20px;
 }
 .sim-toolbar {
   grid-area: toolbar;
@@ -502,20 +464,8 @@ function download() {
 .sim-toolbar > .saveButton {
   height: 36px;
 }
-.sim-settings-toggle { display: inline-flex; align-items: center; justify-content: center; width: 28px; padding: 6px; border: 0; }
-.sim-settings-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
 .sim-hedge-actions { display: inline-flex; align-items: center; gap: 4px; }
-.sim-exit-control {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 10px;
-  color: var(--color-text-muted);
-  white-space: nowrap;
-}
-.sim-exit-control .underlyingToggle {
-  height: 36px;
-}
+
 .sim-rv-control {
   gap: 10px;
 }
@@ -530,6 +480,9 @@ function download() {
   font-variant-numeric: tabular-nums;
   color: var(--color-text);
 }
+.sim-horizon-control { min-width: 0; max-width: 100%; }
+.sim-horizon-control label { white-space: nowrap; }
+.sim-horizon-control input { min-width: 40px; }
 .sim-drift-control input {
   width: 56px;
   padding: 0;
@@ -572,24 +525,6 @@ function download() {
     animation: none;
   }
 }
-.sim-settings {
-  --color-bg: #141417;
-  grid-area: settings;
-  position: sticky;
-  top: 16px;
-  min-width: 0;
-  padding: 4px 0 16px 20px;
-  border-left: 1px solid var(--color-border);
-  background: var(--color-bg);
-  isolation: isolate;
-  z-index: 2;
-}
-.sim-settings h2 {
-  margin: 0 0 8px;
-  color: var(--color-text);
-  font-size: 13px;
-  font-weight: 500;
-}
 .sim-settings-intro {
   margin: 0 0 18px;
   color: var(--color-text-muted);
@@ -627,19 +562,6 @@ function download() {
   font-size: 11px;
   line-height: 1.6;
 }
-.sim-trade-facts {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 18px;
-  margin: 12px 0 20px;
-  font-size: 11px;
-  color: var(--color-text-muted);
-}
-.sim-source {
-  margin-left: auto;
-  font-size: 10px;
-}
 .sim-status {
   margin: 12px 0;
   color: #aaaaaa;
@@ -654,13 +576,31 @@ function download() {
 }
 .sim-empty {
   display: flex;
+  flex-direction: column;
+  gap: 12px;
   align-items: center;
   justify-content: center;
-  min-height: 500px;
+  padding: 24px 0;
   color: var(--color-text-muted);
   font-size: 12px;
   background: #000;
 }
+.sim-empty small {
+  font-size: 11px;
+  text-align: center;
+}
+.sim-load-progress {
+  width: min(320px, 100%);
+  height: 5px;
+  border: 0;
+  border-radius: 3px;
+  overflow: hidden;
+  accent-color: #00bf8c;
+  background: var(--color-border);
+}
+.sim-load-progress::-webkit-progress-bar { background: var(--color-border); }
+.sim-load-progress::-webkit-progress-value { background: #00bf8c; }
+.sim-load-progress::-moz-progress-bar { background: #00bf8c; }
 .sim-footer {
   display: flex;
   align-items: flex-start;
@@ -682,35 +622,9 @@ select:focus-visible {
   outline: 1px solid #999999;
   outline-offset: 2px;
 }
-@media (max-width: 1100px) {
-  .sim-layout {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "builder" "divider" "toolbar" "settings" "main";
-    gap: 20px 0;
-  }
-  .sim-layout-collapsed {
-    grid-template-areas: "builder" "divider" "toolbar" "main";
-    gap: 0;
-  }
-  .sim-settings {
-    position: static;
-    padding: 16px;
-    border: 1px solid var(--color-border);
-    border-radius: 6px;
-  }
-  .sim-divider {
-    margin-bottom: 0;
-  }
-}
 @media (max-width: 760px) {
-  .simulator {
+  .sim-layout {
     padding: 16px;
-  }
-  .sim-source {
-    margin-left: 0;
-  }
-  .sim-empty {
-    min-height: 350px;
   }
 }
 </style>
