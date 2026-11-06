@@ -28,7 +28,7 @@ const LEGEND_TOP_OFFSET = 14;
 
 const TEXT_STYLES = {
   axisText: { fill: "#70767d", size: "10px" },
-  axisLabel: { fill: "#70767d", size: "11px", weight: 600 },
+  axisLabel: { fill: "#70767d", size: "11px", weight: 400 },
   mainTitle: { fill: "#e8eaed", size: "16px", weight: 600 },
   mainSubtitle: { fill: "#70767d", size: "11px" },
   legendTitle: { fill: "#70767d", size: "11px" },
