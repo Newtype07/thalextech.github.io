@@ -60,28 +60,6 @@ body {
   color: var(--color-text);
 }
 
-.appTabs {
-  display: flex;
-  flex: none;
-  align-self: stretch;
-  align-items: center;
-  gap: 24px;
-  margin-left: auto;
-}
-.appTabs button {
-  padding: 13px 0 12px;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: none;
-  color: #999999;
-  font-size: 12px;
-  cursor: pointer;
-}
-.appTabs button[aria-selected="true"] {
-  color: #e8eaed;
-  border-bottom-color: #ffffff;
-}
-
 .divider {
   flex: none;
   width: 1px;

@@ -39,7 +39,7 @@ async function compiler(directory) {
   };
 }
 
-test("performance UI reuses paths on policy edits and refreshes explicitly, inspects, exports, and preserves results across tabs", async (t) => {
+test("shared performance UI reuses paths, inspects and exports; the released app exposes only the curve", async (t) => {
   const directory = await mkdtemp(
     fileURLToPath(new URL("../.simulation-test-", import.meta.url)),
   );
@@ -765,43 +765,21 @@ test("performance UI reuses paths on policy edits and refreshes explicitly, insp
     for (let i = 0; i < 400 && usableTickers < 4; i++) await settle();
     await settle();
     assert.equal(usableTickers, 4, "both ATM brackets are already loaded on the curve tab");
-    assert.ok(root().querySelector(".topBar [role=tablist]"), "workspace tabs live in the top bar");
-    button("Simulate").click();
-    await nextTick();
-    assert.equal(root().querySelector("#panel-curve").style.display, "none");
-    await settle();
-    assert.ok(root().querySelector(".sim-performance"), "entering simulation reuses the curve while wing quotes and history remain blocked");
-    assert.ok(button("Restart fetch"), "background market/history loading is still in flight");
-    assert.equal(chainRequests, 1, "opening simulation does not refetch the option chain");
-    const resultText = root().querySelector(".performance-readout").textContent;
-    const resultPath = root()
-      .querySelector(".index-price-path")
-      .getAttribute("d");
-    root().querySelector("#tab-curve").click();
-    await nextTick();
-    assert.equal(root().querySelector("#panel-simulate").style.display, "none");
-    button("Simulate").click();
-    await nextTick();
-    assert.equal(root().querySelector(".performance-readout").textContent, resultText);
-    assert.equal(
-      root().querySelector(".index-price-path").getAttribute("d"),
-      resultPath,
-    );
+    assert.equal(root().querySelector(".topBar [role=tablist]"), null, "the released app has no workspace tabs");
+    assert.equal(button("Simulate"), undefined, "simulation is not exposed on main");
+    assert.equal(root().querySelector("#panel-simulate"), null);
+    assert.equal(root().querySelector(".sim-performance"), null, "simulation does not mount in the released app");
+    assert.ok(root().querySelector("#panel-curve"));
+    assert.ok(root().querySelector("#volatility-view"), "term structure controls remain available");
+    assert.ok(button("Restart fetch"), "live quotes and history continue loading in the curve view");
+    assert.equal(chainRequests, 1, "rendering the curve does not restart market loading");
     releaseWings();
     releaseHistory();
     await settle();
     button("ETH").click();
     await settle();
-    assert.equal(
-      root().querySelector(".sim-performance"),
-      null,
-      "changing asset cannot mislabel BTC results as ETH",
-    );
-    assert.match(
-      root().querySelector(".sim-empty").textContent,
-      /No live ETH option expiries returned.*Use Refresh above to retry/,
-    );
-    assert.equal(button("Refresh simulation").disabled, true);
+    assert.equal(button("ETH").getAttribute("aria-pressed"), "true");
+    assert.equal(root().querySelector("#panel-simulate"), null, "asset switching cannot expose simulation");
     app.unmount();
 
     const panelFile = await compile(fileURLToPath(new URL("../../../lib/components/SettingsSidePanel.vue", import.meta.url)));

@@ -19,7 +19,9 @@ In Lines mode, the **Resolution** dropdown sits beside the style buttons: **Dail
 
 PNG exports include the selected chart presentation, title, subtitles, axes, plotted curves and RV context. Filenames identify Scatter or the Lines resolution. Coverage annotations, tooltips, controls and detail tables are excluded. Source details appear only when hovering over either chart subtitle, with a dark background and readable text. The tooltip contains only **IV data** and **RV data**, each with its overall loaded date range and a one-line source description. It has no expiry breakdown, formulas, row counts or fetch logs. IV covers all loaded historical IV observations; RV covers all loaded valid, completed index OHLC bars, independent of the selected snapshot resolution or RV visibility. Expiry details stay collapsed below the chart; source panels and footnotes do not occupy the layout.
 
-## Position simulation
+## Position simulation (paused)
+
+The Simulate tab is unavailable on `main` while development continues. The complete working state, including the tab, is preserved on `codex/term-structure-simulation-wip` at `90bbff9`. The following describes that work in progress; simulation modules and their regression tests remain in the repository.
 
 The **Simulate** tab reuses the same `PositionBuilder` as Payoff and Combo P&L. It starts with a **short ATM straddle**: sell one call and one put at the nearest paired strike, in the listed expiry closest to 30 days. Opening the tab runs automatically once live spot, listed instruments and **ATM mark** IVs are ready, without waiting for historical data. Add or remove legs (up to four), toggle buy/sell and call/put, and choose quantity, expiry and strike separately for each leg. This supports single options, verticals, ratios and calendars. Builder marks and Greeks use the same zero-rate ATM-curve model as the simulation, rather than individual strike quotes.
 

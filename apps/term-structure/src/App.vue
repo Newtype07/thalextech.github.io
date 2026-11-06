@@ -29,28 +29,6 @@ import {
 } from "./forward-volatility.js";
 import { getThalexQueueStatus } from "./thalex-rest.js";
 import { buildTermSnapshots, SNAPSHOT_RESOLUTIONS } from "./term-snapshots.js";
-import PositionSimulator from "./components/PositionSimulator.vue";
-import { nearestListedStrike } from "./simulation/straddle-selection.js";
-import { readyAtmExpiries } from "./live-quotes.js";
-
-const activeTab = ref("curve"),
-  simulationOpened = ref(false);
-function selectTab(tab) {
-  activeTab.value = tab;
-  if (tab === "simulate") simulationOpened.value = true;
-}
-function tabKey(event) {
-  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-  event.preventDefault();
-  const tab = event.key === "Home"
-    ? "curve"
-    : event.key === "End"
-      ? "simulate"
-      : activeTab.value === "curve" ? "simulate" : "curve";
-  selectTab(tab);
-  document.getElementById(`tab-${tab}`)?.focus();
-}
-
 const asset = ref("BTC"),
   slice = ref("atm");
 const source = ref("mark");
@@ -69,14 +47,12 @@ const indexBars = shallowRef([]),
   coverage = ref(null);
 const live = shallowRef([]),
   history = shallowRef([]);
-const liveAsOf = ref(null);
 const loading = ref(false),
   historyLoading = ref(false),
   historyWarnings = ref([]),
   error = ref(""),
   warnings = ref([]);
 const liveProgress = ref({ checked: 0, total: 0 });
-const liveLoading = ref(false);
 const liveReceived = ref(0);
 const historyActivity = shallowRef(null);
 const queueStatus = shallowRef(getThalexQueueStatus());
@@ -92,19 +68,6 @@ const chart = ref(null),
 let controller, historyController, statusTimer;
 const currentChain = shallowRef([]);
 const selectedLive = computed(() => selectLiveQuotes(live.value, source.value));
-const readySimulationExpiries = computed(() => readyAtmExpiries(currentChain.value, live.value, simulationSpot.value));
-// Simulation consumes a captured ATM curve, never the selected wing/display view.
-const simulationCurve = computed(() => buildCurrentSeries(live.value, "atm")
-  .map(point => ({
-    seconds: point.expiry - liveAsOf.value,
-    expiry: point.expiry,
-    iv: point.iv,
-    ready: readySimulationExpiries.value.has(point.expiry),
-    strike: nearestListedStrike(currentChain.value, point.expiry, simulationSpot.value),
-  }))
-  .filter(point => point.seconds > 0));
-const simulationSpot = computed(() => live.value.reduce((latest, quote) =>
-  quote.spot > 0 && (!latest || quote.ts > latest.ts) ? quote : latest, null)?.spot ?? null);
 const bookFallbackCount = computed(
   () =>
     live.value.filter((q) => !(q.bookIv > 0 && Number.isFinite(q.bookIv)))
@@ -275,7 +238,6 @@ async function load(nextAsset = asset.value) {
   const { signal } = currentController;
   asset.value = nextAsset;
   loading.value = true;
-  liveLoading.value = true;
   liveProgress.value = { checked: 0, total: 0 };
   liveReceived.value = 0;
   error.value = "";
@@ -283,7 +245,6 @@ async function load(nextAsset = asset.value) {
   currentChain.value = [];
   if (switchingAsset) {
     live.value = [];
-    liveAsOf.value = null;
     history.value = [];
     indexBars.value = [];
     expiries.value = [];
@@ -303,7 +264,6 @@ async function load(nextAsset = asset.value) {
       (a, b) => a - b,
     );
     referenceTime.value = Date.now() / 1000;
-    const asOf = referenceTime.value;
     let liveTimer = null,
       pendingLive = [];
     const publishLive = (quotes) => {
@@ -314,14 +274,12 @@ async function load(nextAsset = asset.value) {
         clearTimeout(liveTimer);
         liveTimer = null;
         if (active()) {
-          liveAsOf.value = asOf;
           live.value = quotes;
         }
       } else if (liveTimer == null)
         liveTimer = setTimeout(() => {
           liveTimer = null;
           if (active()) {
-            liveAsOf.value = asOf;
             live.value = pendingLive;
           }
         }, 50);
@@ -341,7 +299,6 @@ async function load(nextAsset = asset.value) {
         if (!active()) return;
         clearTimeout(liveTimer);
         liveTimer = null;
-        liveAsOf.value = asOf;
         live.value = snapshot.quotes;
         liveReceived.value = snapshot.quotes.length;
         if (snapshot.rateLimitWarning) warnings.value.push(snapshot.rateLimitWarning);
@@ -355,8 +312,6 @@ async function load(nextAsset = asset.value) {
           );
       } catch (e) {
         if (active()) error.value = e.message || String(e);
-      } finally {
-        if (active()) liveLoading.value = false;
       }
     };
     await Promise.allSettled([
@@ -369,7 +324,6 @@ async function load(nextAsset = asset.value) {
   } finally {
     if (active()) {
       loading.value = false;
-      liveLoading.value = false;
     }
   }
 }
@@ -411,63 +365,60 @@ onBeforeUnmount(() => {
             {{ coin }}
           </button>
         </div>
-        <template v-if="activeTab === 'curve'">
-          <div class="field">
-            <label for="volatility-view">Volatility</label>
-            <StyledSelectMenu
-              id="volatility-view"
-              v-model="volatilityView"
-              label="Volatility"
-              :options="VOLATILITY_VIEWS"
-            />
-          </div>
-          <div class="field">
-            <label for="slice">Slice</label>
-            <StyledSelectMenu
-              id="slice"
-              v-model="slice"
-              label="Slice"
-              :options="SLICES"
-            />
-          </div>
-          <div class="underlyingToggle" role="group" aria-label="Chart style">
-            <button
-              v-for="style in ['scatter', 'lines']"
-              :key="style"
-              type="button"
-              class="underlyingButton"
-              :class="{ underlyingButtonActive: chartStyle === style }"
-              :aria-pressed="chartStyle === style"
-              @click="chartStyle = style"
-            >{{ style === 'scatter' ? 'Scatter' : 'Lines' }}</button>
-          </div>
-          <div v-if="chartStyle === 'lines'" class="field">
-            <label for="snapshot-resolution">Resolution</label>
-            <StyledSelectMenu
-              id="snapshot-resolution"
-              v-model="snapshotResolution"
-              label="Snapshot resolution"
-              :options="SNAPSHOT_RESOLUTIONS"
-            />
-          </div>
-          <div v-if="chartStyle === 'scatter'" class="field">
-            <label for="source">Current</label>
-            <StyledSelectMenu
-              id="source"
-              v-model="source"
-              label="Current curve"
-              :options="[
-                { value: 'mark', label: 'Live marks' },
-                { value: 'book', label: 'Book mid / mark fallback' },
-              ]"
-            />
-          </div>
-        </template>
+        <div class="field">
+          <label for="volatility-view">Volatility</label>
+          <StyledSelectMenu
+            id="volatility-view"
+            v-model="volatilityView"
+            label="Volatility"
+            :options="VOLATILITY_VIEWS"
+          />
+        </div>
+        <div class="field">
+          <label for="slice">Slice</label>
+          <StyledSelectMenu
+            id="slice"
+            v-model="slice"
+            label="Slice"
+            :options="SLICES"
+          />
+        </div>
+        <div class="underlyingToggle" role="group" aria-label="Chart style">
+          <button
+            v-for="style in ['scatter', 'lines']"
+            :key="style"
+            type="button"
+            class="underlyingButton"
+            :class="{ underlyingButtonActive: chartStyle === style }"
+            :aria-pressed="chartStyle === style"
+            @click="chartStyle = style"
+          >{{ style === 'scatter' ? 'Scatter' : 'Lines' }}</button>
+        </div>
+        <div v-if="chartStyle === 'lines'" class="field">
+          <label for="snapshot-resolution">Resolution</label>
+          <StyledSelectMenu
+            id="snapshot-resolution"
+            v-model="snapshotResolution"
+            label="Snapshot resolution"
+            :options="SNAPSHOT_RESOLUTIONS"
+          />
+        </div>
+        <div v-if="chartStyle === 'scatter'" class="field">
+          <label for="source">Current</label>
+          <StyledSelectMenu
+            id="source"
+            v-model="source"
+            label="Current curve"
+            :options="[
+              { value: 'mark', label: 'Live marks' },
+              { value: 'book', label: 'Book mid / mark fallback' },
+            ]"
+          />
+        </div>
         <button class="saveButton" type="button" @click="load()">
           {{ loading || historyLoading ? "Restart fetch" : "Refresh" }}
         </button>
         <button
-          v-if="activeTab === 'curve'"
           class="saveButton"
           type="button"
           :disabled="!series.current.length && !series.history.length"
@@ -476,32 +427,9 @@ onBeforeUnmount(() => {
           Save PNG
         </button>
       </div>
-      <nav
-        class="appTabs"
-        role="tablist"
-        aria-label="Term structure workspace"
-        @keydown="tabKey"
-      >
-        <button
-          v-for="tab in ['curve', 'simulate']"
-          :id="`tab-${tab}`"
-          :key="tab"
-          type="button"
-          role="tab"
-          :aria-selected="activeTab === tab"
-          :aria-controls="`panel-${tab}`"
-          :tabindex="activeTab === tab ? 0 : -1"
-          @click="selectTab(tab)"
-        >{{ tab === 'curve' ? 'Term structure' : 'Simulate' }}</button>
-      </nav>
     </header>
 
-    <div
-      v-show="activeTab === 'curve'"
-      id="panel-curve"
-      role="tabpanel"
-      aria-labelledby="tab-curve"
-    >
+    <div id="panel-curve">
       <section class="chartPanel" aria-label="Volatility term structure" :aria-busy="fetching">
         <ChartSettings
           v-model:show-realized="showRealized"
@@ -648,26 +576,6 @@ onBeforeUnmount(() => {
         </div>
       </details>
 
-    </div>
-    <div
-      v-if="simulationOpened"
-      v-show="activeTab === 'simulate'"
-      id="panel-simulate"
-      role="tabpanel"
-      aria-labelledby="tab-simulate"
-    >
-      <PositionSimulator
-        :key="asset"
-        :asset="asset"
-        :live-curve="simulationCurve"
-        :live-spot="simulationSpot"
-        :as-of="liveAsOf"
-        :market-loading="liveLoading"
-        :market-progress="liveProgress"
-        :market-cooldown="cooldownSeconds"
-        :market-error="error"
-        :instruments="currentChain"
-      />
     </div>
   </main>
 </template>
