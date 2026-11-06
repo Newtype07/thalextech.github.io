@@ -54,9 +54,6 @@ function update(key, value) {
           @input="update('hedgeBps', $event.target.value === '' ? NaN : Number($event.target.value))" /></label>
       </div>
     </fieldset>
-    <p v-if="policy.enabled && policy.period > 0 && observationSeconds > policy.period" class="hedge-warning" role="status">
-      Observations are coarser than the period; this data cannot resolve the requested waiting time.
-    </p>
     <p v-if="error" class="hedge-error" role="alert">{{ error }}</p>
     <slot />
     <details class="hedge-method">
@@ -108,6 +105,5 @@ strong { color: var(--color-text, #ddd); font-weight: 500; }
 .hedge-method summary { color: var(--color-text-muted, #aaa); font-size: 12px; cursor: pointer; }
 .hedge-method summary:focus-visible { outline: 1px solid #999; outline-offset: 3px; }
 .hedge-source a { color: inherit; text-underline-offset: 2px; }
-.hedge-warning { color: #e6be7c; }
 .hedge-error { color: #ff8585; }
 </style>

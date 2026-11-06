@@ -1,3 +1,6 @@
+// Strategy evaluation stays independent of the chart's display sampling.
+export const STRATEGY_OBSERVATION_SECONDS = 3600;
+
 export type SimulationStats = {
   meanHedgeFees?: number;
   meanHedgeTrades?: number;

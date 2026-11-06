@@ -46,7 +46,7 @@ const date = ts => new Date(ts * 1000).toISOString().slice(0, 10);
       <label>Path dynamics<select :value="settings.dynamics" @change="update('dynamics', $event.target.value)">
         <option value="constant">Deterministic variance</option><option value="stochastic">Stochastic variance</option><option value="jumps">Stochastic variance + jumps</option>
       </select></label>
-      <label v-if="settings.shape === 'flat'">Flat RV · %<input :value="settings.rv * 100" type="number" min="0" step="any" required
+      <label v-if="settings.shape === 'flat'">Flat RV · %<input :value="Number.isFinite(settings.rv) ? Number((settings.rv * 100).toFixed(2)) : ''" type="number" min="0" step="0.01" required
         @input="update('rv', $event.target.value === '' ? NaN : Number($event.target.value) / 100)" /></label>
       <label v-else-if="showForwardRatio">RV / forward IV<input :value="settings.rvMultiplier" type="number" min="0" step="any" required
         @input="update('rvMultiplier', $event.target.value === '' ? NaN : Number($event.target.value))" /></label>
@@ -58,14 +58,14 @@ const date = ts => new Date(ts * 1000).toISOString().slice(0, 10);
     <template v-if="estimate && estimate.status !== 'unavailable'">
       <p>{{ asset }} · {{ estimate.lookbackDays }} days through {{ date(estimate.asOf) }} · {{ (estimate.training.coverage * 100).toFixed(2) }}% coverage.</p>
       <p>RV {{ (estimate.rv * 100).toFixed(1) }}%<template v-if="estimate.variance"> · Realized correlation {{ estimate.variance.rho.toFixed(2) }} ·
-        Vol of vol {{ estimate.variance.sigma.toFixed(2) }} · Jumps {{ estimate.jumps.intensity.toFixed(1) }}/year</template>.</p>
+        Vol of vol {{ estimate.variance.sigma.toFixed(1) }} · Jumps {{ estimate.jumps.intensity.toFixed(1) }}/year</template>.</p>
       <button type="button" @click="applyEstimate">Use historical estimates</button>
     </template>
     <p v-if="settings.profile">Using {{ settings.profile.lookbackDays }}-day realized calibration through {{ date(settings.profile.asOf) }}.
       <button type="button" @click="update('profile', null)">Use manual dynamics</button></p>
     <p v-else>Manual dynamics. Historical estimates are applied only when selected.</p>
     <div v-if="showManual && !settings.profile && settings.dynamics !== 'constant'" class="market-fields">
-      <label>Vol of vol<input :value="manual.volOfVol" type="number" min="0" step="any"
+      <label>Vol of vol<input :value="Number.isFinite(manual.volOfVol) ? manual.volOfVol.toFixed(1) : ''" type="number" min="0" step="0.1"
         @input="update('manual', { ...manual, volOfVol: Number($event.target.value) })" /></label>
       <label>Realized correlation<input :value="manual.correlation" type="number" min="-1" max="1" step=".01"
         @input="update('manual', { ...manual, correlation: Number($event.target.value) })" /></label>

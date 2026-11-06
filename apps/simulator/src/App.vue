@@ -20,7 +20,7 @@ import {
   volOfVolFromHorizonMovePoints,
 } from "./lib/pathModel";
 import type { PositionLeg, OptionLeg } from "./lib/position";
-import type { SimulationStats } from "./lib/simulation";
+import { STRATEGY_OBSERVATION_SECONDS, type SimulationStats } from "./lib/simulation";
 import {
   fetchInstruments,
   fetchLatestIndexPrice,
@@ -39,7 +39,7 @@ const defaultParams: GBMParams = {
   vol: 0.4,
   T: 14 / 365.25,
   dt: 1 / (365.25 * 24),
-  rows: 20_000,
+  rows: 5_000,
 };
 const driftBounds = { min: -5, max: 5 };
 const volBounds = { min: 0.1, max: 1.2 };
@@ -66,7 +66,7 @@ const SETTINGS_TOOLTIPS = {
   correlation:
     "Correlation between spot-price and volatility shocks. Negative values make volatility tend to rise when spot falls.",
   timeSteps:
-    "Number of points shown per simulated path. Strategy paths and hedge decisions use a separate one-minute clock.",
+    "Number of points shown per simulated path. Strategy paths and hedge decisions use a separate hourly clock.",
   pathLimit:
     "Maximum sampled paths rendered in the cloud. This changes visual density, not the number of outcomes used for statistics.",
   binsMultiplier:
@@ -104,7 +104,8 @@ async function refreshForwardCurve() {
 }
 function exportScenario() {
   const data = { version: 1, seed: seed.value, asset: underlying.value, params: { ...appliedParams },
-    hedgePolicy: hedgePolicy.value, marketModel: effectiveMarketModel.value, forwardSnapshot: forwardSnapshot.value,
+    hedgePolicy: hedgePolicy.value, hedgeObservationSeconds: STRATEGY_OBSERVATION_SECONDS,
+    marketModel: effectiveMarketModel.value, forwardSnapshot: forwardSnapshot.value,
     legs: positionLegs.value, pricing: optionPricingByLegId.value, valuationTs: quoteValuationTs.value,
     modelVersion: "variance-schedule-v1", executionModel: "observed-price-v1" };
   const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
@@ -124,7 +125,6 @@ const workspaceRef = ref<HTMLElement | null>(null);
 const chartSectionRef = ref<HTMLElement | null>(null);
 const guideMu = ref<number | null>(null);
 const guideVol = ref<number | null>(null);
-const histogramMode = ref<"payoff" | "prob">("payoff");
 const strategyStats = ref<SimulationStats | null>(null);
 
 const formatSignedPayoff = (value: number | null | undefined): string => {
@@ -625,7 +625,7 @@ const handleSavePng = async (): Promise<void> => {
       exportRoot,
       activeSimulatorTab.value === "stop-loss"
         ? "simulator-stop-loss-comparison.png"
-        : `simulator-${histogramMode.value}.png`,
+        : "simulator-payoff.png",
       isStopLoss
         ? {
             outputWidth: 4800,
@@ -2364,7 +2364,7 @@ watch(
           <DeltaHedgeToggle :model-value="hedgePolicy.enabled" @update:model-value="hedgePolicy = { ...hedgePolicy, enabled: $event }" />
         </template>
         <div class="shared-settings-panels">
-        <DeltaHedgeControls v-model="hedgePolicy" :asset="underlying.slice(0, 3)" :observation-seconds="60" :show-toggle="false">
+        <DeltaHedgeControls v-model="hedgePolicy" :asset="underlying.slice(0, 3)" :observation-seconds="STRATEGY_OBSERVATION_SECONDS" :show-toggle="false">
           <MarketAssumptions v-model="marketSettings" :asset="underlying.slice(0, 3)" :forward-available="true" :manual-defaults="effectiveMarketModel.manual">
             <template v-if="marketSettings.shape === 'forward'">
               <button type="button" :disabled="forwardLoading" @click="refreshForwardCurve">{{ forwardLoading ? 'Loading live curve…' : 'Refresh live curve' }}</button>
@@ -2374,13 +2374,16 @@ watch(
           </MarketAssumptions>
           <button class="scenario-export" type="button" @click="exportScenario">Export scenario settings</button>
           <p v-if="strategyError" role="alert">{{ strategyError }}</p>
-          <p v-else-if="strategyRunning" role="status">Updating the one-minute simulation… Larger path counts and longer horizons take more time. Previous results remain visible.</p>
+          <p v-else-if="strategyRunning" role="status">Updating the hourly simulation… Larger path counts and longer horizons take more time. Previous results remain visible.</p>
           <p v-else-if="hedgePolicy.enabled && strategyStats">Mean modeled hedge execution costs {{ strategyStats.meanHedgeFees?.toFixed(2) }} USD ·
             Mean fills {{ strategyStats.meanHedgeTrades?.toFixed(1) }} per path. Policy edits reuse the same market paths.</p>
+          <template #explanation>
+            <p>Simulator checks hedges hourly. Threshold and tolerance breaches between observations are not captured.</p>
+          </template>
         </DeltaHedgeControls>
         </div>
       </SettingsSidePanel>
-      <span v-if="strategyRunning" class="hedge-compute-status" role="status">Updating minute simulation…</span>
+      <span v-if="strategyRunning" class="hedge-compute-status" role="status">Updating hourly simulation…</span>
       </div>
 
           <section ref="chartSectionRef" class="chart-section">
@@ -2475,25 +2478,6 @@ watch(
               </div>
             </div>
           </div>
-          <div class="histogram-toggle" role="group" aria-label="Histogram view">
-            <button
-              type="button"
-              :class="{ 'is-active': histogramMode === 'payoff' }"
-              :aria-pressed="histogramMode === 'payoff'"
-              @click="histogramMode = 'payoff'"
-            >
-              PnL
-            </button>
-            <button
-              type="button"
-              :class="{ 'is-active': histogramMode === 'prob' }"
-              :aria-pressed="histogramMode === 'prob'"
-              title="P&amp;L weighted by the frequency of each terminal-price bin"
-              @click="histogramMode = 'prob'"
-            >
-              EV
-            </button>
-          </div>
       <div
         v-if="nPopoverOpen && nPopoverAnchor"
         class="rows-popover"
@@ -2541,7 +2525,6 @@ watch(
         :muMax="driftBounds.max"
         :volMin="volBounds.min"
         :volMax="volBounds.max"
-        :histMode="histogramMode"
         :histogramOpacity="0.9"
         :colorMin="colorMinPercent / 100"
         :colorMax="colorMaxPercent / 100"
@@ -2566,24 +2549,13 @@ watch(
             </span>
             <span class="histogram-legend-item">
               <span class="histogram-legend-mark histogram-legend-mark--average"></span>
-              Right:
-              {{
-                histogramMode === 'prob'
-                  ? 'expected-value contribution'
-                  : 'median PnL'
-              }}
-              per price bin
+              Right: median PnL per price bin
             </span>
             <span class="histogram-legend-item"
-              title="Payoff/EV gaps between sampled price bins are interpolated for display only; statistics and cumulative EV use actual samples.">
+              title="Payoff gaps between sampled price bins are interpolated for display only; statistics use actual samples.">
               Gaps interpolated
             </span>
-            <span v-if="histogramMode === 'prob'" class="histogram-legend-item"
-              title="Signed EV accumulated from low to high terminal prices; the number above the endpoint is total EV.">
-              <span class="histogram-legend-mark histogram-legend-mark--cumulative"></span>
-              Cumulative EV
-            </span>
-            <span v-else class="histogram-legend-item"
+            <span class="histogram-legend-item"
               title="Average P&L across all simulated paths, marked where the payoff histogram equals that value. If there are multiple crossings, the one nearest the mean terminal price is used.">
               <span class="histogram-legend-mark histogram-legend-mark--cumulative"></span>
               Average payoff
@@ -2736,15 +2708,6 @@ watch(
   .builder-section
   :deep(.styled-select-trigger) {
   font-size: 14px;
-}
-
-.app-main.is-exporting-strategy .histogram-toggle {
-  gap: 4px;
-  padding: 3px;
-}
-
-.app-main.is-exporting-strategy .histogram-toggle button {
-  min-width: 52px;
 }
 
 .app-main.is-exporting-strategy .histogram-legend {
@@ -3783,41 +3746,6 @@ watch(
   font-variant-numeric: tabular-nums;
 }
 
-.histogram-toggle {
-  position: absolute;
-  top: 8px;
-  /* Center on both histogram columns: (112px right margin + 210px / 2) / 1200px. */
-  right: 18.083333%;
-  left: auto;
-  transform: translateX(50%);
-  z-index: 9;
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.histogram-toggle button {
-  border: none;
-  background: transparent;
-  color: #70767d;
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: 0;
-  text-transform: none;
-  height: 26px;
-  padding: 0 12px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.histogram-toggle button.is-active {
-  color: #e8eaed;
-  background: rgba(255, 255, 255, 0.1);
-}
-
 @media (max-width: 1280px) {
   .outcome-summary {
     gap: 23px;
@@ -3849,6 +3777,16 @@ watch(
   .workspace-container {
     padding-right: 16px;
     padding-left: 16px;
+  }
+}
+
+@container simulator-workspace (max-width: 1400px) {
+  .sim-shared-hedge {
+    flex-wrap: wrap;
+  }
+
+  .chart-meta {
+    right: 0;
   }
 }
 
@@ -3956,10 +3894,6 @@ watch(
   }
 
   .chart-horizon-label {
-    display: none;
-  }
-
-  .histogram-toggle {
     display: none;
   }
 

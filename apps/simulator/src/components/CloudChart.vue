@@ -26,6 +26,7 @@ import type {
   HistogramBinStats,
   SimulationStats,
 } from "../lib/simulation";
+import { STRATEGY_OBSERVATION_SECONDS } from "../lib/simulation";
 import SimWorker from "../workers/sim.worker?worker";
 
 type OptionPricingInput = {
@@ -2762,7 +2763,7 @@ const draw = async (): Promise<void> => {
     sim = await requestSimulation({
       seed: props.seed,
       hedgePolicy: props.hedgePolicy ? { ...props.hedgePolicy } : undefined,
-      hedgeObservationSeconds: props.hedgePolicy ? 60 : undefined,
+      hedgeObservationSeconds: props.hedgePolicy ? STRATEGY_OBSERVATION_SECONDS : undefined,
       marketModel: props.marketModel ? JSON.parse(JSON.stringify(props.marketModel)) : undefined,
       forwardNodes: props.forwardNodes ? JSON.parse(JSON.stringify(props.forwardNodes)) : undefined,
       params: workerParams,
@@ -2783,7 +2784,7 @@ const draw = async (): Promise<void> => {
     if (props.comparisonLegs?.length) {
       comparisonSim = await requestSimulation({
         seed: props.seed,
-        hedgeObservationSeconds: props.hedgePolicy ? 60 : undefined,
+        hedgeObservationSeconds: props.hedgePolicy ? STRATEGY_OBSERVATION_SECONDS : undefined,
         params: workerParams,
         pathModel: sanitizePathModel(props.pathModel),
         legs: sanitizeLegsForWorker(props.comparisonLegs),
@@ -2865,7 +2866,7 @@ const draw = async (): Promise<void> => {
 
 const scheduleDraw = (): void => {
   drawQueued = true;
-  // Minute-level runs can be expensive. Stop an obsolete worker immediately
+  // Long runs can be expensive. Stop an obsolete worker immediately
   // rather than calculating every intermediate slider position in sequence.
   if (drawInFlight && pendingSimRequests.size) {
     latestDrawSeq++;
@@ -2879,7 +2880,7 @@ const scheduleDraw = (): void => {
   drawScheduleTimer = setTimeout(() => {
     drawScheduleTimer = null;
     void runDrawQueue();
-  }, props.hedgePolicy ? 160 : 16);
+  }, props.hedgePolicy?.enabled ? 160 : 16);
 };
 
 const runDrawQueue = async (): Promise<void> => {

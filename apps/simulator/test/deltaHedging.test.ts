@@ -4,7 +4,33 @@ import { simulate } from "../src/workers/sim.worker.ts";
 import { DEFAULT_PATH_MODEL } from "../src/lib/pathModel.ts";
 import { blackScholesGreeks } from "../src/lib/blackScholes.ts";
 import { replayDeltaHedge } from "../../../lib/delta-hedging/index.js";
+import { STRATEGY_OBSERVATION_SECONDS } from "../src/lib/simulation.ts";
 const YEAR = 365.25 * 86400;
+test("Simulator's hourly clock matches hourly replay and is independent of drawing resolution and hedge activation", () => {
+  const input = request();
+  const hedgePolicy = { enabled: true, threshold: .03, tolerance: .1, period: 1800, hedgeBps: 2 };
+  const base = { ...input, hedgePolicy, hedgeObservationSeconds: STRATEGY_OBSERVATION_SECONDS };
+  const hourly = simulate(base);
+  const coarse = simulate({ ...base, params: { ...base.params, dt: base.params.T / 12 } });
+  const dense = simulate({ ...base, params: { ...base.params, dt: base.params.T / 96 } });
+  const unhedged = simulate({ ...base, hedgePolicy: { enabled: false } });
+  for (const result of [coarse, dense]) {
+    assert.deepEqual(new Float64Array(result.terminalPricesBuffer), new Float64Array(hourly.terminalPricesBuffer));
+    assert.deepEqual(new Float64Array(result.terminalPayoffsBuffer), new Float64Array(hourly.terminalPayoffsBuffer));
+    assert.equal(result.meanHedgeTrades, hourly.meanHedgeTrades);
+    assert.equal(result.meanHedgeFees, hourly.meanHedgeFees);
+  }
+  assert.deepEqual(new Float64Array(unhedged.sampledPathsBuffer), new Float64Array(hourly.sampledPathsBuffer));
+  assert.equal(unhedged.meanHedgeTrades, 0);
+  const spots = new Float64Array(hourly.sampledPathsBuffer).subarray(0, hourly.steps);
+  const samples = [{ time: 0, price: 100, delta: -blackScholesGreeks(100, 100, input.params.T, .5, 0, "call").delta },
+    ...Array.from(spots, (price, i) => ({ time: (i + 1) * 3600, price,
+      delta: i + 1 === hourly.steps ? 0 : -blackScholesGreeks(price, 100, input.params.T - (i + 1) * 3600 / YEAR, .5, 0, "call").delta }))];
+  const replay = replayDeltaHedge(samples, hedgePolicy, { observationSeconds: 3600 });
+  const pnl = input.legs[0].premium - Math.max(0, spots.at(-1)! - 100) + replay.rows.at(-1)!.netPnl!;
+  assert.ok(Math.abs(new Float64Array(hourly.terminalPayoffsBuffer)[0] - pnl) < 1e-8,
+    "hourly hedge fills and costs reconcile to an independent replay");
+});
 test("one-minute hedge evaluation is independent of graph density and agrees with a minute replay", () => {
   const base = { ...request(), hedgeObservationSeconds: 60, hedgePolicy: { enabled: true, threshold: .03, tolerance: .1, period: 1800, hedgeBps: 2 } };
   const coarse = simulate(base);

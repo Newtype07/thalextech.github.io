@@ -498,10 +498,10 @@ const positionDeltaAt = (spot: number, elapsedYears: number, options: PreparedOp
 
 export const simulate = (request: SimWorkerRequest): SimWorkerSuccess => {
   const sampleSteps = Math.max(1, Math.floor(request.params.T / request.params.dt));
-  // The strategy's price evolution and hedge decisions share a minute clock.
+  // The strategy's price evolution and hedge decisions share an evaluation clock.
   // Graph density changes only the sampled output, including with hedging off.
   const steps = request.hedgeObservationSeconds
-    ? Math.max(1, Math.ceil(request.params.T * SECONDS_PER_YEAR / Math.min(60, request.hedgeObservationSeconds)))
+    ? Math.max(1, Math.ceil(request.params.T * SECONDS_PER_YEAR / request.hedgeObservationSeconds))
     : sampleSteps;
   if (request.hedgeObservationSeconds) request = { ...request, params: { ...request.params, dt: request.params.T / steps } };
   const rows = Math.max(1, Math.floor(request.params.rows));
