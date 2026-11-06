@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import DeltaHedgeControls from "../../../lib/components/DeltaHedgeControls.vue";
 import DeltaHedgeToggle from "../../../lib/components/DeltaHedgeToggle.vue";
+import { DEFAULT_HEDGE_POLICY } from "../../../lib/delta-hedging/index.js";
 import { createMinuteHistoryLoader } from "../../../lib/minute-history.js";
 import HedgingChart from "./components/HedgingChart.vue";
 import { buildHedgingSimulation } from "./hedgingSimulation.js";
@@ -36,9 +37,9 @@ const ui = reactive({
   targetSide: "long",
   targetAmount: 1,
   horizonHours: 7 * 24,
-  period: 10 * 60,
-  threshold: 0.02,
-  tolerance: 0.16,
+  period: DEFAULT_HEDGE_POLICY.period,
+  threshold: DEFAULT_HEDGE_POLICY.threshold,
+  tolerance: DEFAULT_HEDGE_POLICY.tolerance,
   showOptionPrice: false,
   includeTradingCosts: true,
   hedgeBps: 1.5,
