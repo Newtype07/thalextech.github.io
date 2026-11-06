@@ -95,7 +95,7 @@ function draw() {
       "font-family",
       '"Helvetica Neue", Helvetica, -apple-system, sans-serif',
     );
-  svg.append("rect").attr("width", W).attr("height", H).attr("fill", "#0a0b0e");
+  svg.append("rect").attr("width", W).attr("height", H).attr("fill", "#000000");
   svg
     .append("text")
     .attr("x", W / 2)
@@ -321,7 +321,7 @@ function draw() {
       .datum(props.realized)
       .attr("d", rvLine)
       .attr("fill", "none")
-      .attr("stroke", "#0a0b0e")
+      .attr("stroke", "#000000")
       .attr("stroke-width", 5)
       .attr("stroke-dasharray", "6 5");
     svg
@@ -340,7 +340,7 @@ function draw() {
       .attr("cx", (p) => x(p.expiry))
       .attr("cy", (p) => y(p.iv))
       .attr("r", 4)
-      .attr("fill", "#0a0b0e")
+      .attr("fill", "#000000")
       .attr("stroke", "#e8eaed")
       .attr("stroke-width", 1.5)
       .append("title")
@@ -367,7 +367,7 @@ function draw() {
       .datum(currentPath)
       .attr("d", line)
       .attr("fill", "none")
-      .attr("stroke", "#0a0b0e")
+      .attr("stroke", "#000000")
       .attr("stroke-width", 7);
     svg
       .append("path")
@@ -383,7 +383,7 @@ function draw() {
       .attr("cy", (p) => y(p.iv))
       .attr("r", 5)
       .attr("fill", "#fff")
-      .attr("stroke", "#0a0b0e")
+      .attr("stroke", "#000000")
       .attr("stroke-width", 2);
     current
       .append("text")
@@ -393,7 +393,7 @@ function draw() {
       .attr("font-size", 13)
       .attr("font-weight", 600)
       .attr("text-anchor", "middle")
-      .attr("stroke", "#0a0b0e")
+      .attr("stroke", "#000000")
       .attr("stroke-width", 4)
       .attr("paint-order", "stroke")
       .text((p) => `${(p.iv * 100).toFixed(1)}%`);
@@ -445,7 +445,7 @@ defineExpose({
     exportChartToPng({
       element: svgRef.value,
       filename: `${props.asset}-${props.sliceLabel.replaceAll(/[^a-z0-9]/gi, "-")}-term-structure-${props.view}-${props.chartStyle}${props.chartStyle === "lines" ? `-${props.snapshotResolution}` : ""}.png`,
-      background: "#0a0b0e",
+      background: "#000000",
       scale: 3,
       // Export only the SVG; page controls, details and data-status footnotes stay outside it.
       prepareSvgClone: (clone) => {
