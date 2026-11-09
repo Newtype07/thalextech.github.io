@@ -11,6 +11,46 @@ VITE_BASE_PATH=/term-structure/ npm run build
 
 `dev` and `build` first run `build:data`, which reads the canonical Parquet files in `../backtest/source-data/thalex`. To regenerate the cache independently, run `npm run build:data`. The root app build discovers this app automatically; `index.yml` registers the home catalogue entry. No API keys or backend are needed. `VITE_THALEX_API_BASE` optionally overrides the public REST base. `VITE_THALEX_WS_URL` overrides the WebSocket endpoint; a custom non-Thalex REST base uses REST only unless an explicit WebSocket URL is supplied.
 
+## Volatility cone backend
+
+The **Volatility cone** tab currently exposes a data table, pending chart styling.
+It compares live **ATM mark** IV with historical IV and RV at fixed
+1/2/3/7/14/30/60/90/180/365-day tenors. Its current curve is independent of the
+original tab's slice, quote source and forward-vol settings. Select 1, 3, 6 or 12
+calendar months without refetching history. Lookbacks of **180 days or more use
+daily 00:00 UTC closes**; shorter lookbacks use **hourly closes**. Thus 1m/3m are
+hourly and 6m/1y are daily. Lookbacks end at the latest completed scheduled close;
+the calendar start is exclusive and the end inclusive.
+
+`build:data` reads the canonical **backtest Parquet files**, including contracts
+that have since expired, and writes one content-hashed cone artifact per asset.
+It retains a year of daily samples and three months of hourly samples. Each
+option close is matched to the exact same hourly index close. ATM reuses the
+existing call/put strike-variance interpolation. Fixed maturities interpolate
+**total variance** between expiries at the same observation time, without
+extrapolating or accepting negative forward variance. The source currently does
+not bracket 365D IV; its RV remains independently available. Nearest-strike ATM
+fallback counts are included in the result.
+
+RV uses trailing hourly Garman–Klass windows of the tenor's duration, annualized
+with 365.25 days, and requires 99% valid hourly bars. History before the cone
+lookback provides the full warmup, including a year for the earliest 365D sample.
+Historical windows end at their exact sample time: gaps never shift the window,
+shorten it or count as zero variance. Rolling samples overlap and are not
+independent statistical trials. Latest RV ends at the latest completed Parquet
+index bar; its cutoff is displayed separately from live IV. Source lag leaves
+missing observations rather than moving the requested lookback to older dates.
+
+`volatility-cone.js` owns pure calculations and returns min/max,
+5/25/50/75/95 percentiles, independent IV/RV sample counts and coverage, actual
+sample dates, current fixed-tenor IV, latest RV and half-weight-tie percentile
+ranks. It also retains the original listed live curve for the future chart
+overlay. Null values preserve unsupported maturities and insufficient coverage.
+`volatility-cone-data.js` validates the generated JSON contract. It never
+substitutes the 2,000-hour live-expiry cache or REST history for missing Parquet
+artifacts. `VolatilityConePanel.vue` owns lazy loading, retry, asset-switch
+cancellation, and the provisional table; lookback/tab changes retain the data.
+
 ## Chart and settings
 
 The compact top bar, typography, controls and shared `StyledSelectMenu` follow Straddle. The **Volatility** dropdown switches between **Expiry IV** (default) and **Forward vol** without making data requests. The top-bar **Scatter / Lines** buttons select separate chart presentations. Scatter shows historical dot clouds and the current white curve, with live marks/book fallback, delta slices and percentiles. Lines shows historical IV (or forward-volatility) snapshot curves with RV context; scatter dots, snapshot point markers and the extra live curve are absent. Axes fit the visible curves. The current-source control appears only in Scatter mode.

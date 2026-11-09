@@ -8,6 +8,7 @@ import {
   watch,
 } from "vue";
 import TermStructureChart from "./components/TermStructureChart.vue";
+import VolatilityConePanel from "./components/VolatilityConePanel.vue";
 import StyledSelectMenu from "../../../lib/components/StyledSelectMenu.vue";
 import ChartSettings from "./components/ChartSettings.vue";
 import {
@@ -32,6 +33,9 @@ import { buildTermSnapshots, SNAPSHOT_RESOLUTIONS } from "./term-snapshots.js";
 const asset = ref("BTC"),
   slice = ref("atm");
 const source = ref("mark");
+const activeTab = ref("curve"), coneVisited = ref(false);
+watch(activeTab, tab => { if (tab === "cone") coneVisited.value = true; });
+const coneCurrent = computed(() => buildCurrentSeries(live.value, "atm"));
 const volatilityView = ref("iv");
 const detailLabel = computed(() =>
   volatilityView.value === "forward"
@@ -352,6 +356,13 @@ onBeforeUnmount(() => {
       <div class="wordmark">Term Structure</div>
       <div class="divider"></div>
       <div class="controls">
+        <div class="underlyingToggle" role="tablist" aria-label="Volatility workspace">
+          <button v-for="tab in [{ value: 'curve', label: 'Term structure' }, { value: 'cone', label: 'Volatility cone' }]"
+            :id="`tab-${tab.value}`" :key="tab.value" type="button" role="tab"
+            class="underlyingButton" :class="{ underlyingButtonActive: activeTab === tab.value }"
+            :aria-selected="activeTab === tab.value" :aria-controls="`panel-${tab.value}`"
+            @click="activeTab = tab.value">{{ tab.label }}</button>
+        </div>
         <div class="underlyingToggle" role="group" aria-label="Underlying">
           <button
             v-for="coin in ['BTC', 'ETH']"
@@ -365,6 +376,7 @@ onBeforeUnmount(() => {
             {{ coin }}
           </button>
         </div>
+        <template v-if="activeTab === 'curve'">
         <div class="field">
           <label for="volatility-view">Volatility</label>
           <StyledSelectMenu
@@ -415,10 +427,12 @@ onBeforeUnmount(() => {
             ]"
           />
         </div>
+        </template>
         <button class="saveButton" type="button" @click="load()">
           {{ loading || historyLoading ? "Restart fetch" : "Refresh" }}
         </button>
         <button
+          v-if="activeTab === 'curve'"
           class="saveButton"
           type="button"
           :disabled="!series.current.length && !series.history.length"
@@ -429,7 +443,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <div id="panel-curve">
+    <div id="panel-curve" v-show="activeTab === 'curve'" role="tabpanel" aria-labelledby="tab-curve">
       <section class="chartPanel" aria-label="Volatility term structure" :aria-busy="fetching">
         <ChartSettings
           v-model:show-realized="showRealized"
@@ -576,6 +590,9 @@ onBeforeUnmount(() => {
         </div>
       </details>
 
+    </div>
+    <div v-if="coneVisited" id="panel-cone" v-show="activeTab === 'cone'" role="tabpanel" aria-labelledby="tab-cone">
+      <VolatilityConePanel :asset="asset" :current="coneCurrent" :as-of="referenceTime" />
     </div>
   </main>
 </template>

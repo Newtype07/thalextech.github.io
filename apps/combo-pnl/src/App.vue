@@ -6,6 +6,7 @@ import {
   onUnmounted,
   reactive,
   ref,
+  shallowRef,
   watch,
 } from "vue";
 import DeltaHedgeControls from "../../../lib/components/DeltaHedgeControls.vue";
@@ -44,12 +45,13 @@ const MIN_POINTS_PER_FETCH = 100;
 const MAX_POINTS_PER_FETCH = 10000;
 const DEFAULT_VOL = 0.4;
 const DEFAULT_T = 30 / 365.25;
-const MARK_CONCURRENCY = 10;
+const MARK_CONCURRENCY = 2;
 const LOAD_DEBOUNCE_MS = 140;
 const HEDGE_OBSERVATION_SECONDS = 60;
 const HISTORY_WINDOW_UNIT_SECONDS = 900;
-const loadMinuteIndex = createMinuteHistoryLoader(fetchIndexHistory);
-const loadMinuteMarks = createMinuteHistoryLoader(fetchMarkHistory);
+const HISTORY_PAGE_SIZE = 1000;
+const loadMinuteIndex = createMinuteHistoryLoader(fetchIndexHistory, { pageSize: HISTORY_PAGE_SIZE, concurrency: 3 });
+const loadMinuteMarks = createMinuteHistoryLoader(fetchMarkHistory, { pageSize: HISTORY_PAGE_SIZE, concurrency: 3 });
 const GREEK_EVOLUTION_POINT_COUNT = 101;
 
 const UNDERLYING_OPTIONS = [
@@ -79,17 +81,18 @@ const instruments = computed(() =>
 );
 const tickerByInstrument = ref({});
 const indexByName = ref({});
-const indexSeries = ref([]);
-const comboBaseSeries = ref([]);
-const comboSeries = ref([]);
-const minuteIndexSeries = ref([]);
-const minuteComboSeries = ref([]);
+// History snapshots are replaced as a whole; individual bars are immutable.
+const indexSeries = shallowRef([]);
+const comboBaseSeries = shallowRef([]);
+const comboSeries = shallowRef([]);
+const minuteIndexSeries = shallowRef([]);
+const minuteComboSeries = shallowRef([]);
 const hedgeTrades = computed(() => minuteComboSeries.value.flatMap(row => row.hedge_fill
   ? [{ ...row.hedge_fill, barTs: row.ts }] : []));
 const hedgeHistoryGaps = computed(() => minuteComboSeries.value.filter(row => row.hedge_quality?.gap || row.hedge_quality?.missingRisk).length);
 const historyTo = ref(Math.floor(Date.now() / 60000) * 60 - 60);
-const indexHistoryRows = ref([]);
-const markHistoryByInstrument = ref({});
+const indexHistoryRows = shallowRef([]);
+const markHistoryByInstrument = shallowRef({});
 const chartAnchorTs = ref(null);
 const chartRangeTs = ref(null);
 const tradeMinuteSeries = computed(() => tradeWindowRows(minuteComboSeries.value, chartRangeTs.value));
@@ -550,11 +553,14 @@ const loadInitialAnchoredIndexSnapshot = async () => {
   const indexName = underlying.value;
   try {
     const { resolution, from, to } = getTimestampRange();
+    // Only the first page is needed to choose strikes at the history anchor.
+    // The full load reuses this page while fetching the remaining streams.
+    const firstPageEnd = (Math.floor(from / (HISTORY_PAGE_SIZE * 60)) + 1) * HISTORY_PAGE_SIZE * 60;
     const rows = await loadMinuteIndex({
       index_name: indexName,
       resolution,
       from,
-      to,
+      to: Math.min(to, firstPageEnd - 60),
     });
     const sorted = sortRowsByTs(rows);
     if (!sorted.length) return;
@@ -849,15 +855,13 @@ const loadSeries = async () => {
   ui.error = "";
 
   try {
-    const indexRows = await loadMinuteIndex({
+    const markByInstrument = {};
+    const [indexRows] = await Promise.all([loadMinuteIndex({
       index_name: activeIndexName.value,
       resolution,
       from,
       to,
-    }, () => requestId === loadRequestId);
-
-    const markByInstrument = {};
-    await runWithConcurrency(
+    }, () => requestId === loadRequestId), runWithConcurrency(
       selectedInstrumentNames.value,
       MARK_CONCURRENCY,
       async (instrumentName) => {
@@ -869,7 +873,7 @@ const loadSeries = async () => {
             to,
           }, () => requestId === loadRequestId)) || [];
       },
-    );
+    )]);
 
     if (requestId !== loadRequestId) return;
 
@@ -1086,6 +1090,8 @@ const loadSeries = async () => {
 };
 
 const scheduleLoad = () => {
+  // Stop obsolete pagination during the debounce, rather than when it ends.
+  loadRequestId++;
   if (loadTimer) clearTimeout(loadTimer);
   loadTimer = setTimeout(() => {
     loadTimer = null;
@@ -1121,7 +1127,6 @@ watch(
   () => {
     rebuildBuilderSnapshots();
   },
-  { deep: true },
 );
 
 const switchUnderlying = async (next) => {
@@ -1140,6 +1145,7 @@ const switchUnderlying = async (next) => {
   comboSeries.value = [];
   await loadInitialAnchoredIndexSnapshot();
   seedDefaultLegs();
+  await nextTick();
   if (loadTimer) {
     clearTimeout(loadTimer);
     loadTimer = null;
@@ -1155,20 +1161,29 @@ onMounted(async () => {
   chartResizeObserver = new ResizeObserver(alignSettingsToBuilderMinusX);
   if (chartBlockRef.value) chartResizeObserver.observe(chartBlockRef.value);
   if (builderMainRef.value?.firstElementChild) chartResizeObserver.observe(builderMainRef.value.firstElementChild);
-  allInstruments.value = (await fetchAllInstruments()) || [];
-
-  await loadInitialAnchoredIndexSnapshot();
-  seedDefaultLegs();
-  if (loadTimer) {
-    clearTimeout(loadTimer);
-    loadTimer = null;
+  ui.loading = true;
+  try {
+    allInstruments.value = (await fetchAllInstruments()) || [];
+    await loadInitialAnchoredIndexSnapshot();
+    seedDefaultLegs();
+    // Let the leg watcher schedule before clearing its redundant initial load.
+    await nextTick();
+    if (loadTimer) {
+      clearTimeout(loadTimer);
+      loadTimer = null;
+    }
+    await loadSeries();
+    await nextTick();
+    alignSettingsToBuilderMinusX();
+  } catch (error) {
+    ui.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    ui.loading = false;
   }
-  await loadSeries();
-  await nextTick();
-  alignSettingsToBuilderMinusX();
 });
 
 onUnmounted(() => {
+  loadRequestId++;
   if (loadTimer) clearTimeout(loadTimer);
   document.removeEventListener("pointerdown", handleDocumentPointerDown);
   window.removeEventListener("resize", alignSettingsToBuilderMinusX);

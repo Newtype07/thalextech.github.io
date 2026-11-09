@@ -3,6 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { asyncBufferFromFile, parquetReadObjects } from "hyparquet";
+import { buildHistoricalSeries } from "../src/volatility.js";
+import { coneWindow, CONE_TENORS, impliedConeHistory, realizedConeHistory } from "../src/volatility-cone.js";
 
 // Read the canonical files, not the backtest's open-IV/pricing-specific artifacts.
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -10,7 +12,10 @@ const source = path.resolve(root, "../backtest/source-data/thalex");
 const files = (await fs.readdir(source)).sort();
 const now = Date.now() / 1000;
 const cutoff = Math.floor(now / 3600) * 3600 - 2000 * 3600;
-const cutoffMonth = new Date(cutoff * 1000)
+const coneSchedule = [...new Set([...coneWindow(now).timestamps, ...coneWindow(now, "3m").timestamps])].sort((a, b) => a - b);
+const coneTargets = new Set(coneSchedule);
+const coneCutoff = coneSchedule[0] - 3600;
+const cutoffMonth = new Date(Math.min(cutoff, coneCutoff) * 1000)
   .toISOString()
   .slice(0, 7)
   .replace("-", "");
@@ -58,6 +63,7 @@ for (const asset of ["BTC", "ETH"]) {
   };
   const index = new Map(),
     expiries = new Map();
+  const coneQuotes = [], coneExpiries = new Set();
   let marksThrough = null;
   const indexFiles = files.filter((n) =>
     new RegExp(`^${asset}USD_index_1h_\\d{6}\\.parquet$`).test(n),
@@ -111,6 +117,13 @@ for (const asset of ["BTC", "ETH"]) {
         ts + 3600 <= now
       )
         marksThrough = Math.max(marksThrough ?? 0, ts + 3600);
+      // Include expired contracts at their own sampled close, matched to that
+      // hour's index close. The ordinary curve cache still keeps live expiries.
+      if (spec && spec.expiry > ts + 3600 && coneTargets.has(ts + 3600) &&
+          Number.isFinite(iv) && iv > 0 && index.has(ts)) {
+        coneQuotes.push({ ...spec, ts: ts + 3600, iv, spot: index.get(ts)[4] });
+        coneExpiries.add(spec.expiry);
+      }
       if (
         !spec ||
         spec.expiry <= now ||
@@ -145,6 +158,22 @@ for (const asset of ["BTC", "ETH"]) {
     index: await write("index", { rows: indexRows }),
     expiries: {},
   };
+  const indexBars = indexRows.map(([ts, open, high, low, close]) => ({ ts, open, high, low, close }));
+  const latestClose = manifest.sourceThrough.index;
+  const rv = realizedConeHistory(indexBars, [...new Set([...coneSchedule, ...(latestClose == null ? [] : [latestClose])])]);
+  const cone = {
+    schema: "thalex-volatility-cone", version: 1, asset,
+    source: "backtest/source-data/thalex", sourceFiles: [...indexFiles, ...markFiles],
+    sourceThrough: manifest.sourceThrough,
+    sampling: { shortSeconds: 3600, longSeconds: 86400, longFromDays: 180, dailyUtcHour: 0, timestampBasis: "bar-close" },
+    methodology: { iv: "atm-spot-close-total-variance", rv: "garman-klass-hourly", daysPerYear: 365.25, minHourlyCoverage: 0.99 },
+    tenors: CONE_TENORS,
+    implied: impliedConeHistory(buildHistoricalSeries({ history: coneQuotes, slice: "atm", limit: Infinity, expiries: [...coneExpiries] })),
+    realized: rv.filter(p => coneTargets.has(p.ts)),
+    latestRealized: rv.filter(p => p.ts === latestClose),
+  };
+  manifest.cone = await write("cone", cone);
+  console.log(`[${asset}] cone: ${cone.implied.filter(p => p.iv != null).length} sampled IVs, ${cone.realized.filter(p => p.iv != null).length} sampled RVs`);
   let quoteCount = 0;
   for (const [expiry, instruments] of expiries) {
     const rows = [...instruments.values()]
@@ -160,6 +189,10 @@ for (const asset of ["BTC", "ETH"]) {
     });
   }
   await fs.writeFile(path.join(out, "manifest.json"), JSON.stringify(manifest));
+  for (const filename of await fs.readdir(out)) {
+    if (/^cone-[a-f0-9]{16}\.json$/.test(filename) && filename !== manifest.cone)
+      await fs.unlink(path.join(out, filename));
+  }
   console.log(
     `[${asset}] ${indexRows.length} OHLC bars, ${quoteCount} closing IVs, ${expiries.size} live expiries`,
   );

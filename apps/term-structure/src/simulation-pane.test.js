@@ -8,6 +8,7 @@ import { Window } from "happy-dom";
 import { transformWithEsbuild } from "vite";
 import { builderExpiry } from "./simulation/position-selection.js";
 import { calcGreeks } from "../../../lib/thalex.js";
+import { CONE_TENORS } from "./volatility-cone.js";
 
 // Exercise the real templates and SVG output, without an exchange connection.
 async function compiler(directory) {
@@ -39,7 +40,7 @@ async function compiler(directory) {
   };
 }
 
-test("shared performance UI reuses paths, inspects and exports; the released app exposes only the curve", async (t) => {
+test("shared performance UI reuses paths, inspects and exports; the released app exposes curve and cone tabs", async (t) => {
   const directory = await mkdtemp(
     fileURLToPath(new URL("../.simulation-test-", import.meta.url)),
   );
@@ -722,7 +723,7 @@ test("shared performance UI reuses paths, inspects and exports; the released app
     app.unmount();
 
     const expiry = now + 86400;
-    let releaseWings, releaseHistory, usableTickers = 0, chainRequests = 0;
+    let releaseWings, releaseHistory, usableTickers = 0, chainRequests = 0, coneRequests = 0;
     const wingsPending = new Promise(resolve => { releaseWings = resolve; });
     const historyPending = new Promise(resolve => { releaseHistory = resolve; });
     t.mock.method(globalThis, "fetch", async (input) => {
@@ -751,7 +752,23 @@ test("shared performance UI reuses paths, inspects and exports; the released app
         await historyPending;
         result = { no_data: true };
       } else if (url.pathname.includes("history-cache")) {
-        return { ok: false, status: 404 };
+        const coin = url.pathname.includes("/eth/") ? "ETH" : "BTC";
+        const day = Math.floor(Date.now() / 86400000) * 86400;
+        if (url.pathname.endsWith("manifest.json")) return { ok: true, json: async () => ({
+          schema: "thalex-term-history", version: 1, asset: coin, resolution: 3600,
+          timestampBasis: "bar-start", ivBasis: "close", index: "index-empty.json", expiries: {}, cone: "cone-test.json",
+        }) };
+        if (url.pathname.endsWith("cone-test.json")) {
+          coneRequests++;
+          return { ok: true, json: async () => ({
+            schema: "thalex-volatility-cone", version: 1, asset: coin, source: "backtest/source-data/thalex",
+            sourceThrough: { index: day, marks: day }, tenors: CONE_TENORS,
+            sampling: { shortSeconds: 3600, longSeconds: 86400, longFromDays: 180, dailyUtcHour: 0, timestampBasis: "bar-close" },
+            methodology: { iv: "atm-spot-close-total-variance", rv: "garman-klass-hourly", daysPerYear: 365.25, minHourlyCoverage: 0.99 },
+            implied: [{ ts: day, tenorDays: 30, iv: coin === "ETH" ? 0.7 : 0.5 }], realized: [], latestRealized: [],
+          }) };
+        }
+        return { ok: true, json: async () => ({ rows: [] }) };
       } else {
         throw new Error(`Unexpected API call: ${input}`);
       }
@@ -765,7 +782,8 @@ test("shared performance UI reuses paths, inspects and exports; the released app
     for (let i = 0; i < 400 && usableTickers < 4; i++) await settle();
     await settle();
     assert.equal(usableTickers, 4, "both ATM brackets are already loaded on the curve tab");
-    assert.equal(root().querySelector(".topBar [role=tablist]"), null, "the released app has no workspace tabs");
+    assert.equal(root().querySelectorAll(".topBar [role=tab]").length, 2);
+    assert.equal(coneRequests, 0, "cone data is loaded lazily");
     assert.equal(button("Simulate"), undefined, "simulation is not exposed on main");
     assert.equal(root().querySelector("#panel-simulate"), null);
     assert.equal(root().querySelector(".sim-performance"), null, "simulation does not mount in the released app");
@@ -773,12 +791,35 @@ test("shared performance UI reuses paths, inspects and exports; the released app
     assert.ok(root().querySelector("#volatility-view"), "term structure controls remain available");
     assert.ok(button("Restart fetch"), "live quotes and history continue loading in the curve view");
     assert.equal(chainRequests, 1, "rendering the curve does not restart market loading");
+    button("Volatility cone").click();
+    await settle();
+    assert.equal(button("Volatility cone").getAttribute("aria-selected"), "true");
+    assert.equal(root().querySelector("#panel-curve").style.display, "none");
+    assert.equal(root().querySelectorAll("#panel-cone tbody tr").length, 10);
+    assert.match(root().querySelector("#panel-cone").textContent, /50.00%/);
+    assert.equal(coneRequests, 1);
+    button("Cone lookback").click();
+    await nextTick();
+    [...window.document.querySelectorAll('[role="option"]')].find(node => node.textContent.trim() === "1 month").click();
+    await nextTick();
+    assert.equal(button("Cone lookback").textContent.trim(), "1 month");
+    assert.match(root().querySelector("#panel-cone").textContent, /hourly historical closes/);
+    assert.equal(coneRequests, 1, "lookback changes reuse the full Parquet sample");
+    assert.equal(chainRequests, 1, "opening the cone does not refetch market data");
+    button("Term structure").click();
+    await settle();
+    button("Volatility cone").click();
+    await settle();
+    assert.equal(coneRequests, 1, "returning to the cone preserves its loaded sample");
+    assert.equal(button("Cone lookback").textContent.trim(), "1 month");
     releaseWings();
     releaseHistory();
     await settle();
     button("ETH").click();
     await settle();
     assert.equal(button("ETH").getAttribute("aria-pressed"), "true");
+    assert.equal(coneRequests, 2, "asset switching loads its own Parquet cone");
+    assert.match(root().querySelector("#panel-cone").textContent, /70.00%/);
     assert.equal(root().querySelector("#panel-simulate"), null, "asset switching cannot expose simulation");
     app.unmount();
 
