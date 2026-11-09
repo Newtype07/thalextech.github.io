@@ -2039,12 +2039,14 @@ const render = () => {
     const observations = props.observationData.length ? props.observationData : index;
     const snappedRange = snapTradeWindow(observations, domain.map(date => date.getTime() / 1000));
     const times = snappedRange?.map(ts => new Date(ts * 1000)) ?? domain;
-    [{ x: entryX, label: "Entry", time: times[0], anchor: "start", offset: 6, y: exitX - entryX < 340 ? -24 : -8 },
-      { x: exitX, label: "Exit", time: times[1], anchor: "end", offset: -6, y: -8 }].forEach(boundary => {
+    const stackedLabels = exitX - entryX < 340;
+    const stackedX = Math.min(entryX + 6, Math.max(0, innerWidth - 340));
+    [{ x: stackedLabels ? stackedX : entryX + 6, label: "Entry", time: times[0], anchor: "start", y: stackedLabels ? -24 : -8 },
+      { x: stackedLabels ? stackedX : exitX - 6, label: "Exit", time: times[1], anchor: stackedLabels ? "start" : "end", y: -8 }].forEach(boundary => {
       const price = boundaryPrices.get(boundary.time.getTime() / 1000);
       const priceLabel = Number.isFinite(price) && price > 0 ? ` · ${formatBoundaryPrice(price)}` : "";
       spotlight.append("text").attr("class", "trade-boundary-label")
-        .attr("x", boundary.x + boundary.offset).attr("y", boundary.y)
+        .attr("x", boundary.x).attr("y", boundary.y)
         .attr("text-anchor", boundary.anchor).attr("fill", CHART_COLORS.secondaryText)
         .style("font-size", "10px").text(`${boundary.label} · ${formatBoundaryTime(boundary.time)}${priceLabel}`)
         .append("title").text(`${boundary.label} · ${formatDate(boundary.time)} UTC${priceLabel}`);
