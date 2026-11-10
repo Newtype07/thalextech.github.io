@@ -9,6 +9,13 @@
 Run `npm run build:data` after adding or replacing source Parquet files. Both
 `npm run dev` and `npm run build` also generate the runtime artifacts first.
 
+In the app's Parameter sweep view, **Roll frequency** compares the existing
+"Roll every" day presets up to the selected maturity (the near-leg maturity for
+calendars). Runs use the roll-after-days exit mode and keep the entry schedule,
+option maturity, and other strategy settings fixed. Expiry can close a position
+before its requested roll date. Selecting a result applies its roll interval
+and exit mode to the single backtest.
+
 ## For agents / programmatic use
 
 Run these commands from `apps/backtest` with Node.js 20+ and dependencies installed.

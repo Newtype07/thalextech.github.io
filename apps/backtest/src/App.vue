@@ -669,6 +669,7 @@ const SWEEP_DIMENSIONS = [
   { value: "entry_hour", label: "Entry hour" },
   { value: "entry_weekday", label: "Day of week" },
   { value: "maturity", label: "Maturity" },
+  { value: "roll_frequency", label: "Roll frequency" },
   { value: "hedge_frequency", label: "Hedge frequency" },
   { value: "hedge_tolerance", label: "Hedge tolerance" },
   { value: "delta_band", label: "Strike delta" },
@@ -742,6 +743,13 @@ const sweepConfigs = computed(() => {
       key: `hedge-${frequency.value}`,
       label: frequency.label,
       overrides: { hedgeEnabled: true, hedgeMode: "time", hedgeIntervalHours: frequency.value },
+    }));
+  }
+  if (sweepDimension.value === "roll_frequency") {
+    return rollDayOptions.value.map((days) => ({
+      key: `roll-${days}`,
+      label: `${days}D`,
+      overrides: { exitMode: "after_days", exitHoldDays: days },
     }));
   }
   if (sweepDimension.value === "hedge_tolerance") {
@@ -1249,6 +1257,9 @@ const applySweepResult = (cell) => {
     ui.hedgeEnabled = true;
     ui.hedgeMode = "time";
     ui.hedgeIntervalHours = cell.config.hedgeIntervalHours;
+  } else if (sweepDimension.value === "roll_frequency") {
+    ui.exitMode = "after_days";
+    ui.exitHoldDays = cell.config.exitHoldDays;
   } else if (sweepDimension.value === "hedge_tolerance") {
     ui.hedgeEnabled = true;
     ui.hedgeMode = "tolerance";
