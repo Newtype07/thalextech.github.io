@@ -6,7 +6,6 @@ on:
       - 'apps/simulator/**'
       - 'apps/term-structure/**'
       - 'apps/combo-pnl/**'
-      - 'apps/hedging/**'
       - '.github/workflows/hedge-simulation-tests.yml'
   workflow_dispatch:
 jobs:
@@ -23,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [simulator, term-structure, combo-pnl, hedging]
+        app: [simulator, term-structure, combo-pnl]
     defaults:
       run:
         working-directory: apps/${{ matrix.app }}

@@ -86,7 +86,7 @@ The pure simulation modules live in `src/simulation/`; Vue settings, charts and 
 
 ## Shared hedging and market assumptions
 
-The hedge policy, fill ledger and controls come from `lib/delta-hedging/` and `lib/components/DeltaHedgeControls.vue`, shared with Simulator, Combo P&L and Hedging. Hedge timing and entry/exit use visible radio choices. The hedge comparison panel has been removed; settings edits reuse the current market path.
+The hedge policy, fill ledger and controls come from `lib/delta-hedging/` and `lib/components/DeltaHedgeControls.vue`, shared with Simulator and Combo P&L. Hedge timing and entry/exit use visible radio choices. The hedge comparison panel has been removed; settings edits reuse the current market path.
 
 **Market assumptions** selects flat RV or the captured live forward curve, with deterministic variance, stochastic variance or jumps. Historical estimates use realized return/variance-shock correlation. BTC and ETH profiles for 30/90/180/365-day lookbacks are prepared from index Parquet during `build:data`; the browser loads small JSON profiles. Select **Use historical estimates** to apply a profile, or retain manual parameters. Profiles disclose their actual training cutoff and coverage; source updates require a data rebuild. Jumps and diffusion share each interval's variance budget, with jump variance capped at 35%. Option IV continues to follow the captured remaining-forward-variance convention.
 
