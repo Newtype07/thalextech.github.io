@@ -1,4 +1,17 @@
 // Pure rule: no provider contracts or UI state cross this boundary.
+export function defaultExpiry(expiries, now) {
+  const future = [...new Set(expiries)].filter(time => Number.isFinite(time) && time > now).sort((a, b) => a - b);
+  const monthly = future.filter(time => {
+    const date = new Date(time * 1000);
+    return date.getUTCDay() === 5
+      && new Date((time + 7 * 86400) * 1000).getUTCMonth() !== date.getUTCMonth();
+  });
+  const target = now + 30 * 86400;
+  // Prefer the earlier expiry on an exact tie; use listed weeklies if no monthly is available.
+  return (monthly.length ? monthly : future).reduce((best, time) =>
+    !best || Math.abs(time - target) < Math.abs(best - target) ? time : best, 0);
+}
+
 export function optionSide(target, spot) {
   if (![target, spot].every(value => Number.isFinite(value) && value > 0)) return null;
   return target < spot ? 'put' : 'call';

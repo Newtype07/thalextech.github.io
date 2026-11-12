@@ -1,6 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { rankOptions, optionSide, historicalFrequency, verdict, aggregateCandles } from './target-trade.js';
+import { defaultExpiry, rankOptions, optionSide, historicalFrequency, verdict, aggregateCandles } from './target-trade.js';
+const timestamp = value => Date.parse(value) / 1000;
+test('defaults to the last-Friday expiry closest to 30 days, ignoring closer weeklies', () => {
+ const november = timestamp('2026-11-27T08:00:00Z');
+ const december = timestamp('2026-12-25T08:00:00Z');
+ const expiries = [december, timestamp('2026-12-11T08:00:00Z'), november];
+ assert.equal(defaultExpiry(expiries, timestamp('2026-11-12T10:00:00Z')), december);
+ assert.equal(defaultExpiry(expiries, timestamp('2026-11-10T10:00:00Z')), november);
+ assert.equal(defaultExpiry(expiries, timestamp('2026-11-20T10:00:00Z')), december);
+ assert.equal(defaultExpiry(expiries, timestamp('2026-11-11T08:00:00Z')), november);
+});
+test('expiry fallback uses the future listed expiry closest to 30 days', () => {
+ const now = timestamp('2026-11-12T10:00:00Z');
+ const weekly = timestamp('2026-12-11T08:00:00Z');
+ assert.equal(defaultExpiry([now - 1, now, weekly, now + 7 * 86400], now), weekly);
+ assert.equal(defaultExpiry([], now), 0);
+ assert.equal(defaultExpiry([now - 1], now), 0);
+});
 const rankCalls = (calls, target) => rankOptions(calls.map(call => ({...call, side:'call'})), target, 1);
 const candles=prices=>prices.map((p,i)=>[i*3600,p,p,p,p]);
 test('selects maximum gross payout, not maximum payout or nearest strike',()=>{

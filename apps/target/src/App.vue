@@ -4,7 +4,7 @@ import CandleChart from './CandleChart.vue';
 import StyledSelectMenu from '../../../lib/components/StyledSelectMenu.vue';
 import { mergePriceHistory } from './price-history.js';
 import { loadMarket, loadPremiums } from './market-data.js';
-import { rankOptions, optionSide, historicalFrequency, verdict } from './target-trade.js';
+import { defaultExpiry, rankOptions, optionSide, historicalFrequency, verdict } from './target-trade.js';
 const target=ref(''),expiry=ref(''),market=ref(null),candles=ref([]),quotes=ref([]),excluded=ref(0);
 const activeCandle = ref(null);
 const chartCandles = computed(() => activeCandle.value ? [...candles.value, activeCandle.value] : candles.value);
@@ -71,7 +71,7 @@ async function refresh() {
     const available = [...new Set(result.options.map(call => call.expiry))].sort((a,b) => a-b);
     const selected = requestedExpiry = available.includes(Number(expiry.value))
       ? Number(expiry.value)
-      : available.find(time => time - fetchedAt >= 7 * 86400) || available[0] || 0;
+      : defaultExpiry(available, fetchedAt);
     const premiums = await loadPremiums(result.options.filter(call => call.expiry === selected),
       current.signal, (done, total) => {
         if (!current.signal.aborted) progress.value = `Pricing options · ${done}/${total}`;
