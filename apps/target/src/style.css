@@ -3,3 +3,4 @@
 .metric strong.spread-strikes{font-size:clamp(18px,1.4vw,24px);letter-spacing:-.5px;white-space:nowrap}
 
 .identity .trade-thalex{display:inline-flex;align-items:center;min-height:30px;padding:0 12px;border:1px solid #3d3d42;border-radius:999px;background:#050506;color:#eee;font-size:11px;font-weight:500;letter-spacing:0;white-space:nowrap;transition:border-color .12s,background-color .12s}.identity .trade-thalex:hover{border-color:#777;background:#141414}@media(max-width:600px){.identity{gap:12px}.title-row{row-gap:12px}}
+@media(min-width:901px){.title-row{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:20px}.title-row .identity{grid-column:1 / 6}.title-row .status{grid-column:6;justify-content:flex-start;flex-wrap:wrap;column-gap:18px;row-gap:4px}}
