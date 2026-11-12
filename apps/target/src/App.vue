@@ -19,17 +19,36 @@ const stale=computed(()=>clock.value-snapshot.value>120);
 const side = computed(() => optionSide(Number(target.value), market.value?.spot) || 'call');
 const ranked=computed(()=>rankOptions(quotes.value.filter(option => option.expiry === Number(expiry.value) && clock.value - option.ts <= 120),Number(target.value),market.value?.spot));
 const trade=computed(()=>!stale.value&&validExpiry.value?ranked.value[0]:null);
+// Match Combo's strategy-builder link contract; quantities describe one structure.
+const thalexUrl = computed(() => {
+  const selected = trade.value;
+  if (!selected) return null;
+  const params = new URLSearchParams({
+    underlying: 'BTCUSD',
+    expiration: new Date(selected.expiry * 1000).toISOString().slice(0, 10),
+  });
+  const legs = selected.type === 'vertical'
+    ? [[selected.longName, 1], [selected.shortName, -1]]
+    : [[selected.name, 1]];
+  legs.forEach(([name, quantity], index) => {
+    params.set(`instruments[${index}][0]`, name);
+    params.set(`instruments[${index}][1]`, String(quantity));
+  });
+  return `https://thalex.com/exchange/options?${params}`;
+});
 const move=computed(()=>market.value&&validTarget.value?Number(target.value)/market.value.spot-1:null);
 const history=computed(()=>move.value!=null&&validExpiry.value?historicalFrequency(candles.value,move.value,Number(expiry.value)-snapshot.value):null);
 const signal=computed(()=>verdict(trade.value,history.value));
 const money=v=>Number.isFinite(v)?new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(v):'—';
+const strikes = candidate => candidate ? `${money(candidate.strike)}${candidate.type === 'vertical' ? ` / ${money(candidate.shortStrike)}` : ''}` : '—';
 const pct=v=>Number.isFinite(v)?`${(v*100).toFixed(1)}%`:'—';
 const date=ts=>new Date(ts*1000).toLocaleString('en-GB',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',timeZone:'UTC'});
 const unavailableReason = computed(() => {
   if (busy.value) return progress.value || 'Loading market…';
   if (stale.value && snapshot.value) return 'Quotes expired · reconnecting';
   if (!validExpiry.value) return 'Choose a future expiry';
-  const currentOptions = quotes.value.filter(option => option.expiry === Number(expiry.value) && option.side === side.value);
+  const currentOptions = quotes.value.filter(option => option.expiry === Number(expiry.value) && option.side === side.value
+    && Number.isFinite(option.premium) && option.premium > 0 && option.amount > 0);
   if (!currentOptions.length) return `No executable ${side.value} asks`;
   const strikes = currentOptions.map(option => option.strike);
   if (side.value === 'call' && Number(target.value) <= Math.min(...strikes))
@@ -112,7 +131,7 @@ onUnmounted(() => {
 </script>
 <template>
 <main class="app">
-  <header class="header"><div class="title-row"><div class="identity"><a href="/" aria-label="Thalex apps">THALEX</a><span class="divider">/</span><h1>Target</h1></div><div class="status muted">{{busy?'Connecting to Thalex…':snapshot?`Snapshot ${date(snapshot)} UTC`:'BTCUSD'}} <button class="refresh" :disabled="busy" @click="refresh">Refresh ↻</button></div></div>
+  <header class="header"><div class="title-row"><div class="identity"><a href="/" aria-label="Thalex apps">THALEX</a><a v-if="thalexUrl" class="trade-thalex" :href="thalexUrl" target="_blank" rel="noopener noreferrer">Trade on Thalex →</a></div><div class="status muted">{{busy?'Connecting to Thalex…':snapshot?`Snapshot ${date(snapshot)} UTC`:'BTCUSD'}} <button class="refresh" :disabled="busy" @click="refresh">Refresh ↻</button></div></div>
 
   </header>
   <p v-if="error||historyError" class="error" role="alert">{{error||historyError}}</p>
@@ -120,17 +139,17 @@ onUnmounted(() => {
   <p v-if="!validTarget&&!busy" class="notice">Drag the target line to set your level.</p>
   <p v-if="snapshot&&!validExpiry&&!busy" class="notice">Select a future listed expiry.</p>
   <section class="results" aria-label="Target trade result" aria-live="polite">
-    <div class="metric"><span class="metric-label">Best {{side}} strike</span><strong>{{money(trade?.strike)}}</strong><span class="muted detail">{{trade?`Buy ${trade.side} · ask ${money(trade.premium)}`:unavailableReason}}</span></div>
-    <div class="metric"><span class="metric-label">Payout multiple</span><strong>{{trade?`${trade.multiple.toFixed(2)}×`:'—'}}</strong><span class="muted detail">{{trade?`${money(trade.payout)} payout / ${money(trade.premium)} premium`:side==='put'?'(Strike − target) / premium':'(Target − strike) / premium'}}</span></div>
+    <div class="metric"><span class="metric-label">Best {{side}} {{trade?.type==='vertical'?'spread':'strike'}}</span><strong :class="{'spread-strikes':trade?.type==='vertical'}">{{strikes(trade)}}</strong><span class="muted detail">{{trade?(trade.type==='vertical'?`Buy / sell · debit ${money(trade.premium)}`:`Buy ${trade.side} · ask ${money(trade.premium)}`):unavailableReason}}</span></div>
+    <div class="metric"><span class="metric-label">Payout multiple</span><strong>{{trade?`${trade.multiple.toFixed(2)}×`:'—'}}</strong><span class="muted detail">{{trade?`${money(trade.payout)} payout / ${money(trade.premium)} ${trade.type==='vertical'?'debit':'premium'}`:side==='put'?'(Strike − target) / premium':'(Target − strike) / premium'}}</span></div>
     <div class="metric"><span class="metric-label">Required hit rate</span><strong>{{pct(trade?.required)}}</strong><span class="muted detail">1 / payout multiple</span></div>
     <div class="metric"><span class="metric-label">Historical expiry %</span><strong>{{pct(history?.frequency)}}</strong><span class="muted detail">{{history?.total?`${history.hits.toLocaleString()} / ${history.total.toLocaleString()} windows`:'Insufficient history'}}</span></div>
     <div class="metric"><span class="metric-label">Historical touch %</span><strong>{{pct(history?.touchFrequency)}}</strong><span class="muted detail">{{history?.total?`${history.touchHits.toLocaleString()} / ${history.total.toLocaleString()} windows`:'Insufficient history'}}</span></div>
-    <div class="metric verdict"><span class="metric-label">Rule verdict</span><strong :class="{buy:signal==='BUY',pass:signal==='PASS'}">{{signal==='UNAVAILABLE'?'—':signal}}</strong><span class="muted detail">{{signal==='BUY'?'Frequency > required hit rate':signal==='PASS'?'Frequency ≤ required hit rate':'Waiting for valid inputs & data'}}</span></div>
+    <div class="metric verdict"><span class="metric-label">Rule verdict</span><strong :class="{buy:signal==='BUY',maybe:signal==='MAYBE',pass:signal==='PASS'}">{{signal==='UNAVAILABLE'?'—':signal}}</strong><span class="muted detail">{{signal==='BUY'?'Expiry % > required hit rate':signal==='MAYBE'?'Touch only · early exit not valued':signal==='PASS'?'No qualifying frequency edge':'Waiting for valid inputs & data'}}</span></div>
   </section>
-  <CandleChart @update:target="target = $event" :candles="chartCandles" :spot="market?.spot" :target="validTarget?Number(target):undefined" :expiry="validExpiry?Number(expiry):undefined" :strike="trade?.strike" :now="snapshot||clock">
+  <CandleChart @update:target="target = $event" :candles="chartCandles" :spot="market?.spot" :target="validTarget?Number(target):undefined" :expiry="validExpiry?Number(expiry):undefined" :strike="trade?.strike" :short-strike="trade?.shortStrike" :now="snapshot||clock">
     <template #controls><div class="chart-controls"><div class="toolbar-select"><StyledSelectMenu v-if="expiries.length" id="expiry" v-model="expiry" label="Expiry" :options="expiries.map(t => ({value: String(t), label: `${date(t)} UTC`}))"/><span v-else class="muted">{{busy ? 'Loading…' : 'No available expiries'}}</span></div><span v-if="move!=null" class="view-summary">{{move>=0?'+':''}}{{pct(move)}} <span class="muted">from {{money(market.spot)}}</span></span></div></template>
   </CandleChart>
-  <section class="explanation"><div><h2>The comparison</h2><p v-if="history?.total&&trade">BTC {{move>=0?'rose':'fell'}} {{pct(Math.abs(move))}} or more in <b>{{pct(history.frequency)}}</b> of observed {{history.hours}}-hour windows. This {{side}} needs <b>{{pct(trade.required)}}</b> under your target-payout rule.</p><p v-else>Drag the target line and choose an expiry. Every available {{side}} at that expiry is ranked by its payout at your target, divided by its ask premium.</p><p class="muted">Gross payout multiple, before fees. Net return at the target is multiple − 1.</p></div><div><h2>History & method</h2><p class="muted">{{history?`Horizon rounded to the nearest hour (${history.hours}h). `:''}}Rolling hourly close-to-close returns; overlapping windows, excluding gaps. Expiry % counts closes beyond the target move; touch % uses subsequent hourly highs/lows. The verdict uses expiry %.</p><p class="muted" v-if="candles.length">{{date(candles[0][0])}} – {{date(candles.at(-1)[0]+3600)}} UTC · tracked Thalex BTCUSD history.</p><p class="muted">{{quotes.length}} executable asks<span v-if="excluded"> · {{excluded}} unavailable or stale quotes excluded</span>. This is your rule’s signal, not a full expected-value model: other expiry outcomes and costs are not priced into the verdict.</p></div></section>
-  <details v-if="ranked.length&&!stale&&validExpiry"><summary>Compare {{ranked.length}} eligible strikes</summary><div class="table-scroll"><table><thead><tr><th>{{side==='put'?'Put':'Call'}} strike</th><th>Ask premium</th><th>Payout at target</th><th>Multiple</th><th>Required hit rate</th></tr></thead><tbody><tr v-for="(c,i) in ranked" :key="c.name" :class="{selected:i===0}"><td>{{money(c.strike)}} <span class="muted">{{i===0?'· best':''}}</span></td><td>{{money(c.premium)}}</td><td>{{money(c.payout)}}</td><td>{{c.multiple.toFixed(2)}}×</td><td>{{pct(c.required)}}</td></tr></tbody></table></div></details>
+  <section class="explanation"><div><h2>The comparison</h2><p v-if="history?.total&&trade">BTC {{move>=0?'rose':'fell'}} {{pct(Math.abs(move))}} or more in <b>{{pct(history.frequency)}}</b> of observed {{history.hours}}-hour windows. This {{side}}{{trade.type==='vertical'?' spread':''}} needs <b>{{pct(trade.required)}}</b> under your target-payout rule.</p><p v-else>Drag the target line and choose an expiry. Single options and vertical debit spreads are ranked together by payout at your target divided by entry cost. Spreads buy at the ask and sell at the bid.</p><p class="muted">Gross payout multiple, before fees. Net return at the target is multiple − 1.</p></div><div><h2>History & method</h2><p class="muted">{{history?`Horizon rounded to the nearest hour (${history.hours}h). `:''}}Rolling hourly close-to-close returns; overlapping windows, excluding gaps. Expiry % counts closes beyond the target move; touch % uses subsequent hourly highs/lows. BUY uses expiry %. MAYBE flags touch-only support; a profitable early exit is not established.</p><p class="muted" v-if="candles.length">{{date(candles[0][0])}} – {{date(candles.at(-1)[0]+3600)}} UTC · tracked Thalex BTCUSD history.</p><p class="muted">{{quotes.length}} available option quotes<span v-if="excluded"> · {{excluded}} unavailable or stale quotes excluded</span>. This is your rule’s signal, not a full expected-value model: other expiry outcomes and costs are not priced into the verdict.</p></div></section>
+  <details v-if="ranked.length&&!stale&&validExpiry"><summary>Compare {{ranked.length}} eligible trades</summary><div class="table-scroll"><table><thead><tr><th>Buy / sell strikes</th><th>Entry cost</th><th>Payout at target</th><th>Multiple</th><th>Required hit rate</th></tr></thead><tbody><tr v-for="(c,i) in ranked" :key="c.name" :class="{selected:i===0}"><td>{{strikes(c)}} <span class="muted">{{i===0?'· best':''}}</span></td><td>{{money(c.premium)}}</td><td>{{money(c.payout)}}</td><td>{{c.multiple.toFixed(2)}}×</td><td>{{pct(c.required)}}</td></tr></tbody></table></div></details>
 </main>
 </template>

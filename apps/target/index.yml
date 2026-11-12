@@ -1,3 +1,4 @@
 title: "Target"
-description: "One BTC level. One expiry. Find the call or put strike with the highest payout multiple and test its required hit rate against history."
-image: "/images/target.svg"
+path: "/target"
+description: "Choose a BTC target and expiry. Compare options and spreads by payout multiple, then check the required hit rate against historical moves."
+image: "/images/target.png"

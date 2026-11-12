@@ -86,3 +86,58 @@ test('touch excludes pre-entry highs/lows and windows with missing hours', () =>
   assert.equal(historicalFrequency(rows,0,7200).touchFrequency,1);
   assert.equal(historicalFrequency([rows[0]],.1,7200).touchFrequency,null);
 });
+const optionQuote = (strike, premium, bid, extra={}) => ({name:`C${strike}`,side:'call',expiry:1000,strike,premium,bid,amount:1,bidAmount:1,...extra});
+test('automatically chooses a vertical when its target multiple exceeds every single', () => {
+  const ranked=rankOptions([optionQuote(80000,2000,1900),optionQuote(90000,1000,750)],90000,80000);
+  assert.equal(ranked[0].type,'vertical');
+  assert.equal(ranked[0].strike,80000);
+  assert.equal(ranked[0].shortStrike,90000);
+  assert.equal(ranked[0].premium,1250);
+  assert.equal(ranked[0].payout,10000);
+  assert.equal(ranked[0].multiple,8);
+  assert.equal(ranked[0].required,.125);
+});
+test('retains a single when all spreads have a lower target multiple', () => {
+  const ranked=rankOptions([optionQuote(80000,1000,900),optionQuote(90000,1000,100)],100000,80000);
+  assert.equal(ranked[0].type,'single');
+  assert.equal(ranked[0].strike,80000);
+  assert.equal(ranked[0].multiple,20);
+});
+test('computes partial and capped expiry payouts for both call and put verticals', () => {
+  const calls=[optionQuote(80000,2000,1900),optionQuote(90000,1000,750)];
+  assert.equal(rankOptions(calls,85000,80000).find(c=>c.type==='vertical').payout,5000);
+  assert.equal(rankOptions(calls,95000,80000).find(c=>c.type==='vertical').payout,10000);
+  const puts=[optionQuote(80000,2000,1900,{side:'put'}),optionQuote(70000,1000,750,{side:'put'})];
+  const partial=rankOptions(puts,75000,80000).find(c=>c.type==='vertical');
+  assert.equal(partial.shortStrike,70000);
+  assert.equal(partial.payout,5000);
+  assert.equal(rankOptions(puts,65000,80000).find(c=>c.type==='vertical').payout,10000);
+});
+test('rejects shorts with missing bids or size, different expiries, crossed books or nonpositive debits', () => {
+  const long=optionQuote(80000,2000,1900);
+  for (const short of [optionQuote(90000,1000,null),optionQuote(90000,1000,750,{bidAmount:0}),
+    optionQuote(90000,1000,750,{expiry:2000}),optionQuote(90000,1000,750,{side:'put'}),
+    optionQuote(90000,1000,1200),optionQuote(90000,3000,2000)]) {
+    assert.ok(rankOptions([long,short],90000,80000).every(c=>c.type!=='vertical'));
+  }
+});
+test('a bid-only option can fund a spread, and ties prefer the single', () => {
+  const long=optionQuote(80000,2000,1900);
+  const bidOnly=optionQuote(90000,null,750,{amount:0,bidAmount:.25});
+  const best=rankOptions([long,bidOnly],90000,80000)[0];
+  assert.equal(best.type,'vertical');
+  assert.equal(best.amount,.25);
+  const tie=rankOptions([optionQuote(80000,2000,1900),optionQuote(90000,1100,1000)],100000,80000);
+  assert.equal(tie[0].type,'single');
+  assert.equal(tie[0].multiple,10);
+});
+test('MAYBE flags a touch-only edge while preserving strict thresholds and BUY priority', () => {
+  const trade={required:.1};
+  assert.equal(verdict(trade,{frequency:.06,touchFrequency:.14}),'MAYBE');
+  assert.equal(verdict(trade,{frequency:.11,touchFrequency:.14}),'BUY');
+  assert.equal(verdict(trade,{frequency:.06,touchFrequency:.09}),'PASS');
+  assert.equal(verdict(trade,{frequency:.06,touchFrequency:.1}),'PASS');
+  assert.equal(verdict(trade,{frequency:.1,touchFrequency:.14}),'PASS');
+  assert.equal(verdict(trade,{frequency:.06}),'PASS');
+  assert.equal(verdict(trade,{frequency:null,touchFrequency:.14}),'UNAVAILABLE');
+});

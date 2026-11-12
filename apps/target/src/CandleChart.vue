@@ -2,8 +2,9 @@
 import { computed, ref, watch } from 'vue';
 import { scaleLinear, scaleUtc } from 'd3';
 import { aggregateCandles } from './target-trade.js';
+import { priceLabelPositions } from '../../../lib/price-label-positions.js';
 import StyledSelectMenu from '../../../lib/components/StyledSelectMenu.vue';
-const props=defineProps({candles:{type:Array,default:()=>[]},spot:Number,target:Number,expiry:Number,now:Number,strike:Number});
+const props=defineProps({candles:{type:Array,default:()=>[]},spot:Number,target:Number,expiry:Number,now:Number,strike:Number,shortStrike:Number});
 const emit = defineEmits(['update:target']);
 const TARGET_TICK = 5;
 const range=ref(90),hover=ref(null),dragging=ref(false);
@@ -11,12 +12,13 @@ let dragScale, dragOffset = 0;
 // Keep the price scale independent of the target and selected strike, so neither
 // the candles nor the handle move away from the pointer while repricing.
 
-const defaultIntervals = { 30: 14400, 90: 86400, 180: 86400, 365: 604800, 730: 604800 };
+const defaultIntervals = { 30: 14400, 90: 86400, 180: 86400, 365: 259200, 730: 604800 };
 const intervalOptions = [
   { value: 3600, label: '1-hour candles' },
   { value: 14400, label: '4-hour candles' },
   { value: 43200, label: '12-hour candles' },
   { value: 86400, label: 'Daily candles' },
+  { value: 259200, label: '3-day candles' },
   { value: 604800, label: 'Weekly candles' },
 ];
 // Range presets choose the initial density; an explicit interval remains the
@@ -55,12 +57,35 @@ const date=ts=>new Date(ts*1000).toLocaleDateString('en-GB',{day:'numeric',month
 const referenceY = value => Math.min(590, Math.max(35, y.value(value)));
 const offscreen = value => value > priceDomain.value[1] ? ' ↑' : value < priceDomain.value[0] ? ' ↓' : '';
 const targetY = computed(() => referenceY(props.target));
-const references=computed(()=>[{value:props.target,label:'Target',kind:'target'},{value:props.spot,label:'Spot',kind:'spot'},{value:props.strike,label:'Strike',kind:'strike'}].filter(r=>Number.isFinite(r.value)&&r.value>0));
-// All price annotations use the same scale and label anchor. Do not move
-// individual labels into lanes: that makes a strike appear at another price.
-const labels = computed(() => references.value.map(reference => ({
-  ...reference, top: referenceY(reference.value),
-})));
+const references=computed(()=>[{value:props.target,label:'Target',kind:'target'},{value:props.spot,label:'Spot',kind:'spot'},{value:props.strike,label:props.shortStrike != null ? 'Buy' : 'Strike',kind:'strike'},{value:props.shortStrike,label:'Sell',kind:'shortStrike'}].filter(r=>Number.isFinite(r.value)&&r.value>0));
+// The target stays pinned to its price. Context labels get readable spacing
+// while price lines retain their unchanged anchors.
+const labels = computed(() => {
+  const groups = new Map();
+  for (const reference of references.value) {
+    const group = groups.get(reference.value);
+    if (group) { group.label += ` / ${reference.label}`; group.kinds.push(reference.kind); }
+    else groups.set(reference.value, { ...reference, kinds: [reference.kind], top: referenceY(reference.value) });
+  }
+  const items = [...groups.values()];
+  const target = items.find(item => item.kind === 'target');
+  if (!target) return items;
+  const gap = 24, minY = 35, maxY = 600;
+  const context = items.filter(item => item !== target).sort((a,b) => a.top - b.top);
+  const above = context.filter(item => item.top < target.top);
+  const below = context.filter(item => item.top >= target.top);
+  // At plot edges, use the available side rather than clipping annotations.
+  const aboveCapacity = Math.floor((target.top - minY) / gap);
+  const belowCapacity = Math.floor((maxY - target.top) / gap);
+  while (above.length > aboveCapacity) below.unshift(above.pop());
+  while (below.length > belowCapacity) above.push(below.shift());
+  for (const [neighbors, low, high] of [[above, minY, target.top-gap], [below, target.top+gap, maxY]]) {
+    if (!neighbors.length) continue;
+    const positions = priceLabelPositions(neighbors.map(item => item.top), low, high, gap);
+    neighbors.forEach((item, index) => item.top = positions[index]);
+  }
+  return items;
+});
 
 const targetLabel = computed(() => labels.value.find(r => r.kind === 'target'));
 const targetX = computed(() => props.expiry ? xpos(props.expiry) : 1320);
@@ -115,9 +140,9 @@ function keyTarget(event) {
   <div v-if="rows.length" class="chart-scroll"><svg viewBox="0 0 1440 640" role="group" :aria-label="`Observed Bitcoin ${candleView.label} with draggable target at expiry`">
     <g class="axis"><text v-for="t in x.ticks(5)" :key="+t" :x="x(t)" y="630" text-anchor="middle">{{t.toLocaleDateString('en-GB',{day:'numeric',month:'short',timeZone:'UTC'})}}</text></g>
     <g v-for="r in rows" :key="r[0]" v-memo="[r, x, y, width]" :class="['candle',r[4]>=r[1]?'up':'down']" @mouseenter="hover=r" @mouseleave="hover=null"><title>{{candleDate(r[0])}} · O {{money(r[1])}} H {{money(r[2])}} L {{money(r[3])}} C {{money(r[4])}}</title><line :x1="xpos(r[0])" :x2="xpos(r[0])" :y1="y(r[2])" :y2="y(r[3])"/><rect :x="xpos(r[0])-width/2" :y="Math.min(y(r[1]),y(r[4]))" :width="width" :height="Math.max(1,Math.abs(y(r[1])-y(r[4])))"/><rect class="hitbox" :x="xpos(r[0])-width" y="30" :width="width*2" height="570"/></g>
-    <line v-for="r in references.filter(r => r.kind === 'strike' && !offscreen(r.value))" :key="r.kind" :class="['reference',r.kind]" x1="15" x2="1330" :y1="y(r.value)" :y2="y(r.value)"/>
+    <line v-for="r in references.filter(r => (r.kind === 'strike' || r.kind === 'shortStrike') && !offscreen(r.value))" :key="r.kind" :class="['reference',r.kind]" x1="15" x2="1330" :y1="y(r.value)" :y2="y(r.value)"/>
     <g v-if="expiry && target>0"><line class="expiry" :x1="xpos(expiry)" :x2="xpos(expiry)" y1="30" y2="600"/><text class="expiry-label" :x="xpos(expiry)-8" y="20" text-anchor="end">{{date(expiry)}} · expiry</text></g>
-    <g v-for="r in labels.filter(r => r.kind !== 'target')" :key="r.kind"><text :class="['direct',r.kind]" x="1348" :y="r.top-4">{{r.label}}{{offscreen(r.value)}}</text><text class="direct value" x="1348" :y="r.top+10">{{money(r.value)}}</text></g>
+    <g v-for="r in labels.filter(r => r.kind !== 'target')" :key="r.kind"><text :class="['direct',...r.kinds]" x="1348" :y="r.top" dominant-baseline="middle">{{r.label}}{{offscreen(r.value)}}<tspan class="value" dx="4">{{money(r.value)}}</tspan></text></g>
     <g v-if="targetLabel" class="target-control" :class="{dragging}" role="slider" tabindex="0"
       aria-label="Target price in USD" aria-orientation="vertical" :aria-valuenow="target"
       :aria-valuemin="Math.min(target, targetMin)" :aria-valuemax="Math.max(target, targetMax)" :aria-valuetext="money(target)"
@@ -128,8 +153,7 @@ function keyTarget(event) {
       <circle :cx="targetX" :cy="targetY" r="4" fill="white"/>
       <path class="target-label-hit" :d="`M1338,${targetLabel.top-22} h100 v48 h-100 Z`"/>
       <circle class="target-dot-hit" :cx="targetX" :cy="targetY" r="16"/>
-      <text class="direct target" x="1348" :y="targetLabel.top-4">Target{{offscreen(target) || ' ↕'}}</text>
-      <text class="direct value" x="1348" :y="targetLabel.top+10">{{money(target)}}</text>
+      <text class="direct target" x="1348" :y="targetLabel.top" dominant-baseline="middle">{{targetLabel.label}}{{offscreen(target)}}<tspan class="value" dx="4">{{money(target)}}</tspan></text>
     </g>
   </svg></div>
   <div v-else class="chart-empty">Loading observed BTC candles…</div>
@@ -137,5 +161,5 @@ function keyTarget(event) {
 </section>
 </template>
 <style scoped>
-.chart{min-width:0}.chart-scroll{overflow-x:auto}@media(max-width:600px){.chart-scroll svg{min-width:700px}}.chart-meta,.chart-foot{display:flex;justify-content:space-between;gap:16px;font-size:12px}.chart-meta{align-items:center;flex-wrap:wrap;padding-right:8.333333%}.ranges{display:flex;gap:14px;margin-left:auto}.ranges button{padding:0;border:0;background:none;color:#777;font:inherit;cursor:pointer}.ranges button.active{color:#fff}.ohlc{height:30px;padding-top:10px;font-size:11px}svg{width:100%;display:block;overflow:visible}.axis{fill:#777;font-size:11px}.candle line{stroke-width:1}.up{stroke:#eee;fill:#eee}.down{stroke:#777;fill:#444}.hitbox{fill:transparent;stroke:none}.reference{stroke:#555;stroke-width:.7;fill:none;stroke-dasharray:3 5}.reference.strike{stroke:#777}.target-control{cursor:ns-resize;touch-action:none;-webkit-tap-highlight-color:transparent}.target-control,.target-control:hover,.target-control:focus,.target-control:focus-visible{outline:none;border:none;box-shadow:none}.target-hit{stroke:transparent;stroke-width:32;pointer-events:stroke}.target-line{stroke:#eee;stroke-width:1;pointer-events:none}.target-label-hit,.target-dot-hit{fill:transparent;stroke:none;pointer-events:all}.target-control text{pointer-events:bounding-box;user-select:none;outline:none}.target-control.dragging .target-line{stroke-width:1.5}.expiry{stroke:#333;stroke-dasharray:2 5}.direct{font-size:10px;fill:#aaa}.direct.target,.value{fill:#eee}.expiry-label{font-size:11px;fill:#aaa}.chart-foot{font-size:11px;margin-top:12px;flex-wrap:wrap}.chart-empty{min-height:360px;display:grid;place-items:center;color:#777}
+.chart{min-width:0}.chart-scroll{overflow-x:auto}@media(max-width:600px){.chart-scroll svg{min-width:700px}}.chart-meta,.chart-foot{display:flex;justify-content:space-between;gap:16px;font-size:12px}.chart-meta{align-items:center;flex-wrap:wrap;padding-right:8.333333%}.ranges{display:flex;gap:14px;margin-left:auto}.ranges button{padding:0;border:0;background:none;color:#777;font:inherit;cursor:pointer}.ranges button.active{color:#fff}.ohlc{height:30px;padding-top:10px;font-size:11px}svg{width:100%;display:block;overflow:visible}.axis{fill:#777;font-size:11px}.candle line{stroke-width:1}.up{stroke:#eee;fill:#eee}.down{stroke:#777;fill:#444}.hitbox{fill:transparent;stroke:none}.reference{stroke:#555;stroke-width:.7;fill:none;stroke-dasharray:3 5}.reference.strike{stroke:#777}.target-control{cursor:ns-resize;touch-action:none;-webkit-tap-highlight-color:transparent}.target-control,.target-control:hover,.target-control:focus,.target-control:focus-visible{outline:none;border:none;box-shadow:none}.target-hit{stroke:transparent;stroke-width:32;pointer-events:stroke}.target-line{stroke:#eee;stroke-width:1;pointer-events:none}.target-label-hit,.target-dot-hit{fill:transparent;stroke:none;pointer-events:all}.target-control text{pointer-events:bounding-box;user-select:none;outline:none}.target-control.dragging .target-line{stroke-width:1.5}.expiry{stroke:#333;stroke-dasharray:2 5}.direct{font-size:10px;fill:#aaa}.value{fill:#eee}.expiry-label{font-size:11px;fill:#aaa}.chart-foot{font-size:11px;margin-top:12px;flex-wrap:wrap}.chart-empty{min-height:360px;display:grid;place-items:center;color:#777}
 </style>

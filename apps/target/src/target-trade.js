@@ -6,15 +6,40 @@ export function optionSide(target, spot) {
 export function rankOptions(options, target, spot) {
   const side = optionSide(target, spot);
   if (!side) return [];
-  return options.filter(option => option.side === side && Number.isFinite(option.strike) && option.strike > 0
-      && Number.isFinite(option.premium) && option.premium > 0)
-    .map(option => {
-      const payout = side === 'put' ? option.strike - target : target - option.strike;
-      return { ...option, payout, multiple: payout / option.premium,
-        required: payout > 0 ? option.premium / payout : Infinity };
-    })
-    .filter(option => option.payout > 0)
-    .sort((a,b) => b.multiple - a.multiple || a.strike - b.strike);
+  const chain = options.filter(option => option.side === side
+    && Number.isFinite(option.strike) && option.strike > 0
+    && !(Number.isFinite(option.bid) && Number.isFinite(option.premium) && option.premium > 0 && option.bid > option.premium));
+  const direction = side === 'call' ? 1 : -1;
+  const intrinsic = strike => Math.max(direction * (target - strike), 0);
+  const candidates = [];
+  for (const long of chain) {
+    if (!(Number.isFinite(long.premium) && long.premium > 0)
+      || (long.amount !== undefined && !(long.amount > 0))) continue;
+    const longPayout = intrinsic(long.strike);
+    if (longPayout <= 0) continue;
+    candidates.push({ ...long, type: 'single', longPremium: long.premium,
+      payout: longPayout, multiple: longPayout / long.premium, required: long.premium / longPayout });
+    for (const short of chain) {
+      if (short.expiry !== long.expiry || direction * (short.strike - long.strike) <= 0
+        || !(Number.isFinite(short.bid) && short.bid > 0 && short.bidAmount > 0)) continue;
+      const debit = long.premium - short.bid;
+      const payout = longPayout - intrinsic(short.strike);
+      if (!(debit > 0 && payout > 0)) continue;
+      candidates.push({ ...long, type: 'vertical',
+        name: `${long.name}/${short.name}`, longName: long.name, shortName: short.name,
+        shortStrike: short.strike, longPremium: long.premium, shortPremium: short.bid,
+        premium: debit, amount: Math.min(long.amount ?? Infinity, short.bidAmount),
+        payout, maxPayout: Math.abs(short.strike - long.strike),
+        multiple: payout / debit, required: debit / payout });
+    }
+  }
+  return candidates.sort((a, b) => {
+    const difference = b.multiple - a.multiple;
+    if (Math.abs(difference) > 1e-10 * Math.max(1, a.multiple, b.multiple)) return difference;
+    // Keep the simpler trade unless the extra leg improves the target multiple.
+    return (a.type === 'vertical') - (b.type === 'vertical')
+      || a.strike - b.strike || (a.shortStrike ?? 0) - (b.shortStrike ?? 0);
+  });
 }
 export function historicalFrequency(candles, move, horizonSeconds) {
   // The source is hourly. Round the horizon to its nearest observable hour.
@@ -54,7 +79,9 @@ export function historicalFrequency(candles, move, horizonSeconds) {
 }
 export function verdict(trade, history) {
   if (!trade || history?.frequency == null) return 'UNAVAILABLE';
-  return history.frequency > trade.required ? 'BUY' : 'PASS';
+  if (history.frequency > trade.required) return 'BUY';
+  if (history.frequency < trade.required && history.touchFrequency > trade.required) return 'MAYBE';
+  return 'PASS';
 }
 export function aggregateCandles(rows, seconds=86400, anchor=0) {
   const buckets=new Map();

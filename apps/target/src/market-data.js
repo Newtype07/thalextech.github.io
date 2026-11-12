@@ -49,9 +49,10 @@ export async function loadPremiums(options, signal, onProgress=()=>{}) {
     const ticker=await request('ticker',{instrument_name:option.name},signal);
     if (!Number.isFinite(ticker.mark_timestamp) || Math.abs(Date.now()/1000-ticker.mark_timestamp)>120) throw new Error('Stale quote');
     onProgress(++done,options.length);
-    return {...option,premium:ticker.best_ask_price,amount:ticker.best_ask_amount,ts:ticker.mark_timestamp};
+    return {...option,premium:ticker.best_ask_price,amount:ticker.best_ask_amount ?? 0,bid:ticker.best_bid_price,bidAmount:ticker.best_bid_amount ?? 0,ts:ticker.mark_timestamp};
   }));
   signal.throwIfAborted();
-  const available=results.filter(r=>r.status==='fulfilled').map(r=>r.value).filter(c=>Number.isFinite(c.premium)&&c.premium>0&&c.amount>0);
+  const available=results.filter(r=>r.status==='fulfilled').map(r=>r.value).filter(c=>(Number.isFinite(c.premium)&&c.premium>0&&c.amount>0)
+    || (Number.isFinite(c.bid)&&c.bid>0&&c.bidAmount>0));
   return {quotes:available,excluded:options.length-available.length};
 }

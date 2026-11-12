@@ -21,14 +21,14 @@ test('automatic refresh keeps fresh trades visible and dragging works while quot
     const adapter = resolve(directory, 'market.mjs');
     await writeFile(adapter, `
       const expiry = ${now/1000} + 7*86400;
-      export const state = { requests: 0, hold: false, empty: false, release: null };
-      const options = [{ name: 'BTC-C80', side: 'call', strike: 80000, expiry }, { name: 'BTC-C85', side: 'call', strike: 85000, expiry }, { name: 'BTC-P80', side: 'put', strike: 80000, expiry }, { name: 'BTC-P75', side: 'put', strike: 75000, expiry }];
+      export const state = { requests: 0, hold: false, empty: false, spreads: false, release: null };
+      const options = [{ name: 'BTC-C80', side: 'call', strike: 80000, expiry }, { name: 'BTC-C85', side: 'call', strike: 85000, expiry }, { name: 'BTC-P80', side: 'put', strike: 80000, expiry }, { name: 'BTC-P798', side: 'put', strike: 79800, expiry }];
       export async function loadMarket() { state.requests++; return { spot: 80000, options }; }
       export async function loadPremiums() {
         if (state.hold) await new Promise(resolve => state.release = resolve);
         if (state.empty) return { quotes: [], excluded: options.length };
-        return { quotes: options.map((option, i) => ({ ...option, premium: [1000,400,1000,200][i],
-          amount: 1, ts: Date.now()/1000 })), excluded: 0 };
+        return { quotes: options.map((option, i) => ({ ...option, premium: [1000,400,1000,950][i],
+          amount: 1, bid: state.spreads ? [900,350,900,900][i] : null, bidAmount: 1, ts: Date.now()/1000 })), excluded: 0 };
       }
     `);
     const compiled = new Map();
@@ -62,10 +62,20 @@ test('automatic refresh keeps fresh trades visible and dragging works while quot
     await settle();
     const strike = () => root.querySelector('.metric strong').textContent;
     assert.equal(strike(), '$80,000');
+    const tradeLink = () => root.querySelector('.trade-thalex');
+    const linkedLegs = () => {
+      const url = new URL(tradeLink().href);
+      assert.equal(url.origin + url.pathname, 'https://thalex.com/exchange/options');
+      assert.equal(url.searchParams.get('underlying'), 'BTCUSD');
+      assert.equal(url.searchParams.get('expiration'), '2026-11-18');
+      assert.equal(tradeLink().target, '_blank');
+      return [0,1].map(i => [url.searchParams.get(`instruments[${i}][0]`), url.searchParams.get(`instruments[${i}][1]`)]);
+    };
+    assert.deepEqual(linkedLegs(), [['BTC-C80','1'], [null,null]], 'single option links only its buy leg');
     const strikeLine = root.querySelector('.reference.strike');
     const strikeLabel = root.querySelector('.direct.strike');
     const spotLabel = root.querySelector('.direct.spot');
-    assert.equal(Number(strikeLabel.getAttribute('y')) + 4, Number(strikeLine.getAttribute('y1')), 'strike label is anchored to its actual price line');
+    assert.equal(Number(strikeLabel.getAttribute('y')), Number(strikeLine.getAttribute('y1')), 'strike label is anchored to its actual price line');
     assert.equal(strikeLabel.getAttribute('y'), spotLabel.getAttribute('y'), 'equal strike and spot prices use exactly the same y-coordinate');
     const wickYs = () => [...root.querySelectorAll('.candle > line')]
       .flatMap(line => [Number(line.getAttribute('y1')), Number(line.getAttribute('y2'))]);
@@ -75,14 +85,23 @@ test('automatic refresh keeps fresh trades visible and dragging works while quot
     assert.ok(root.querySelector('.chart-meta #expiry'), 'expiry sits in the chart toolbar');
     assert.equal(root.querySelector('.header #expiry'), null);
     const bodies = root.querySelectorAll('.candle > rect:not(.hitbox)');
-    assert.ok(Math.abs(Number(bodies[bodies.length-1].getAttribute('y')) - (Number(spotLabel.getAttribute('y')) + 4)) < 1,
+    assert.ok(Math.abs(Number(bodies[bodies.length-1].getAttribute('y')) - Number(spotLabel.getAttribute('y'))) < 1,
       'the latest displayed candle closes at the spot-label price');
     const initialFrequency = root.querySelectorAll('.metric strong')[3].textContent;
+    [...root.querySelectorAll('.ranges button')].find(button => button.textContent === '1Y').click();
+    await settle();
+    assert.match(root.querySelector('#candle-interval').textContent, /3-day candles/, '1Y defaults to three-day candles');
+    [...root.querySelectorAll('.ranges button')].find(button => button.textContent === '2Y').click();
+    await settle();
+    assert.match(root.querySelector('#candle-interval').textContent, /Weekly candles/, '2Y keeps weekly candles');
+    [...root.querySelectorAll('.ranges button')].find(button => button.textContent === '90D').click();
+    await settle();
     root.querySelector('#candle-interval').click();
     await settle();
     const twelveHour = [...window.document.querySelectorAll('[role="option"]')]
       .find(option => option.textContent.includes('12-hour candles'));
     assert.ok(twelveHour, 'the interval label opens the available candle intervals');
+    assert.ok([...window.document.querySelectorAll('[role="option"]')].some(option => option.textContent.includes('3-day candles')), 'three-day candles can also be selected manually');
     twelveHour.click();
     await settle();
     assert.match(root.querySelector('#candle-interval').textContent, /12-hour candles/);
@@ -149,6 +168,33 @@ test('automatic refresh keeps fresh trades visible and dragging works while quot
     await settle();
     assert.equal(strike(), '—', 'retained results are suppressed once they are actually stale');
     assert.match(root.querySelector('.notice').textContent, /Quotes expired/);
+    assert.equal(tradeLink(), null, 'stale trades cannot be sent to the builder');
+    state.empty = false;
+    state.spreads = true;
+    t.mock.timers.tick(61000);
+    await settle();
+    assert.match(root.querySelector('.metric-label').textContent, /Best call spread/);
+    assert.match(strike(), /\$80,000 \/ \$85,000/);
+    assert.deepEqual(linkedLegs(), [['BTC-C80','1'], ['BTC-C85','-1']], 'call spread links the exact long and short');
+    assert.match(root.querySelector('.metric .detail').textContent, /Buy \/ sell · debit/);
+    assert.ok(root.querySelector('.reference.shortStrike'), 'both legs are drawn on the shared chart scale');
+    assert.match(root.querySelector('.direct.shortStrike').textContent, /Sell/);
+    const contextLabels = [...root.querySelectorAll('.direct:not(.target)')];
+    const labelYs = contextLabels.map(label => Number(label.getAttribute('y'))).sort((a,b)=>a-b);
+    for (let i=1;i<labelYs.length;i++) assert.ok(labelYs[i]-labelYs[i-1]>=24-1e-8, 'context labels have a readable minimum gap');
+    const targetLabelY = Number(root.querySelector('.direct.target').getAttribute('y'));
+    assert.equal(targetLabelY, Number(root.querySelector('.target-line').getAttribute('y1')), 'target remains pinned to its real price');
+    for (const labelY of labelYs) assert.ok(Math.abs(labelY-targetLabelY)>=24-1e-8, 'context labels clear the target');
+    slider.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+    await settle();
+    assert.match(root.querySelector('.metric-label').textContent, /Best put spread/);
+    assert.deepEqual(linkedLegs(), [['BTC-P80','1'], ['BTC-P798','-1']], 'dragging below spot updates the builder to the winning put spread');
+    const closeSpot = Number(root.querySelector('.direct.spot').getAttribute('y'));
+    const closeSell = Number(root.querySelector('.direct.shortStrike').getAttribute('y'));
+    assert.ok(Math.abs(closeSpot-closeSell)>=24-1e-8, 'nearby spot and sell labels keep the full minimum padding');
+    assert.equal(root.querySelector('.label-leader'), null, 'spaced labels have no callout lines');
+    assert.notEqual(strike(), '—');
+
   } finally {
     app?.unmount();
     t.mock.timers.reset();

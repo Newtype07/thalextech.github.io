@@ -4,6 +4,7 @@ const APP_ORDER = [
   "Simulator",
   "Combo PnL",
   "Straddle",
+  "Target",
   "Payoff",
   "Greeks",
   "Option PnL",
