@@ -25,3 +25,6 @@ node_modules
 # Shared historical calibration profiles are rebuilt from tracked index Parquet.
 /apps/simulator/public/calibration/
 /apps/term-structure/public/calibration/
+
+# Target candles are generated from the tracked BTC Parquet history.
+/apps/target/public/history/
