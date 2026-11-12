@@ -102,7 +102,7 @@ test('automatic refresh keeps fresh trades visible and dragging works while quot
     const target = Number(slider.getAttribute('aria-valuenow'));
     slider.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
     await settle();
-    assert.equal(Number(slider.getAttribute('aria-valuenow')), target+100);
+    assert.equal(Number(slider.getAttribute('aria-valuenow')), target+5);
     assert.equal(strike(), '$80,000', 'target changes still rank the retained fresh chain');
     // Pointer input uses the actual SVG-to-price conversion and keeps tracking
     // after the pointer moves beyond the initial line hit area.
@@ -116,6 +116,7 @@ test('automatic refresh keeps fresh trades visible and dragging works while quot
     slider.dispatchEvent(new window.PointerEvent('pointerup', { pointerId: 1, bubbles: true }));
     await settle();
     assert.ok(Number(slider.getAttribute('aria-valuenow')) <= Number(slider.getAttribute('aria-valuemax')));
+    assert.equal(Number(slider.getAttribute('aria-valuenow')) % 5, 0, 'pointer dragging snaps to five-dollar ticks');
     assert.deepEqual(wickYs(), originalWicks, 'moving the target never compresses the candle scale');
     assert.notEqual(strike(), '—', 'pointer dragging keeps selecting a trade during refresh');
     const expectedStrike = strike();

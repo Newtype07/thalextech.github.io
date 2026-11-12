@@ -5,6 +5,7 @@ import { aggregateCandles } from './target-trade.js';
 import StyledSelectMenu from '../../../lib/components/StyledSelectMenu.vue';
 const props=defineProps({candles:{type:Array,default:()=>[]},spot:Number,target:Number,expiry:Number,now:Number,strike:Number});
 const emit = defineEmits(['update:target']);
+const TARGET_TICK = 5;
 const range=ref(90),hover=ref(null),dragging=ref(false);
 let dragScale, dragOffset = 0;
 // Keep the price scale independent of the target and selected strike, so neither
@@ -63,8 +64,8 @@ const labels = computed(() => references.value.map(reference => ({
 
 const targetLabel = computed(() => labels.value.find(r => r.kind === 'target'));
 const targetX = computed(() => props.expiry ? xpos(props.expiry) : 1320);
-const targetMin = computed(() => Math.max(1, Math.ceil(y.value.domain()[0])));
-const targetMax = computed(() => Math.floor(y.value.domain()[1]));
+const targetMin = computed(() => Math.max(TARGET_TICK, Math.ceil(y.value.domain()[0] / TARGET_TICK) * TARGET_TICK));
+const targetMax = computed(() => Math.max(TARGET_TICK, Math.floor(y.value.domain()[1] / TARGET_TICK) * TARGET_TICK));
 function pointerY(event) {
   const svg = event.currentTarget.ownerSVGElement;
   const matrix = svg?.getScreenCTM();
@@ -75,7 +76,7 @@ function pointerY(event) {
   return point.matrixTransform(matrix.inverse()).y;
 }
 function updateTarget(value) {
-  emit('update:target', Math.round(Math.max(1, value)));
+  emit('update:target', Math.max(TARGET_TICK, Math.round(value / TARGET_TICK) * TARGET_TICK));
 }
 function startDrag(event) {
   if (event.button !== 0) return;
@@ -98,7 +99,7 @@ function endDrag() {
   dragging.value = false;
 }
 function keyTarget(event) {
-  const step = event.shiftKey ? 1000 : 100;
+  const step = event.shiftKey ? 100 : TARGET_TICK;
   const values = { ArrowUp: props.target + step, ArrowRight: props.target + step,
     ArrowDown: props.target - step, ArrowLeft: props.target - step,
     Home: targetMin.value, End: targetMax.value };
@@ -132,7 +133,7 @@ function keyTarget(event) {
     </g>
   </svg></div>
   <div v-else class="chart-empty">Loading observed BTC candles…</div>
-  <div class="chart-foot muted"><span>White: up · grey: down · <span id="target-help">Drag the target line or its price label · arrow keys adjust $100</span></span><span v-if="candles.length">Latest candle in progress</span></div>
+  <div class="chart-foot muted"><span>White: up · grey: down · <span id="target-help">Drag the target line or its price label · arrow keys adjust $5</span></span><span v-if="candles.length">Latest candle in progress</span></div>
 </section>
 </template>
 <style scoped>

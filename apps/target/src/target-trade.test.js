@@ -68,3 +68,21 @@ test('switches sides strictly below spot and ranks puts by strike minus target',
   assert.ok(ranked.every(option => option.side === 'put'));
   assert.deepEqual(rankOptions(options, 80, NaN), []);
 });
+test('touch counts intrahorizon highs and lows even when the terminal close misses', () => {
+  const up = [[0,100,150,90,100],[3600,100,115,98,101],[7200,101,105,99,100]];
+  const h = historicalFrequency(up,.1,7200);
+  assert.equal(h.total,1);
+  assert.equal(h.hits,0);
+  assert.equal(h.touchHits,1);
+  assert.equal(h.touchFrequency,1);
+  const down = [[0,100,110,50,100],[3600,100,102,85,99],[7200,99,101,95,100]];
+  assert.equal(historicalFrequency(down,-.1,7200).touchHits,1);
+});
+test('touch excludes pre-entry highs/lows and windows with missing hours', () => {
+  const rows = [[0,100,150,50,100],[3600,100,105,95,100],[7200,100,105,95,100]];
+  assert.equal(historicalFrequency(rows,.1,7200).touchHits,0);
+  assert.equal(historicalFrequency(rows,-.1,7200).touchHits,0);
+  assert.equal(historicalFrequency([rows[0],rows[2]],.1,7200).touchFrequency,null);
+  assert.equal(historicalFrequency(rows,0,7200).touchFrequency,1);
+  assert.equal(historicalFrequency([rows[0]],.1,7200).touchFrequency,null);
+});
