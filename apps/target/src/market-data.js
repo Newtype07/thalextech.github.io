@@ -1,4 +1,5 @@
 import { requestThalex as request } from '../../../lib/thalex-rest.js';
+import { nearSpotOptions, normalizeQuote, streamQuoteSnapshot } from './quote-snapshot.js';
 // The endpoint returns completed bars and may truncate a response to count.
 // Page backward to the archive boundary; never interpolate missing hours.
 export async function loadHourlyTail(from, to, signal, requestImpl = request) {
@@ -25,7 +26,7 @@ export async function loadMarket(signal, { from = Date.now()/1000 - 7*86400 } = 
   const to = Math.floor(Date.now()/1000), hour = Math.floor(to/3600)*3600;
   const [instruments, hourly, minuteResult] = await Promise.all([
     request('instruments', {}, signal),
-    loadHourlyTail(from, to, signal),
+    Promise.resolve(from).then(start => loadHourlyTail(start ?? to - 7*86400, to, signal)),
     request('index_price_historical_data', {
       index_name: 'BTCUSD', resolution: '1m', from: hour, to, count: 60,
     }, signal),
@@ -43,16 +44,41 @@ export async function loadMarket(signal, { from = Date.now()/1000 - 7*86400 } = 
       && ['call','put'].includes(i.option_type) && i.expiration_timestamp>now)
       .map(i=>({name:i.instrument_name,strike:i.strike_price,expiry:i.expiration_timestamp,side:i.option_type})) };
 }
-export async function loadPremiums(options, signal, onProgress=()=>{}) {
-  let done=0;
-  const results=await Promise.allSettled(options.map(async option=> {
-    const ticker=await request('ticker',{instrument_name:option.name},signal);
-    if (!Number.isFinite(ticker.mark_timestamp) || Math.abs(Date.now()/1000-ticker.mark_timestamp)>120) throw new Error('Stale quote');
-    onProgress(++done,options.length);
-    return {...option,premium:ticker.best_ask_price,amount:ticker.best_ask_amount ?? 0,bid:ticker.best_bid_price,bidAmount:ticker.best_bid_amount ?? 0,ts:ticker.mark_timestamp};
+export async function loadPremiums(options, signal, onProgress=()=>{}, {requestImpl=request, onQuotes=()=>{}, ...streamOptions}={}) {
+  const priority = nearSpotOptions(options, streamOptions.spot);
+  const executable = quote => (Number.isFinite(quote.premium)&&quote.premium>0&&quote.amount>0)
+    || (Number.isFinite(quote.bid)&&quote.bid>0&&quote.bidAmount>0);
+  const publish = (quotes, received) => {
+    if (priority.every(option => received.has(option.name))) {
+      const available = quotes.filter(executable);
+      onQuotes({quotes:available, excluded:received.size-available.length,
+        loaded:received.size, total:options.length});
+    }
+  };
+  const streamed = await streamQuoteSnapshot(options, signal, onProgress, {...streamOptions, onQuotes:publish});
+  const accumulated = new Map(streamed.quotes.map(quote => [quote.name, quote]));
+  const received = new Set(streamed.received);
+  let done=streamed.received.size;
+  const priorityNames = new Set(priority.map(option => option.name));
+  const missing = options.filter(option => !received.has(option.name))
+    .sort((a,b) => Number(priorityNames.has(b.name))-Number(priorityNames.has(a.name))
+      || Math.abs(a.strike-streamOptions.spot)-Math.abs(b.strike-streamOptions.spot));
+  // Bound fallback work so wings cannot occupy the request queue ahead of ATM quotes.
+  let next=0;
+  await Promise.all(Array.from({length:Math.min(4,missing.length)}, async () => {
+    while (next < missing.length) {
+      signal.throwIfAborted();
+      const option=missing[next++];
+      try {
+        const ticker=await requestImpl('ticker',{instrument_name:option.name},signal);
+        accumulated.set(option.name,normalizeQuote(option,ticker));
+      } catch { signal.throwIfAborted(); }
+      received.add(option.name);
+      onProgress(++done,options.length);
+      publish([...accumulated.values()],received);
+    }
   }));
   signal.throwIfAborted();
-  const available=results.filter(r=>r.status==='fulfilled').map(r=>r.value).filter(c=>(Number.isFinite(c.premium)&&c.premium>0&&c.amount>0)
-    || (Number.isFinite(c.bid)&&c.bid>0&&c.bidAmount>0));
+  const available=[...accumulated.values()].filter(executable);
   return {quotes:available,excluded:options.length-available.length};
 }

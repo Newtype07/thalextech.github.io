@@ -21,14 +21,20 @@ test('automatic refresh keeps fresh trades visible and dragging works while quot
     const adapter = resolve(directory, 'market.mjs');
     await writeFile(adapter, `
       const expiry = ${now/1000} + 7*86400;
-      export const state = { requests: 0, hold: false, empty: false, spreads: false, release: null };
+      export const state = { requests: 0, hold: false, empty: false, spreads: false, release: null, initialHold: true, releaseInitial: null };
       const options = [{ name: 'BTC-C80', side: 'call', strike: 80000, expiry }, { name: 'BTC-C85', side: 'call', strike: 85000, expiry }, { name: 'BTC-P80', side: 'put', strike: 80000, expiry }, { name: 'BTC-P798', side: 'put', strike: 79800, expiry }];
-      export async function loadMarket() { state.requests++; return { spot: 80000, options }; }
-      export async function loadPremiums() {
+      export async function loadMarket(signal, { from } = {}) { state.requests++; await from; return { spot: 80000, options }; }
+      export async function loadPremiums(signalOptions, signal, onProgress, {onQuotes} = {}) {
         if (state.hold) await new Promise(resolve => state.release = resolve);
         if (state.empty) return { quotes: [], excluded: options.length };
-        return { quotes: options.map((option, i) => ({ ...option, premium: [1000,400,1000,950][i],
+        const result = { quotes: options.map((option, i) => ({ ...option, premium: [1000,400,1000,950][i],
           amount: 1, bid: state.spreads ? [900,350,900,900][i] : null, bidAmount: 1, ts: Date.now()/1000 })), excluded: 0 };
+        if (state.initialHold) {
+          onProgress(2,4);
+          onQuotes({...result, quotes:result.quotes.filter(option => option.strike===80000), loaded:2, total:4});
+          await new Promise(resolve => state.releaseInitial = resolve);
+        }
+        return result;
       }
     `);
     const compiled = new Map();
@@ -48,9 +54,10 @@ test('automatic refresh keeps fresh trades visible and dragging works while quot
       await writeFile(output, content);
       return output;
     }
-    t.mock.method(globalThis, 'fetch', async () => ({ ok: true, json: async () => ({
+    let releaseHistory;
+    t.mock.method(globalThis, 'fetch', () => new Promise(resolve => { releaseHistory = () => resolve({ ok: true, json: async () => ({
       candles: Array.from({ length: 500 }, (_,i) => [now/1000-(500-i)*3600,80000,Math.max(81000,80000+i*10),79000,80000+i*10])
-    }) }));
+    }) }); }));
     const { createApp, nextTick } = await import('vue');
     const { state } = await import(pathToFileURL(adapter).href);
     const component = await import(pathToFileURL(await compile(fileURLToPath(new URL('./App.vue', import.meta.url)))).href);
@@ -60,8 +67,22 @@ test('automatic refresh keeps fresh trades visible and dragging works while quot
     app.mount(root);
     const settle = async () => { for (let i=0;i<12;i++) { await Promise.resolve(); await nextTick(); } };
     await settle();
+    assert.equal(state.requests, 1, 'market loading starts before the history download completes');
+    releaseHistory();
+    await settle();
     const strike = () => root.querySelector('.metric strong').textContent;
     assert.equal(strike(), '$80,000');
+    assert.match(root.querySelector('.notice').textContent, /Provisional result/);
+    const initialSlider = root.querySelector('[role="slider"]');
+    const initialTarget = Number(initialSlider.getAttribute('aria-valuenow'));
+    initialSlider.dispatchEvent(new window.KeyboardEvent('keydown', {key:'ArrowUp', bubbles:true}));
+    await settle();
+    assert.equal(Number(initialSlider.getAttribute('aria-valuenow')), initialTarget+5, 'the first ATM snapshot is interactive before wing quotes finish');
+    state.initialHold = false;
+    state.releaseInitial();
+    await settle();
+    assert.equal(Number(initialSlider.getAttribute('aria-valuenow')), initialTarget+5, 'background quotes preserve the user target');
+    assert.equal(root.querySelector('.notice'), null, 'completion removes the provisional message');
     const tradeLink = () => root.querySelector('.trade-thalex');
     const linkedLegs = () => {
       const url = new URL(tradeLink().href);

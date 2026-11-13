@@ -9,6 +9,7 @@ const target=ref(''),expiry=ref(''),market=ref(null),candles=ref([]),quotes=ref(
 const activeCandle = ref(null);
 const chartCandles = computed(() => activeCandle.value ? [...candles.value, activeCandle.value] : candles.value);
 const busy=ref(false),error=ref(''),historyError=ref(''),progress=ref(''),snapshot=ref(0),clock=ref(Date.now()/1000);
+const partialQuotes=ref(false);
 let controller, timer;
 let initialized = false;
 let requestedExpiry = 0, lastRefreshAttempt = 0;
@@ -57,41 +58,50 @@ const unavailableReason = computed(() => {
     return `Target must be below ${money(Math.max(...strikes))} for a put payout`;
   return `No fresh executable ${side.value} asks`;
 });
-async function refresh() {
+async function refresh({ historyReady } = {}) {
   controller?.abort();
   const current = controller = new AbortController();
   requestedExpiry = Number(expiry.value);
   lastRefreshAttempt = Date.now() / 1000;
   busy.value = true;
+  partialQuotes.value = false;
   error.value = '';
   progress.value = 'Loading market…';
   try {
-    const result = await loadMarket(current.signal, { from: candles.value.at(-1)?.[0] });
+    const result = await loadMarket(current.signal, { from: historyReady ?? candles.value.at(-1)?.[0] });
     const fetchedAt = result.asOf ?? Date.now() / 1000;
     const available = [...new Set(result.options.map(call => call.expiry))].sort((a,b) => a-b);
     const selected = requestedExpiry = available.includes(Number(expiry.value))
       ? Number(expiry.value)
       : defaultExpiry(available, fetchedAt);
+    const prices = mergePriceHistory(candles.value, result.hourly ?? [], result.minutes ?? [], result.spot, fetchedAt);
+    function commitQuotes(premiums) {
+      if (current.signal.aborted) return;
+      candles.value = prices.completed;
+      activeCandle.value = prices.active;
+      market.value = result;
+      historyError.value = '';
+      snapshot.value = fetchedAt;
+      clock.value = Date.now() / 1000;
+      quotes.value = premiums.quotes;
+      excluded.value = premiums.excluded;
+      expiry.value = selected ? String(selected) : '';
+      if (!target.value) target.value = String(Math.round(result.spot * 1.1 / 1000) * 1000);
+    }
     const premiums = await loadPremiums(result.options.filter(call => call.expiry === selected),
       current.signal, (done, total) => {
         if (!current.signal.aborted) progress.value = `Pricing options · ${done}/${total}`;
+      }, {spot:result.spot, onQuotes:partial => {
+        if (current.signal.aborted || (!partial.quotes.length && quotes.value.length)) return;
+        commitQuotes(partial);
+        partialQuotes.value = partial.loaded < partial.total;
+      }
       });
     if (current.signal.aborted) return;
     if (!premiums.quotes.length && selected === Number(expiry.value) && quotes.value.length)
       throw new Error('Could not refresh executable asks. Retrying automatically.');
-    // Commit spot and the entire expiry chain together. Existing fresh quotes
-    // remain usable while their replacement is in flight.
-    const prices = mergePriceHistory(candles.value, result.hourly ?? [], result.minutes ?? [], result.spot, fetchedAt);
-    candles.value = prices.completed;
-    activeCandle.value = prices.active;
-    market.value = result;
-    historyError.value = '';
-    snapshot.value = fetchedAt;
-    clock.value = Date.now() / 1000;
-    quotes.value = premiums.quotes;
-    excluded.value = premiums.excluded;
-    expiry.value = selected ? String(selected) : '';
-    if (!target.value) target.value = String(Math.round(result.spot * 1.1 / 1000) * 1000);
+    commitQuotes(premiums);
+    partialQuotes.value = false;
     if (!premiums.quotes.length) error.value = 'No fresh, executable option asks for this expiry. Try another expiry.';
   } catch (error_) {
     if (!current.signal.aborted) error.value = error_.message;
@@ -111,7 +121,7 @@ function resume() {
   if (document.visibilityState === 'visible') tick();
 }
 onMounted(() => {
-  fetch(`${import.meta.env.BASE_URL}history/btc.json`)
+  const historyReady = fetch(`${import.meta.env.BASE_URL}history/btc.json`)
     .then(response => {
       if (!response.ok) throw new Error('BTC history could not be loaded.');
       return response.json();
@@ -119,7 +129,10 @@ onMounted(() => {
     .then(data => {
       if (!Array.isArray(data.candles) || !data.candles.length) throw new Error('No observed BTC history.');
       candles.value = data.candles;
-    }).catch(error_ => historyError.value = error_.message).finally(() => { initialized = true; refresh(); });
+      return data.candles.at(-1)[0];
+    }).catch(error_ => { historyError.value = error_.message; });
+  initialized = true;
+  refresh({ historyReady });
   timer = setInterval(tick, 1000);
   document.addEventListener('visibilitychange', resume);
 });
@@ -131,10 +144,11 @@ onUnmounted(() => {
 </script>
 <template>
 <main class="app">
-  <header class="header"><div class="title-row"><div class="identity"><a href="/" aria-label="Thalex apps">THALEX</a><a v-if="thalexUrl" class="trade-thalex" :href="thalexUrl" target="_blank" rel="noopener noreferrer">Trade on Thalex →</a></div><div class="status muted">{{busy?'Connecting to Thalex…':snapshot?`Snapshot ${date(snapshot)} UTC`:'BTCUSD'}} <button class="refresh" :disabled="busy" @click="refresh">Refresh ↻</button></div></div>
+  <header class="header"><div class="title-row"><div class="identity"><a href="/" aria-label="Thalex apps">THALEX</a><a v-if="thalexUrl" class="trade-thalex" :href="thalexUrl" target="_blank" rel="noopener noreferrer">Trade on Thalex →</a></div><div class="status muted">{{snapshot?`Snapshot ${date(snapshot)} UTC`:busy?'Connecting to Thalex…':'BTCUSD'}} <button class="refresh" :disabled="busy" @click="refresh">Refresh ↻</button></div></div>
 
   </header>
   <p v-if="error||historyError" class="error" role="alert">{{error||historyError}}</p>
+  <p v-if="partialQuotes" class="notice" role="status">Provisional result · {{progress}}. The best trade may change as more strikes arrive.</p>
   <p v-if="stale&&snapshot&&!busy" class="notice" role="status">Quotes expired. Reconnecting automatically; you can also retry with Refresh.</p>
   <p v-if="!validTarget&&!busy" class="notice">Drag the target line to set your level.</p>
   <p v-if="snapshot&&!validExpiry&&!busy" class="notice">Select a future listed expiry.</p>
