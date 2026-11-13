@@ -9,6 +9,7 @@ const props = defineProps({
   subtitle: { type: String, default: "" },
   loading: { type: Boolean, default: false },
   greek: { type: String, default: "delta" },
+  asset: { type: String, default: "BTC" },
 });
 
 const svgRef = ref(null);
@@ -235,8 +236,10 @@ const render = () => {
     .call(d3.axisLeft(y).ticks(4).tickSize(0).tickPadding(16))
     .call(axisStyle);
 
-  const xLabel = "BTC Price";
-  const yLabel = greekKey === "gamma" ? `${greekKey} [x10^4]` : greekKey;
+  const xLabel = `${props.asset} Price`;
+  const yLabel = greekKey === "delta"
+    ? `Delta (${props.asset})`
+    : greekKey === "gamma" ? `${greekKey} [x10^4]` : greekKey;
 
   applyTextStyle(
     svg
@@ -482,7 +485,7 @@ const render = () => {
 };
 
 watch(
-  () => [props.data, props.title, props.subtitle, props.loading, props.greek],
+  () => [props.data, props.title, props.subtitle, props.loading, props.greek, props.asset],
   () => render(),
   { deep: false },
 );

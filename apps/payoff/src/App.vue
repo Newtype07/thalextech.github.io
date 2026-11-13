@@ -34,7 +34,7 @@ const CHART_OPTIONS = [
 ];
 
 const LEG_COLOR_PALETTE = [
-  "#22d3ee",
+  "#00bf8c",
   "#f43f5e",
   "#60a5fa",
   "#f59e0b",
@@ -1340,6 +1340,7 @@ onUnmounted(() => {
           subtitle=""
           :loading="chartLoading"
           :greek="ui.chart"
+          :asset="underlying === 'ETHUSD' ? 'ETH' : 'BTC'"
         />
       </div>
     </main>
